@@ -1,0 +1,124 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+
+def codex_final_report_schema(kind: str = "implementation") -> dict[str, Any]:
+    status_values = [
+        "planned",
+        "implemented",
+        "reviewed",
+        "approved",
+        "needs_changes",
+        "partial",
+        "blocked",
+        "no_changes_needed",
+    ]
+    return {
+        "type": "object",
+        "properties": {
+            "status": {"type": "string", "enum": status_values},
+            "summary": {"type": "string"},
+            "files_modified": {"type": "array", "items": {"type": "string"}},
+            "commands_run": {"type": "array", "items": {"type": "string"}},
+            "tests_run": {"type": "array", "items": {"type": "string"}},
+            "verification_needed": {"type": "array", "items": {"type": "string"}},
+            "risks": {"type": "array", "items": {"type": "string"}},
+            "follow_up": {"type": "array", "items": {"type": "string"}},
+            "decisions": {
+                "type": "object",
+                "additionalProperties": {"type": "string"},
+            },
+            "constraints": {"type": "array", "items": {"type": "string"}},
+            "assumptions": {"type": "array", "items": {"type": "string"}},
+            "alternatives_rejected": {"type": "array", "items": {"type": "string"}},
+            "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
+            "blockers": {"type": "array", "items": {"type": "string"}},
+            "review_decision": {
+                "type": "string",
+                "enum": ["approved", "changes_required", "inconclusive", "not_applicable"],
+            },
+        },
+        "required": [
+            "status",
+            "summary",
+            "files_modified",
+            "commands_run",
+            "tests_run",
+            "verification_needed",
+            "risks",
+            "follow_up",
+        ],
+        "additionalProperties": False,
+        "x-baldr-router-kind": kind,
+    }
+
+
+def write_schema(path: Path, *, kind: str = "implementation") -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(codex_final_report_schema(kind), indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return path
+
+
+def validate_final_report(value: Any, *, kind: str = "implementation") -> tuple[bool, list[str]]:
+    """Validate the stable short-report contract without requiring jsonschema."""
+    schema = codex_final_report_schema(kind)
+    errors: list[str] = []
+    if not isinstance(value, dict):
+        return False, ["final report must be a JSON object"]
+    required = schema["required"]
+    for key in required:
+        if key not in value:
+            errors.append(f"missing required key: {key}")
+    allowed = set(schema["properties"])
+    extras = sorted(set(value) - allowed)
+    if extras:
+        errors.append(f"unexpected keys: {', '.join(extras)}")
+    status = value.get("status")
+    allowed_status = set(schema["properties"]["status"]["enum"]
+    )
+    if status not in allowed_status:
+        errors.append(f"invalid status: {status!r}")
+    if not isinstance(value.get("summary"), str):
+        errors.append("summary must be a string")
+    for key in (
+        "files_modified",
+        "commands_run",
+        "tests_run",
+        "verification_needed",
+        "risks",
+        "follow_up",
+    ):
+        item = value.get(key)
+        if not isinstance(item, list) or not all(isinstance(entry, str) for entry in item):
+            errors.append(f"{key} must be an array of strings")
+    decisions = value.get("decisions")
+    if decisions is not None and (
+        not isinstance(decisions, dict)
+        or not all(isinstance(key, str) and isinstance(entry, str) for key, entry in decisions.items())
+    ):
+        errors.append("decisions must be an object of string values")
+    for key in (
+        "constraints",
+        "assumptions",
+        "alternatives_rejected",
+        "acceptance_criteria",
+        "blockers",
+    ):
+        item = value.get(key)
+        if item is not None and (
+            not isinstance(item, list)
+            or not all(isinstance(entry, str) for entry in item)
+        ):
+            errors.append(f"{key} must be an array of strings")
+    review_decision = value.get("review_decision")
+    if review_decision is not None and review_decision not in {
+        "approved", "changes_required", "inconclusive", "not_applicable"
+    }:
+        errors.append(f"invalid review_decision: {review_decision!r}")
+    return not errors, errors

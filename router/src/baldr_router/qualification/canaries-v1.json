@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "repositories": {
+    "repository-a": {
+      "language": "project-dependent",
+      "tasks": [
+        {
+          "id": "normal-change",
+          "task": "Complete a normal bounded code change and verify the structured report."
+        },
+        {
+          "id": "tested-change",
+          "task": "Complete a change with relevant tests and verify the reported commands exist."
+        },
+        {
+          "id": "cancel-during-implementation",
+          "task": "Cancel during implementation and verify durable cancellation with zero orphan processes."
+        },
+        {
+          "id": "recover-read-only-step",
+          "task": "Crash and recover a read-only phase without duplicating a completed effect."
+        },
+        {
+          "id": "reconcile-write-unknown",
+          "task": "Reconcile a write phase left in unknown state without a blind retry."
+        }
+      ]
+    },
+    "repository-b": {
+      "language": "project-dependent",
+      "tasks": [
+        {
+          "id": "publication-conflict",
+          "task": "Create a Git publication conflict and verify Baldr blocks or reconciles it safely."
+        },
+        {
+          "id": "upgrade-preserves-state",
+          "task": "Upgrade Baldr and verify configuration, SQLite state, and rollback availability."
+        },
+        {
+          "id": "session-reuse",
+          "task": "Reuse a compatible provider session and invalidate an incompatible session."
+        },
+        {
+          "id": "lease-fencing",
+          "task": "Run competing workers and verify the stale lease holder cannot persist results."
+        },
+        {
+          "id": "secret-redaction",
+          "task": "Complete a run and verify secrets are absent from logs, telemetry, and evidence."
+        }
+      ]
+    }
+  },
+  "invariants": [
+    "structured_output_valid",
+    "workspace_boundary_respected",
+    "reported_tests_exist",
+    "no_orphan_processes",
+    "evidence_integrity",
+    "no_secret_leak"
+  ]
+}

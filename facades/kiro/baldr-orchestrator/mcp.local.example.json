@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "baldr-router": {
+      "command": "node",
+      "args": [
+        "/ABSOLUTE/PATH/TO/baldr-router/launcher/bin/baldr-router-launcher.mjs",
+        "mcp"
+      ],
+      "disabled": false,
+      "autoApprove": [],
+      "env": {
+        "BALDR_CLIENT_ID": "kiro-power",
+        "BALDR_CLIENT_VERSION": "0.16.1"
+      }
+    }
+  }
+}

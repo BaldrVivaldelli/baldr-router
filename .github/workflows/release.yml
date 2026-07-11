@@ -1,0 +1,58 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v0.16.*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+  artifact-metadata: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: facades/vscode-extension/package-lock.json
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+        working-directory: facades/vscode-extension
+      - run: python scripts/dev.py build
+      - run: python scripts/dev.py verify-release
+      - name: Attest release artifacts
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            dist/artifacts/*
+            dist/baldr-router-*-source.zip
+            dist/baldr-router-*-artifacts.zip
+            dist/baldr-router-*-validation-evidence.zip
+      - name: Attest SBOM
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/baldr-router-*-artifacts.zip
+          sbom-path: dist/metadata/SBOM.spdx.json
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/baldr-router-*-source.zip
+            dist/baldr-router-*-artifacts.zip
+            dist/baldr-router-*-validation-evidence.zip
+            dist/artifacts/*
+            dist/SHA256SUMS.txt
+            dist/release-manifest.json
+            dist/metadata/*

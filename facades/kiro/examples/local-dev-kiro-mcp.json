@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "baldr-router": {
+      "command": "node",
+      "args": [
+        "/ABSOLUTE/PATH/TO/baldr-router/launcher/bin/baldr-router-launcher.mjs",
+        "mcp"
+      ],
+      "disabled": false,
+      "autoApprove": []
+    }
+  }
+}

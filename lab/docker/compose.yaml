@@ -1,0 +1,9 @@
+services:
+  baldr-lab:
+    build:
+      context: ../..
+      dockerfile: lab/docker/Dockerfile
+    volumes:
+      - baldr-lab-state:/state
+volumes:
+  baldr-lab-state:

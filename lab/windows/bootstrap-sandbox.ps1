@@ -1,0 +1,5 @@
+$ErrorActionPreference = 'Stop'
+Write-Host 'Baldr clean Windows sandbox started.'
+Write-Host 'Install Python 3.11+ or the VSIX prerequisites, then install the artifact from C:\BaldrRouter\dist.'
+Write-Host 'This profile validates clean-host bootstrap only. Use the Windows VM runbook for WSL.'
+Start-Process explorer.exe 'C:\BaldrRouter\dist'

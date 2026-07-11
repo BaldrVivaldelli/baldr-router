@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://baldr.dev/contracts/facade-v1.schema.json",
+  "title": "Baldr facade contract",
+  "type": "object",
+  "required": ["contract", "version", "product", "commandPalette", "intents", "facadeRules"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "contract": { "const": "baldr-facade" },
+    "version": { "const": "1.0.0" },
+    "product": { "const": "baldr-router" },
+    "description": { "type": "string", "minLength": 1 },
+    "commandPalette": {
+      "type": "object",
+      "required": ["primary", "maximumVisibleCommands"],
+      "properties": {
+        "primary": { "const": "Baldr: Open" },
+        "maximumVisibleCommands": { "const": 1 }
+      },
+      "additionalProperties": false
+    },
+    "intents": {
+      "type": "object",
+      "required": ["setup", "status", "run"],
+      "properties": {
+        "setup": { "$ref": "#/$defs/intent" },
+        "status": { "$ref": "#/$defs/intent" },
+        "run": { "$ref": "#/$defs/intent" }
+      },
+      "additionalProperties": false
+    },
+    "facadeRules": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    }
+  },
+  "$defs": {
+    "intent": {
+      "type": "object",
+      "required": ["title", "description", "requiresWorkspace", "requiresTask", "mcpPrompt", "cli", "aliases", "instruction"],
+      "properties": {
+        "title": { "type": "string", "minLength": 1 },
+        "description": { "type": "string", "minLength": 1 },
+        "requiresWorkspace": { "type": "boolean" },
+        "requiresTask": { "type": "boolean" },
+        "mcpPrompt": { "type": "string", "enum": ["setup", "status", "run"] },
+        "cli": {
+          "type": "array",
+          "minItems": 2,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "aliases": {
+          "type": "object",
+          "required": ["vscodeParticipant", "vscodeAgentPlugin", "kiro"],
+          "additionalProperties": { "type": "string" }
+        },
+        "instruction": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

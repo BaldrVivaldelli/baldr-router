@@ -1,0 +1,131 @@
+{
+  "schema_version": 1,
+  "common_assertions": [
+    "install.clean",
+    "mcp.handshake",
+    "workspace.untrusted_blocked",
+    "workspace.profile_bounded",
+    "execution.progress_ordered",
+    "cancellation.no_orphans",
+    "restart.recovery",
+    "upgrade.state_preserved",
+    "rollback.succeeded",
+    "uninstall.reinstall",
+    "secrets.clean",
+    "sqlite.local_filesystem",
+    "profiles.resolved",
+    "recovery.read_only",
+    "recovery.write_unknown",
+    "sessions.isolated",
+    "lease.fencing",
+    "idempotency.conflict",
+    "reconciliation.all_actions",
+    "sqlite.maintenance"
+  ],
+  "profiles": {
+    "vscode-windows-wsl": {
+      "title": "VS Code on Windows with automatic WSL bridge",
+      "client_family": "vscode",
+      "client_id_contains": "vscode-extension",
+      "expected_client_host": "windows",
+      "expected_router_platform": "Linux",
+      "expected_router_runtime": "wsl",
+      "requires_wsl": true,
+      "required_assertions": [
+        "vscode.extension_installed",
+        "vscode.mcp_visible",
+        "vscode.workspace_trust",
+        "wsl.auto_bridge_selected",
+        "vscode.cancel_from_ui"
+      ]
+    },
+    "vscode-remote-wsl": {
+      "title": "VS Code Remote WSL with direct Linux runtime",
+      "client_family": "vscode",
+      "client_id_contains": "vscode-extension",
+      "expected_client_host": "wsl",
+      "expected_router_platform": "Linux",
+      "expected_router_runtime": "host",
+      "requires_wsl": true,
+      "required_assertions": [
+        "vscode.extension_installed",
+        "vscode.mcp_visible",
+        "vscode.workspace_trust",
+        "wsl.direct_runtime_selected",
+        "vscode.cancel_from_ui"
+      ]
+    },
+    "vscode-linux-native": {
+      "title": "VS Code on native Linux",
+      "client_family": "vscode",
+      "client_id_contains": "vscode-extension",
+      "expected_client_host": "linux",
+      "expected_router_platform": "Linux",
+      "expected_router_runtime": "host",
+      "requires_wsl": false,
+      "required_assertions": [
+        "vscode.extension_installed",
+        "vscode.mcp_visible",
+        "vscode.workspace_trust",
+        "vscode.direct_runtime_selected",
+        "vscode.cancel_from_ui"
+      ]
+    },
+    "vscode-windows-native": {
+      "title": "VS Code on native Windows",
+      "client_family": "vscode",
+      "client_id_contains": "vscode-extension",
+      "expected_client_host": "windows",
+      "expected_router_platform": "Windows",
+      "expected_router_runtime": "host",
+      "requires_wsl": false,
+      "required_assertions": [
+        "vscode.extension_installed",
+        "vscode.mcp_visible",
+        "vscode.workspace_trust",
+        "vscode.direct_runtime_selected",
+        "vscode.cancel_from_ui"
+      ]
+    },
+    "vscode-macos-native": {
+      "title": "VS Code on native macOS",
+      "client_family": "vscode",
+      "client_id_contains": "vscode-extension",
+      "expected_client_host": "macos",
+      "expected_router_platform": "Darwin",
+      "expected_router_runtime": "host",
+      "requires_wsl": false,
+      "required_assertions": [
+        "vscode.extension_installed",
+        "vscode.mcp_visible",
+        "vscode.workspace_trust",
+        "vscode.direct_runtime_selected",
+        "vscode.cancel_from_ui"
+      ]
+    },
+    "kiro-windows-wsl": {
+      "title": "Kiro Power and adapter with Windows/WSL",
+      "client_family": "kiro",
+      "client_id_contains": "kiro",
+      "expected_client_host": "windows",
+      "expected_router_platform": "Linux",
+      "expected_router_runtime": "wsl",
+      "requires_wsl": true,
+      "required_assertions": [
+        "kiro.power_installed",
+        "kiro.adapter_loaded",
+        "kiro.mcp_connected",
+        "kiro.hook_idempotent",
+        "kiro.task_routed"
+      ]
+    }
+  },
+  "acceptance": {
+    "required_consecutive_passes": 3,
+    "required_repositories": 2,
+    "required_canary_tasks": 10,
+    "require_provider_smoke": true,
+    "require_zero_orphans": true,
+    "require_secret_scan": true
+  }
+}

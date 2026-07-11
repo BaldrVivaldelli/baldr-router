@@ -1,0 +1,9 @@
+# Managed-style Context7 config for Codex. Do not put the API key in this file.
+[mcp_servers.context7]
+command = "npx"
+args = ["-y", "@upstash/context7-mcp"]
+env_vars = ["CONTEXT7_API_KEY"]
+startup_timeout_sec = 40
+tool_timeout_sec = 60
+enabled = true
+default_tools_approval_mode = "prompt"

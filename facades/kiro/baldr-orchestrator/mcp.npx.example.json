@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "baldr-router": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@baldr/router-launcher",
+        "mcp"
+      ],
+      "disabled": false,
+      "autoApprove": [],
+      "env": {
+        "BALDR_CLIENT_ID": "kiro-power",
+        "BALDR_CLIENT_VERSION": "0.16.1"
+      }
+    }
+  }
+}

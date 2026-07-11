@@ -1,0 +1,21 @@
+{
+  "mcpServers": {
+    "baldr-router": {
+      "command": "wsl.exe",
+      "args": [
+        "-d",
+        "Ubuntu",
+        "--",
+        "bash",
+        "-lc",
+        "exec baldr-router mcp"
+      ],
+      "disabled": false,
+      "autoApprove": [],
+      "env": {
+        "BALDR_CLIENT_ID": "kiro-power",
+        "BALDR_CLIENT_VERSION": "0.16.1"
+      }
+    }
+  }
+}

@@ -1,0 +1,127 @@
+{
+  "name": "baldr-router-vscode",
+  "displayName": "Baldr Router",
+  "description": "One-click VS Code facade for the client-agnostic Baldr Router MCP orchestration runtime.",
+  "version": "0.16.1",
+  "publisher": "baldr",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.125.0"
+  },
+  "categories": [
+    "AI",
+    "Other"
+  ],
+  "keywords": [
+    "mcp",
+    "agents",
+    "orchestration",
+    "codex",
+    "kiro",
+    "context7"
+  ],
+  "main": "./dist/extension.js",
+  "extensionKind": [
+    "workspace",
+    "ui"
+  ],
+  "activationEvents": [
+    "onCommand:baldr.open",
+    "onChatParticipant:baldr.vscode",
+    "onMcpServerDefinitionProvider:baldr.router"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "baldr.open",
+        "title": "Baldr: Open",
+        "category": "Baldr"
+      }
+    ],
+    "chatParticipants": [
+      {
+        "id": "baldr.vscode",
+        "name": "baldr",
+        "fullName": "Baldr Router",
+        "description": "Run the shared Baldr setup, status, and orchestration intents from VS Code.",
+        "isSticky": true,
+        "commands": [
+          {
+            "name": "setup",
+            "description": "Prepare Baldr and optionally configure Context7 securely."
+          },
+          {
+            "name": "status",
+            "description": "Show compact runtime, provider, workflow, and recent-run status."
+          },
+          {
+            "name": "run",
+            "description": "Run the configured orchestration workflow for a task."
+          }
+        ],
+        "disambiguation": [
+          {
+            "category": "baldr-orchestration",
+            "description": "Use Baldr Router when the user explicitly asks to orchestrate architect, implementer, or reviewer agents through Baldr.",
+            "examples": [
+              "Use Baldr to implement this task",
+              "Run an architect and implementer workflow",
+              "Show Baldr status"
+            ]
+          }
+        ]
+      }
+    ],
+    "mcpServerDefinitionProviders": [
+      {
+        "id": "baldr.router",
+        "label": "Baldr Router"
+      }
+    ],
+    "configuration": {
+      "title": "Baldr Router",
+      "properties": {
+        "baldr.runtime.mode": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "host",
+            "wsl"
+          ],
+          "default": "auto",
+          "description": "Runtime discovery mode. Auto prefers the host and uses WSL only when needed."
+        },
+        "baldr.runtime.wslDistro": {
+          "type": "string",
+          "default": "",
+          "description": "Optional WSL distribution override. Leave empty for automatic detection."
+        },
+        "baldr.onboarding.openAfterInstall": {
+          "type": "boolean",
+          "default": true,
+          "description": "Offer the guided setup the first time the extension activates."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "clean": "node ./scripts/clean.mjs",
+    "generate": "python ../../scripts/generate_facades.py",
+    "compile": "tsc -p ./",
+    "check": "tsc -p ./ --noEmit",
+    "package": "npm run compile && vsce package --no-dependencies --allow-missing-repository",
+    "test": "npm run compile && node --test ./tests/*.test.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "@types/vscode": "^1.125.0",
+    "@vscode/vsce": "^3.9.2",
+    "typescript": "^5.8.3"
+  },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "Baldr executes local providers and modifies repositories only after VS Code Workspace Trust is granted."
+    }
+  }
+}

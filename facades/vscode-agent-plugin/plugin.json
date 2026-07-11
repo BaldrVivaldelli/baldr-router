@@ -1,0 +1,12 @@
+{
+  "name": "baldr-router",
+  "description": "Thin VS Code Agent Plugin facade for the client-agnostic Baldr Router MCP runtime.",
+  "version": "0.16.1",
+  "author": {
+    "name": "Baldr"
+  },
+  "license": "MIT",
+  "commands": "commands/",
+  "skills": "skills/",
+  "mcpServers": ".mcp.json"
+}

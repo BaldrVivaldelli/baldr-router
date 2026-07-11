@@ -1,0 +1,61 @@
+name: Real environment qualification
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Qualification profile id
+        required: true
+        type: choice
+        options:
+          - vscode-windows-wsl
+          - vscode-remote-wsl
+          - vscode-linux-native
+          - vscode-windows-native
+          - vscode-macos-native
+          - kiro-windows-wsl
+      workspace_root:
+        description: Trusted real Git workspace path on the runner
+        required: true
+        type: string
+      evidence_directory:
+        description: Directory containing client-assertions.json and canary-results.json
+        required: true
+        default: qualification-input
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    # Register a target machine as a self-hosted runner with the
+    # `baldr-qualification` label. UI-specific assertions are completed in the
+    # target client before this job evaluates the receipt.
+    runs-on: [self-hosted, baldr-qualification]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v6
+      - name: Run qualification
+        id: qualification
+        continue-on-error: true
+        run: >-
+          uv run --project router python scripts/run_qualification_ci.py
+          --profile "${{ inputs.profile }}"
+          --workspace-root "${{ inputs.workspace_root }}"
+          --evidence-directory "${{ inputs.evidence_directory }}"
+          --output-directory qualification-output
+          --repeat 3
+      - name: Upload qualification evidence
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: baldr-real-environment-qualification-${{ inputs.profile }}
+          path: qualification-output/**
+          if-no-files-found: warn
+      - name: Enforce qualified receipt
+        if: always() && steps.qualification.outcome != 'success'
+        run: python -c "raise SystemExit('Real-environment qualification did not reach qualified status. Inspect the uploaded receipt.')"

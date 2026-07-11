@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "baldr-router"
+version = "0.16.1"
+description = "Client-agnostic MCP orchestration runtime with a frozen setup/status/run facade contract, provider adapters, roles, workflows, Context7 cache, telemetry, and structured reports."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "Baldr" }]
+dependencies = [
+  "mcp>=1.10.0"
+]
+
+[project.scripts]
+baldr-router = "baldr_router.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/baldr_router"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/baldr_router/contracts/facade-v1.json" = "baldr_router/contracts/facade-v1.json"
+"src/baldr_router/contracts/facade-v1.schema.json" = "baldr_router/contracts/facade-v1.schema.json"
+"src/baldr_router/qualification/profiles-v1.json" = "baldr_router/qualification/profiles-v1.json"
+"src/baldr_router/qualification/canaries-v1.json" = "baldr_router/qualification/canaries-v1.json"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[project.optional-dependencies]
+codex-sdk = ["openai-codex"]
+dev = ["pytest>=8.0", "ruff>=0.9"]

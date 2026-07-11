@@ -1,0 +1,11 @@
+# Example: expose Baldr Router as an MCP server to Codex itself.
+# This is optional and distinct from using Codex as a provider behind Baldr Router.
+
+[mcp_servers.baldr-router]
+command = "baldr-router-launcher"
+args = ["mcp"]
+env = { BALDR_CLIENT_ID = "codex-mcp", BALDR_CLIENT_VERSION = "0.16.1" }
+startup_timeout_sec = 40
+tool_timeout_sec = 120
+enabled = true
+default_tools_approval_mode = "prompt"

@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "requiredConsecutivePasses": 3,
+  "profiles": [
+    {
+      "id": "vscode-linux-native",
+      "required": true,
+      "automation": "container+vscode-extension-host",
+      "status": "automatable"
+    },
+    {
+      "id": "vscode-windows-wsl",
+      "required": true,
+      "automation": "windows-vm-snapshot",
+      "status": "real-environment-required"
+    },
+    {
+      "id": "vscode-remote-wsl",
+      "required": true,
+      "automation": "windows-vm-snapshot",
+      "status": "real-environment-required"
+    },
+    {
+      "id": "kiro-windows-wsl",
+      "required": true,
+      "automation": "windows-vm-snapshot",
+      "status": "real-environment-required"
+    }
+  ],
+  "scenarios": [
+    "clean-install",
+    "mcp-handshake",
+    "workspace-trust-and-profile",
+    "deterministic-execute",
+    "progress-stream",
+    "cancel-process-tree",
+    "crash-and-restart",
+    "upgrade",
+    "interrupted-upgrade-rollback",
+    "uninstall-reinstall-secret-scan"
+  ]
+}

@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            facades/vscode-extension/package-lock.json
+      - name: Install VS Code extension dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+        working-directory: facades/vscode-extension
+      - name: Test all components
+        run: python scripts/dev.py test
+      - name: Lint and contract conformance
+        run: python scripts/dev.py lint
+
+  release-hygiene:
+    name: Release hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: facades/vscode-extension/package-lock.json
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+        working-directory: facades/vscode-extension
+      - name: Build split release
+        run: python scripts/dev.py build
+      - name: Verify checksums, bundle hygiene, and portable reports
+        run: python scripts/dev.py verify-release
+      - name: Upload validation reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: baldr-ci-validation
+          path: |
+            dist/validation/**
+            dist/release-manifest.json
+            dist/SHA256SUMS.txt

@@ -1,0 +1,18 @@
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /router
+    schedule:
+      interval: weekly
+  - package-ecosystem: npm
+    directory: /facades/vscode-extension
+    schedule:
+      interval: weekly
+  - package-ecosystem: npm
+    directory: /launcher
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

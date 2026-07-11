@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "baldr-router": {
+      "command": "baldr-router-launcher",
+      "args": [
+        "mcp"
+      ],
+      "env": {
+        "BALDR_CLIENT_ID": "vscode-agent-plugin",
+        "BALDR_CLIENT_VERSION": "0.16.1"
+      }
+    }
+  }
+}
