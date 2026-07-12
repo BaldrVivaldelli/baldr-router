@@ -133,7 +133,7 @@
     "test": "npm run compile && node --test ./tests/*.test.mjs"
   },
   "devDependencies": {
-    "@types/node": "^22.15.0",
+    "@types/node": "^26.1.1",
     "@types/vscode": "^1.125.0",
     "@vscode/vsce": "^3.9.2",
     "typescript": "^5.8.3"
