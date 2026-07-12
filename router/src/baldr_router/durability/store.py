@@ -419,6 +419,7 @@ class DurableStore:
         recovery_policy: str = "safe",
         request_fingerprint: str | None = None,
         repository_identity: dict[str, Any] | None = None,
+        work_item_id: str | None = None,
     ) -> tuple[dict[str, Any], bool]:
         now = utc_now_iso()
         with self.transaction(immediate=True) as connection:
@@ -439,9 +440,9 @@ class DurableStore:
                     id, idempotency_key, request_fingerprint, resume_token,
                     workflow_name, workflow_version, engine_version, status,
                     workspace_root, workspace_id, repository_identity_json, client_name,
-                    task_artifact_id, config_snapshot_json, recovery_policy,
+                    task_artifact_id, config_snapshot_json, recovery_policy, work_item_id,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run_id,
@@ -458,6 +459,7 @@ class DurableStore:
                     task_artifact_id,
                     _json(config_snapshot),
                     recovery_policy,
+                    work_item_id,
                     now,
                     now,
                 ),
@@ -496,6 +498,7 @@ class DurableStore:
         input_value: dict[str, Any],
         config_snapshot: dict[str, Any],
         recovery_policy: str = "safe",
+        work_item_id: str | None = None,
     ) -> tuple[dict[str, Any], bool]:
         """Atomically bind an idempotency key, private input artifact and run."""
         now = utc_now_iso()
@@ -525,9 +528,9 @@ class DurableStore:
                     id, idempotency_key, request_fingerprint, resume_token,
                     workflow_name, workflow_version, engine_version, status,
                     workspace_root, workspace_id, repository_identity_json, client_name,
-                    task_artifact_id, config_snapshot_json, recovery_policy,
+                    task_artifact_id, config_snapshot_json, recovery_policy, work_item_id,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run_id,
@@ -544,6 +547,7 @@ class DurableStore:
                     task_artifact_id,
                     _json(config_snapshot),
                     recovery_policy,
+                    work_item_id,
                     now,
                     now,
                 ),

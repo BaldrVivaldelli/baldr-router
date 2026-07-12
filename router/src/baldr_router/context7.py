@@ -382,24 +382,59 @@ def prepare_context7_bundle(
     workspace_root: str | Path,
     task_text: str,
     libraries: list[str] | None = None,
+    config_override: dict[str, Any] | None = None,
+    policy: str = "auto",
 ) -> dict[str, Any]:
-    cfg = load_config()
-    if not cfg.context7.enabled:
-        return {"enabled": False, "used": False, "reason": "Context7 is disabled."}
-    if not cfg.context7.inject_docs:
+    base = load_config().context7
+    settings = {
+        "enabled": base.enabled,
+        "inject_docs": base.inject_docs,
+        "mode": base.mode,
+        "api_key_source": base.api_key_source,
+        "max_libraries": base.max_libraries,
+        "max_chars": base.max_chars,
+        "fast": base.fast,
+    }
+    if config_override:
+        for key in tuple(settings):
+            if key in config_override:
+                settings[key] = config_override[key]
+    selected_policy = str(policy or "auto").strip().lower()
+    if selected_policy not in {"auto", "on", "off"}:
+        selected_policy = "auto"
+    if selected_policy == "off":
+        return {
+            "enabled": False,
+            "used": False,
+            "policy": selected_policy,
+            "reason": "Context7 is disabled for this work item.",
+        }
+    if selected_policy == "on":
+        settings["enabled"] = True
+        settings["inject_docs"] = True
+        if str(settings["mode"]) == "off":
+            settings["mode"] = "hybrid"
+    if not bool(settings["enabled"]):
+        return {
+            "enabled": False,
+            "used": False,
+            "policy": selected_policy,
+            "reason": "Context7 is disabled.",
+        }
+    if not bool(settings["inject_docs"]):
         return {
             "enabled": True,
             "used": False,
             "reason": "Context7 doc injection is disabled.",
         }
-    if cfg.context7.mode not in {"router-cache", "hybrid"}:
+    if str(settings["mode"]) not in {"router-cache", "hybrid"}:
         return {
             "enabled": True,
             "used": False,
-            "reason": f"Context7 mode is {cfg.context7.mode!r}; router-cache/hybrid is required for prefetch injection.",
+            "reason": f"Context7 mode is {settings['mode']!r}; router-cache/hybrid is required for prefetch injection.",
         }
 
-    api_key = read_context7_api_key(cfg.context7.api_key_source)
+    api_key = read_context7_api_key(str(settings["api_key_source"]))
     if not api_key:
         return {
             "enabled": True,
@@ -407,10 +442,11 @@ def prepare_context7_bundle(
             "reason": "Context7 API key is missing.",
         }
 
+    max_libraries = max(0, int(settings["max_libraries"]))
     selected = libraries or detect_workspace_libraries(
-        workspace_root, task_text, limit=cfg.context7.max_libraries
+        workspace_root, task_text, limit=max_libraries
     )
-    selected = selected[: cfg.context7.max_libraries]
+    selected = selected[:max_libraries]
     if not selected:
         return {
             "enabled": True,
@@ -420,11 +456,11 @@ def prepare_context7_bundle(
 
     results: list[dict[str, Any]] = []
     docs_parts: list[str] = []
-    remaining = cfg.context7.max_chars
+    remaining = max(0, int(settings["max_chars"]))
     for lib in selected:
         if remaining <= 500:
             break
-        res = lookup_docs_for_library(lib, task_text, fast=cfg.context7.fast)
+        res = lookup_docs_for_library(lib, task_text, fast=bool(settings["fast"]))
         results.append(
             {
                 "library": lib,
@@ -449,6 +485,7 @@ def prepare_context7_bundle(
     return {
         "enabled": True,
         "used": bool(bundle),
+        "policy": selected_policy,
         "libraries": selected,
         "results": results,
         "bundle": bundle,

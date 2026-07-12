@@ -158,12 +158,12 @@ The repository includes a cross-platform entrypoint used by the manual GitHub
 workflow:
 
 ```bash
-make qualification-ci \
-  QUALIFICATION_PROFILE=vscode-windows-wsl \
-  QUALIFICATION_WORKSPACE_ROOT=/path/to/repository \
-  QUALIFICATION_EVIDENCE_DIRECTORY=./qualification-input \
-  QUALIFICATION_OUTPUT_DIRECTORY=./qualification-output \
-  QUALIFICATION_REPEAT=3
+uv run --project router python scripts/run_qualification_ci.py \
+  --profile vscode-windows-wsl \
+  --workspace-root /path/to/repository \
+  --evidence-directory ./qualification-input \
+  --output-directory ./qualification-output \
+  --repeat 3
 ```
 
 It always exports the redacted receipt before returning a failing status for a

@@ -223,6 +223,90 @@ MIGRATIONS: tuple[Migration, ...] = (
             "CREATE INDEX IF NOT EXISTS idx_sessions_expiry ON provider_sessions(status, expires_at)",
         ),
     ),
+    Migration(
+        4,
+        "durable-work-items-and-workbench-preferences",
+        (
+            """
+            CREATE TABLE IF NOT EXISTS workspace_preferences (
+                workspace_id TEXT PRIMARY KEY,
+                workspace_root TEXT NOT NULL,
+                safety_mode TEXT NOT NULL DEFAULT 'worktree',
+                preset TEXT NOT NULL DEFAULT 'balanced',
+                context_mode TEXT NOT NULL DEFAULT 'auto',
+                role_profiles_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS work_items (
+                id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL,
+                workspace_root TEXT NOT NULL,
+                title TEXT NOT NULL,
+                task_artifact_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                safety_mode TEXT NOT NULL,
+                preset TEXT NOT NULL,
+                context_mode TEXT NOT NULL,
+                role_profiles_json TEXT NOT NULL DEFAULT '{}',
+                current_run_id TEXT,
+                idempotency_key TEXT NOT NULL UNIQUE,
+                revision INTEGER NOT NULL DEFAULT 1,
+                error_code TEXT,
+                error_reason TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                started_at TEXT,
+                completed_at TEXT,
+                archived_at TEXT
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS work_item_runs (
+                item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE,
+                run_id TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
+                ordinal INTEGER NOT NULL,
+                relation TEXT NOT NULL DEFAULT 'primary',
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(item_id, run_id),
+                UNIQUE(item_id, ordinal)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS work_item_events (
+                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE,
+                event_type TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_work_items_workspace_updated ON work_items(workspace_id, updated_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_work_items_status_updated ON work_items(status, updated_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_work_item_runs_item ON work_item_runs(item_id, ordinal)",
+            "CREATE INDEX IF NOT EXISTS idx_work_item_events_item ON work_item_events(item_id, sequence)",
+        ),
+    ),
+    Migration(
+        5,
+        "workbench-console-links-and-repository-identity",
+        (
+            "ALTER TABLE workflow_runs ADD COLUMN work_item_id TEXT REFERENCES work_items(id) ON DELETE SET NULL",
+            "ALTER TABLE work_items ADD COLUMN repository_identity_json TEXT NOT NULL DEFAULT '{}'",
+            "CREATE INDEX IF NOT EXISTS idx_runs_work_item_created ON workflow_runs(work_item_id, created_at)",
+        ),
+    ),
+    Migration(
+        6,
+        "work-item-context-and-console-metadata",
+        (
+            "ALTER TABLE work_items ADD COLUMN extra_context_artifact_id TEXT",
+            "ALTER TABLE work_items ADD COLUMN config_json TEXT NOT NULL DEFAULT '{}'",
+        ),
+    ),
+
 )
 
 

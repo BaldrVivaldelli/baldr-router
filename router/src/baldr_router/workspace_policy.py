@@ -3,7 +3,10 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
 import subprocess
+import sys
+import tempfile
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Literal
@@ -13,6 +16,7 @@ from .platforming import normalize_path_for_runtime
 
 AccessMode = Literal["read", "write"]
 RUNTIME_ROOTS_ENV = "BALDR_TRUSTED_WORKSPACE_ROOTS_JSON"
+_MACOS_TEMPORARY_BASE = Path("/private/var/folders")
 
 
 class WorkspacePolicyError(ValueError):
@@ -121,13 +125,59 @@ def _sensitive_roots() -> list[Path]:
     return [path.resolve() for path in candidates]
 
 
+def _safe_temporary_roots() -> list[Path]:
+    """Return narrowly recognized per-user temporary roots.
+
+    macOS stores ``tempfile`` directories below ``/var/folders``. Because
+    ``/var`` resolves to ``/private/var`` there, the broad system-path guard
+    would otherwise reject every pytest or client workspace created in the
+    operating system's private temporary directory.
+
+    Keep this carve-out deliberately Darwin-specific and require the standard
+    ``/private/var/folders/<bucket>/<user>/T`` shape. The workspace itself must
+    still be a strict descendant, trusted, and (by default) a Git repository.
+    """
+
+    if sys.platform != "darwin":
+        return []
+    try:
+        root = Path(tempfile.gettempdir()).resolve()
+        relative = root.relative_to(_MACOS_TEMPORARY_BASE.resolve())
+        metadata = root.stat()
+    except (OSError, ValueError):
+        return []
+    if len(relative.parts) != 3 or relative.parts[2] != "T":
+        return []
+    if hasattr(os, "getuid") and metadata.st_uid != os.getuid():
+        return []
+    if metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        return []
+    return [root]
+
 
 def _sensitive_match(path: Path) -> Path | None:
     home = Path.home().resolve()
+    safe_temporary_root = next(
+        (
+            root
+            for root in _safe_temporary_roots()
+            if path != root and _is_relative_to(path, root)
+        ),
+        None,
+    )
     for root in _sensitive_roots():
         if not (path == root or _is_relative_to(path, root)):
             continue
         if root == home and path != home:
+            continue
+        if (
+            safe_temporary_root is not None
+            and safe_temporary_root != root
+            and _is_relative_to(safe_temporary_root, root)
+        ):
+            # Ignore only the broad system ancestor (on macOS, /private/var).
+            # More specific sensitive roots, such as a test HOME/.ssh inside
+            # the temporary tree, continue to match and remain blocked.
             continue
         return root
     return None

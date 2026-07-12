@@ -1,6 +1,6 @@
-# Feature Freeze — línea de estabilización v0.16.x
+# Feature Freeze — línea de estabilización v0.17
 
-Baldr Router permanece bajo **congelación funcional**. v0.16.1 califica entornos reales y endurece packaging/CI sin ampliar la superficie; v0.16 endurece consistencia, fencing, cancelación y reconciliación sobre la durabilidad local y los perfiles por fase sin ampliar providers, roles, workflows, tools MCP ni las intenciones públicas.
+Baldr Router permanece bajo **congelación funcional**. v0.17 agrega una consola de VS Code y work items durables sin ampliar providers, roles, workflows ni las intenciones públicas `setup/status/run`; v0.16.1 conserva el gate de calificación real y v0.16 el hardening de consistencia y control operativo.
 
 ## Superficie congelada
 

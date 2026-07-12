@@ -4,9 +4,9 @@ Generate fresh templates for the target client instead of editing these files
 from memory:
 
 ```bash
-make qualification-template \
-  QUALIFICATION_PROFILE=vscode-windows-wsl \
-  QUALIFICATION_TEMPLATE_DIR=qualification/templates/vscode-windows-wsl
+python scripts/dev.py qualification-template \
+  --profile vscode-windows-wsl \
+  --output-dir qualification/templates/vscode-windows-wsl
 ```
 
 Available profiles are documented in

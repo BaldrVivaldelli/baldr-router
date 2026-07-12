@@ -122,7 +122,7 @@ class CodexAppServerSession:
                 "clientInfo": {
                     "name": "baldr-router",
                     "title": "Baldr Router",
-                    "version": "0.16.1",
+                    "version": "0.17.0",
                 }
             },
             timeout=30,

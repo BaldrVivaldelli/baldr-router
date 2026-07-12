@@ -5,6 +5,7 @@ import json
 import sys
 
 from . import __version__
+from .codex import codex_model_catalog
 from .codex_config import install_context7_mcp_config, remove_context7_mcp_config
 from .config import Context7Config, load_config, save_config
 from .provider_registry import get_provider_registry, provider_status
@@ -47,6 +48,48 @@ def print_json(data: object) -> None:
     print(json.dumps(data, indent=2, ensure_ascii=False))
 
 
+def _parse_role_profiles(values: list[str] | None) -> dict[str, list[str]] | None:
+    if not values:
+        return None
+    result: dict[str, list[str]] = {}
+    for raw in values:
+        if "=" not in raw:
+            raise SystemExit(f"--role-profile expects role=profile[,profile]: {raw!r}")
+        role, profiles = raw.split("=", 1)
+        role = role.strip()
+        if role not in {"architect", "implementer", "reviewer"}:
+            raise SystemExit(f"Unknown role in --role-profile: {role!r}")
+        selected = [item.strip() for item in profiles.split(",") if item.strip()]
+        if not selected:
+            raise SystemExit(f"No profiles supplied for role {role!r}")
+        result[role] = selected
+    return result
+
+
+def _parse_json_object(raw: str | None, flag: str) -> dict[str, object] | None:
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"{flag} must be valid JSON: {exc}") from exc
+    if not isinstance(value, dict):
+        raise SystemExit(f"{flag} must decode to an object")
+    return value
+
+
+def _parse_json_array(raw: str | None, flag: str) -> list[dict[str, object]] | None:
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"{flag} must be valid JSON: {exc}") from exc
+    if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+        raise SystemExit(f"{flag} must decode to an array of objects")
+    return value
+
+
 def cmd_facade(args: argparse.Namespace) -> int:
     if args.intent == "contract":
         print_json(facade_contract_status())
@@ -58,12 +101,24 @@ def cmd_facade(args: argparse.Namespace) -> int:
             getattr(args, "workspace_root", None),
             client=client,
             trust_current_workspace=getattr(args, "trust_workspace", False),
+            workspace_safety_mode=getattr(args, "workspace_safety_mode", None),
+            execution_preset=getattr(args, "execution_preset", None),
+            context7_policy=getattr(args, "context_mode", None) or getattr(args, "context7_policy", None),
+            role_profiles=_parse_role_profiles(getattr(args, "role_profile", None)),
+            allow_non_git=getattr(args, "allow_non_git", False),
+            profile_definition=_parse_json_object(
+                getattr(args, "profile_definition_json", None),
+                "--profile-definition-json",
+            ),
         )
     elif args.intent == "status":
         result = facade_status_report(
             getattr(args, "workspace_root", None),
             client=client,
             recent_limit=getattr(args, "recent_limit", 5),
+            work_item_id=getattr(args, "work_item_id", None),
+            work_item_limit=getattr(args, "work_item_limit", 100),
+            include_archived=getattr(args, "include_archived", False),
         )
     elif args.intent == "run":
         result = facade_run(
@@ -82,6 +137,21 @@ def cmd_facade(args: argparse.Namespace) -> int:
             reconciliation_action=getattr(args, "reconciliation_action", None),
             cancel=getattr(args, "cancel", False),
             cancel_reason=getattr(args, "cancel_reason", "Cancellation requested by client."),
+            work_item_action=getattr(args, "work_item_action", "execute"),
+            work_item_id=getattr(args, "work_item_id", None),
+            title=getattr(args, "title", None),
+            workspace_mode=getattr(args, "workspace_mode", None),
+            execution_preset=getattr(args, "execution_preset", None),
+            context7_policy=getattr(args, "context_mode", None) or getattr(args, "context7_policy", None),
+            role_profiles=_parse_role_profiles(getattr(args, "role_profile", None)),
+            remember_workspace=getattr(args, "remember_workspace", False),
+            allow_non_git=getattr(args, "allow_non_git", False),
+            attachments=_parse_json_array(
+                getattr(args, "attachments_json", None), "--attachments-json"
+            ),
+            item_config=_parse_json_object(
+                getattr(args, "item_config_json", None), "--item-config-json"
+            ),
         )
     else:  # pragma: no cover - argparse enforces the choices
         raise AssertionError(f"Unhandled facade intent: {args.intent}")
@@ -144,6 +214,22 @@ def cmd_provider_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_provider_models(args: argparse.Namespace) -> int:
+    provider = str(args.provider or "codex").strip().lower().replace("_", "-")
+    if provider not in {"codex", "openai-codex"}:
+        print_json(
+            {
+                "ok": False,
+                "provider": provider,
+                "reason": f"Model discovery is not available for provider {provider!r}.",
+            }
+        )
+        return 2
+    result = codex_model_catalog(force=bool(args.refresh))
+    print_json(result)
+    return 0 if result.get("ok") else 2
+
+
 def cmd_workflow_status(args: argparse.Namespace) -> int:
     print_json(workflow_status())
     return 0
@@ -162,12 +248,7 @@ def cmd_workflows(args: argparse.Namespace) -> int:
 def cmd_set_role_provider(args: argparse.Namespace) -> int:
     print_json(
         set_role_provider(
-            args.role,
-            args.provider,
-            model=args.model,
-            reasoning_effort=args.reasoning_effort,
-            agent=args.agent,
-            effort=args.effort,
+            args.role, args.provider, agent=args.agent, effort=args.effort
         )
     )
     return 0
@@ -501,17 +582,47 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Persistently trust this workspace after client/user consent",
     )
+    f.add_argument("--workspace-safety-mode", choices=["worktree", "current", "non-git"])
+    f.add_argument("--execution-preset", choices=["fast", "balanced", "deep", "custom"])
+    f.add_argument("--context-mode", choices=["auto", "on", "off"])
+    f.add_argument("--context7-policy", choices=["auto", "on", "off"], help=argparse.SUPPRESS)
+    f.add_argument("--role-profile", action="append", help="Assign role profiles as role=profile[,profile]")
+    f.add_argument("--allow-non-git", action="store_true", help="Confirm reduced guarantees for a non-Git workspace")
+    f.add_argument("--profile-definition-json", help="Create/update one execution profile through the setup intent")
     f.set_defaults(func=cmd_facade)
 
     f = facade_sub.add_parser("status", help="Return a compact Baldr status report")
     f.add_argument("workspace_root", nargs="?")
     f.add_argument("--recent-limit", type=int, default=5)
+    f.add_argument("--work-item-id")
+    f.add_argument("--work-item-limit", type=int, default=100)
+    f.add_argument("--include-archived", action="store_true")
     f.add_argument("--client", default="generic-mcp")
     f.set_defaults(func=cmd_facade)
 
     f = facade_sub.add_parser("run", help="Run the frozen orchestration workflow")
     f.add_argument("workspace_root")
     f.add_argument("task", nargs="?", default="")
+    f.add_argument(
+        "--work-item-action",
+        choices=[
+            "execute", "create", "draft", "create-item", "update", "update-item",
+            "start", "start-item", "cancel", "cancel-item", "reconcile",
+            "reconcile-item", "archive", "archive-item",
+        ],
+        default="execute",
+    )
+    f.add_argument("--work-item-id")
+    f.add_argument("--title")
+    f.add_argument("--workspace-mode", choices=["worktree", "current", "non-git"])
+    f.add_argument("--execution-preset", choices=["fast", "balanced", "deep", "custom"])
+    f.add_argument("--context-mode", choices=["auto", "on", "off"])
+    f.add_argument("--context7-policy", choices=["auto", "on", "off"], help=argparse.SUPPRESS)
+    f.add_argument("--role-profile", action="append", help="Override item role profiles as role=profile[,profile]")
+    f.add_argument("--remember-workspace", action="store_true")
+    f.add_argument("--allow-non-git", action="store_true")
+    f.add_argument("--attachments-json", help="JSON array of attachment metadata")
+    f.add_argument("--item-config-json", help="JSON object with durable item execution metadata")
     f.add_argument("--extra-context", default="")
     f.add_argument("--architect-provider")
     f.add_argument("--implementer-provider")
@@ -666,6 +777,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_provider_status)
 
     p = sub.add_parser(
+        "provider-models", help="List selectable models and variants for a provider"
+    )
+    p.add_argument("provider", nargs="?", default="codex")
+    p.add_argument("--refresh", action="store_true")
+    p.set_defaults(func=cmd_provider_models)
+
+    p = sub.add_parser(
         "workflow-status", help="Show roles, workflows, providers, and safety settings"
     )
     p.set_defaults(func=cmd_workflow_status)
@@ -682,13 +800,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("role", choices=["architect", "implementer", "reviewer"])
     p.add_argument("provider", help="Provider name, for example: codex or kiro-cli")
-    p.add_argument(
-        "--model", help="Optional model override for this role, useful for Codex"
-    )
-    p.add_argument(
-        "--reasoning-effort",
-        help="Optional reasoning-effort override for this role, useful for Codex",
-    )
     p.add_argument(
         "--agent", help="Optional provider-specific agent name, useful for kiro-cli"
     )

@@ -19,12 +19,7 @@ def test_default_roles_exist(tmp_path: Path, monkeypatch):
 def test_set_role_provider_persists(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     result = set_role_provider(
-        "architect",
-        "kiro-cli",
-        model="",
-        reasoning_effort="",
-        agent="baldr-architect",
-        effort="high",
+        "architect", "kiro-cli", agent="baldr-architect", effort="high"
     )
     assert result["ok"] is True
     cfg = load_config()
@@ -32,19 +27,10 @@ def test_set_role_provider_persists(tmp_path: Path, monkeypatch):
     assert cfg.roles["architect"].agent == "baldr-architect"
 
 
-def test_set_role_provider_persists_codex_model_and_reasoning_effort(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
-    result = set_role_provider(
-        "reviewer", "codex", model="gpt-5", reasoning_effort="high"
-    )
-    assert result["ok"] is True
-    cfg = load_config()
-    assert cfg.roles["reviewer"].model == "gpt-5"
-    assert cfg.roles["reviewer"].reasoning_effort == "high"
-
-
 def test_run_workflow_dry_run(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     workspace = tmp_path / "repo"
     workspace.mkdir()
     subprocess.run(["git", "init", "-q", str(workspace)], check=True)

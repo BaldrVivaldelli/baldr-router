@@ -30,7 +30,29 @@ test('requires VS Code Workspace Trust before provider execution', () => {
   assert.equal(manifest.capabilities.untrustedWorkspaces.supported, false);
 });
 
-test('packages the v0.16 durable facade', () => {
-  assert.equal(manifest.version, '0.16.1');
+test('packages the v0.17.4 Baldr Console facade', () => {
+  assert.equal(manifest.version, '0.17.4');
   assert.match(contract.intents.setup.description, /lifecycle verification/);
+});
+
+test('contributes one Baldr Activity Bar webview', () => {
+  assert.deepEqual(manifest.contributes.viewsContainers.activitybar, [
+    { id: 'baldr', title: 'Baldr', icon: 'media/baldr.svg' },
+  ]);
+  assert.deepEqual(manifest.contributes.views.baldr, [
+    { type: 'webview', id: 'baldr.console', name: 'Baldr', contextualTitle: 'Baldr Console' },
+  ]);
+  assert.ok(manifest.activationEvents.includes('onView:baldr.console'));
+});
+
+test('ships the form-free Baldr Console and Activity Bar icon', () => {
+  const source = fs.readFileSync(path.join(root, 'src', 'console.ts'), 'utf8');
+  assert.match(source, /\/profile/);
+  assert.match(source, /\/git/);
+  assert.match(source, /\/context/);
+  assert.match(source, /type\s*:\s*'plusAction'/);
+  assert.match(source, /id="plusMenu"/);
+  assert.match(source, /class=\"composer\"/);
+  assert.match(source, /class=\"task-list\"/);
+  assert.ok(fs.existsSync(path.join(root, 'media', 'baldr.svg')));
 });

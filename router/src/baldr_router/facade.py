@@ -1,8 +1,9 @@
 """Compatibility facade API backed by the versioned shared contract.
 
-New code should import from :mod:`baldr_router.facade_contract` and
-:mod:`baldr_router.facade_runtime`. This module keeps the v0.16 Python API
-compact for adapters and tests without duplicating domain logic.
+All clients keep the same three public intentions: ``setup``, ``status`` and
+``run``. Rich clients such as the VS Code Baldr Console express item lifecycle
+operations through typed arguments of those intentions rather than introducing
+client-specific domain APIs.
 """
 
 from __future__ import annotations
@@ -15,11 +16,7 @@ from .facade_contract import (
     facade_contract,
     render_facade_prompt as _render_facade_prompt,
 )
-from .facade_runtime import (
-    run_facade,
-    setup_facade,
-    status_facade,
-)
+from .facade_runtime import run_facade, setup_facade, status_facade
 
 
 def facade_intent(name: str) -> dict[str, Any]:
@@ -69,9 +66,22 @@ def facade_setup_plan(
     *,
     client: str = "generic-mcp",
     trust_current_workspace: bool = False,
+    workspace_safety_mode: str | None = None,
+    execution_preset: str | None = None,
+    context7_policy: str | None = None,
+    role_profiles: dict[str, list[str]] | None = None,
+    allow_non_git: bool = False,
+    profile_definition: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     result = setup_facade(
-        workspace_root, trust_current_workspace=trust_current_workspace
+        workspace_root,
+        trust_current_workspace=trust_current_workspace,
+        workspace_safety_mode=workspace_safety_mode,
+        execution_preset=execution_preset,
+        context7_policy=context7_policy,
+        role_profiles=role_profiles,
+        allow_non_git=allow_non_git,
+        profile_definition=profile_definition,
     )
     result["client"] = client
     result.setdefault("context7_decision", result.get("context7_onboarding", {}))
@@ -83,8 +93,17 @@ def facade_status_report(
     *,
     client: str = "generic-mcp",
     recent_limit: int = 5,
+    work_item_id: str | None = None,
+    work_item_limit: int = 100,
+    include_archived: bool = False,
 ) -> dict[str, Any]:
-    result = status_facade(workspace_root, run_limit=recent_limit)
+    result = status_facade(
+        workspace_root,
+        run_limit=recent_limit,
+        work_item_id=work_item_id,
+        work_item_limit=work_item_limit,
+        include_archived=include_archived,
+    )
     result["client"] = client
     result.setdefault(
         "telemetry",
@@ -113,6 +132,17 @@ def facade_run(
     reconciliation_action: str | None = None,
     cancel: bool = False,
     cancel_reason: str = "Cancellation requested by client.",
+    work_item_action: str = "execute",
+    work_item_id: str | None = None,
+    title: str | None = None,
+    workspace_mode: str | None = None,
+    execution_preset: str | None = None,
+    context7_policy: str | None = None,
+    role_profiles: dict[str, list[str]] | None = None,
+    remember_workspace: bool = False,
+    allow_non_git: bool = False,
+    attachments: list[dict[str, Any]] | None = None,
+    item_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     result = run_facade(
         workspace_root=workspace_root,
@@ -130,6 +160,17 @@ def facade_run(
         cancel=cancel,
         cancel_reason=cancel_reason,
         client_name=client,
+        work_item_action=work_item_action,
+        work_item_id=work_item_id,
+        title=title,
+        workspace_mode=workspace_mode,
+        execution_preset=execution_preset,
+        context7_policy=context7_policy,
+        role_profiles=role_profiles,
+        remember_workspace=remember_workspace,
+        allow_non_git=allow_non_git,
+        attachments=attachments,
+        item_config=item_config,
     )
     metadata = result.setdefault("facade", {})
     metadata.update(

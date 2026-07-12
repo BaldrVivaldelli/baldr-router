@@ -31,15 +31,6 @@ test('status renders evidence id', () => {
       context7_enabled: false,
       warnings: [],
     },
-    health: {
-      router: {
-        resolved_role_plans: {
-          architect: { profiles: [{ provider: 'codex', model: 'gpt-5', reasoning_effort: 'high' }] },
-          implementer: { profiles: [{ provider: 'codex', model: '', reasoning_effort: 'medium' }] },
-          reviewer: { profiles: [{ provider: 'kiro-cli', agent: 'reviewer', effort: 'high' }] },
-        },
-      },
-    },
     verification: { ok: true, evidence: { evidence_id: 'br-evidence-test' } },
     workspace_profile: {
       ok: true,
@@ -50,9 +41,6 @@ test('status renders evidence id', () => {
   });
   assert.match(markdown, /br-evidence-test/);
   assert.match(markdown, /uv/);
-  assert.match(markdown, /Execution profiles/);
-  assert.match(markdown, /architect:.*gpt-5/);
-  assert.match(markdown, /reviewer:.*kiro-cli/);
 });
 
 

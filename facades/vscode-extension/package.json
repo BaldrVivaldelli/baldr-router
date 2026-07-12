@@ -1,8 +1,8 @@
 {
   "name": "baldr-router-vscode",
   "displayName": "Baldr Router",
-  "description": "One-click VS Code facade for the client-agnostic Baldr Router MCP orchestration runtime.",
-  "version": "0.16.1",
+  "description": "One-click Baldr Console and MCP facade for durable, client-agnostic agent orchestration.",
+  "version": "0.17.4",
   "publisher": "baldr",
   "license": "MIT",
   "engines": {
@@ -26,6 +26,7 @@
     "ui"
   ],
   "activationEvents": [
+    "onView:baldr.console",
     "onCommand:baldr.open",
     "onChatParticipant:baldr.vscode",
     "onMcpServerDefinitionProvider:baldr.router"
@@ -43,20 +44,20 @@
         "id": "baldr.vscode",
         "name": "baldr",
         "fullName": "Baldr Router",
-        "description": "Run the shared Baldr setup, status, and orchestration intents from VS Code.",
+        "description": "Optional chat shortcut for durable Baldr work items. The dedicated Baldr Activity Bar view is the primary interface.",
         "isSticky": true,
         "commands": [
           {
             "name": "setup",
-            "description": "Prepare Baldr and optionally configure Context7 securely."
+            "description": "Prepare Baldr and show setup status."
           },
           {
             "name": "status",
-            "description": "Show compact runtime, provider, workflow, and recent-run status."
+            "description": "Show compact runtime and durable item status."
           },
           {
             "name": "run",
-            "description": "Run the configured orchestration workflow for a task."
+            "description": "Create and start a durable Baldr item."
           }
         ],
         "disambiguation": [
@@ -102,12 +103,31 @@
           "description": "Offer the guided setup the first time the extension activates."
         }
       }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "baldr",
+          "title": "Baldr",
+          "icon": "media/baldr.svg"
+        }
+      ]
+    },
+    "views": {
+      "baldr": [
+        {
+          "type": "webview",
+          "id": "baldr.console",
+          "name": "Baldr",
+          "contextualTitle": "Baldr Console"
+        }
+      ]
     }
   },
   "scripts": {
     "clean": "node ./scripts/clean.mjs",
     "generate": "python ../../scripts/generate_facades.py",
-    "compile": "tsc -p ./",
+    "compile": "npm run clean && tsc -p ./",
     "check": "tsc -p ./ --noEmit",
     "package": "npm run compile && vsce package --no-dependencies --allow-missing-repository",
     "test": "npm run compile && node --test ./tests/*.test.mjs"

@@ -15,5 +15,7 @@ It does not implement providers, routing, workflows, Context7, telemetry, or ver
 Install with the core in the same tool environment:
 
 ```bash
-make install-kiro
+uv tool install --force --editable ./router \
+  --with-editable ./facades/kiro/adapter \
+  --with-executables-from baldr-kiro-adapter
 ```

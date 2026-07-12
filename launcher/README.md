@@ -21,10 +21,11 @@ That means WSL is just an automatic fallback, not a required runtime path.
 
 ## Local install from this kit
 
-From the repository root on Windows PowerShell, macOS, or Linux:
+From Windows PowerShell, macOS, or Linux:
 
 ```bash
-make install-launcher
+cd launcher
+npm install -g .
 ```
 
 Then:

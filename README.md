@@ -14,12 +14,12 @@ VS Code / Kiro / Codex / Claude Desktop / otro cliente MCP
        -> structured output + telemetry + verification
 ```
 
-> **v0.16.1 — Real Environment Qualification.** La superficie funcional permanece congelada: no se agregan providers, roles, workflows ni tools MCP públicas. La línea durable permanece congelada y ahora agrega un gate de calificación real: perfiles explícitos para VS Code/Kiro, tres pases consecutivos, assertions del cliente, diez canaries sobre dos repositorios, receipts portables, packaging separado, SBOM/provenance y CI de release.
+> **v0.17.0 — Baldr Console & Durable Work Items.** La superficie de orquestación sigue congelada: no se agregan providers, roles, workflows ni intenciones públicas. VS Code ahora tiene una sección propia en la Activity Bar con items durables, composer, menú `+`, slash autocomplete, chips de configuración, timeline, cancelación y reconciliación visual.
 
 
 ## Real Environment Qualification
 
-Los tests sintéticos prueban el runtime, pero no pueden certificar una instalación real de VS Code, Kiro, WSL, autenticación o repositorios privados. v0.16.1 agrega un gate explícito:
+Los tests sintéticos prueban el runtime, pero no pueden certificar una instalación real de VS Code, Kiro, WSL, autenticación o repositorios privados. El gate introducido en v0.16.1 continúa vigente:
 
 ```text
 synthetic validation -> provisional -> qualified
@@ -82,8 +82,8 @@ contracts/facade-v1.json
 Sincronización y verificación:
 
 ```bash
-make facades
-make facades-check
+python scripts/generate_facades.py
+python scripts/generate_facades.py --check
 ```
 
 ## VS Code: Instalación A UN SOLO clic con bootstrap automático
@@ -96,26 +96,33 @@ Instalación local:
 Extensions
   -> …
   -> Install from VSIX
-  -> baldr-router-vscode-0.16.1.vsix
+  -> baldr-router-vscode-0.17.0.vsix
 ```
 
 Superficie diaria:
 
 ```text
+Activity Bar:
+  Baldr
+    -> tasks durables
+    -> timeline
+    -> composer
+    -> + menu
+    -> /new /run /status /profile /git /context /roles /cancel /resume /archive /setup /help
+
 Command Palette:
   Baldr: Open
 
-Chat:
+Chat opcional:
   @baldr /setup
   @baldr /status
   @baldr /run <task>
   @baldr <task>
 ```
 
-En **Baldr: Open → Configure execution profiles** se elige el provider de
-cada fase y, para Codex, un modelo y reasoning effort opcionales; para Kiro
-CLI, agent y effort. `@baldr /status` muestra los perfiles efectivos y ofrece
-un botón para abrir ese configurador.
+No hay un formulario obligatorio. Escribir una tarea en el composer crea y ejecuta un item durable con la configuración activa. Git, preset, perfiles por rol y Context7 se ajustan mediante chips, `+` o slash commands.
+
+Guía de la consola: [`docs/baldr-console.md`](docs/baldr-console.md)
 
 La extensión:
 
@@ -150,7 +157,9 @@ facades/kiro/baldr-orchestrator/
 Instalación del core y adapter en el mismo environment:
 
 ```bash
-make install-kiro
+uv tool install --force --editable ./router \
+  --with-editable ./facades/kiro/adapter \
+  --with-executables-from baldr-kiro-adapter
 ```
 
 Después instalá el Power desde:
@@ -341,80 +350,36 @@ Los tests automáticos usan providers sintéticos y simulación de plataforma. L
 
 ## Desarrollo y release build
 
-Desde la raíz del repositorio, el `Makefile` es la interfaz única para las
-tareas de desarrollo, empaquetado y calificación. Muestra todas las opciones
-y no instala herramientas globales salvo que se invoquen explícitamente los
-targets de instalación:
-
 ```bash
-make help
-make deps                 # dependencias locales de desarrollo
-make test
-make lint
-make check                # test + lint
-make facades-check
-make build                # release completa, incluida validación
-make verify-release
+# Core
+cd router
+uv run --extra dev pytest -q
+uv run --extra dev ruff check src tests
+
+# Kiro adapter
+cd ../facades/kiro/adapter
+uv run --extra dev pytest -q
+uv run --extra dev ruff check src tests
+
+# Contract/facades
+cd ../../..
+python scripts/generate_facades.py --check
+
+# Launcher
+cd launcher && npm test
+
+# VS Code extension
+cd ../facades/vscode-extension
+npm ci
+npm run check
+npm test
+
+# Release completa
+cd ../..
+python scripts/build_release.py
 ```
-
-También hay targets por componente (`router-test`, `adapter-test`,
-`launcher-test`, `extension-test`), para la extensión (`extension-install`,
-`extension-check`, `extension-package`) y para instalaciones opcionales
-(`install-kiro`, `install-launcher`). `make cli CLI_ARGS="..."` ejecuta la
-CLI desde el checkout; por ejemplo, `make cli CLI_ARGS="env-report"` o
-`make mcp`.
-
-El `Makefile` usa PyPI público como índice predeterminado para `uv`. Para
-usar un mirror o índice privado en una ejecución, definí
-`UV_DEFAULT_INDEX=<url>` antes de `make`.
 
 El build genera wheels, VSIX, ZIPs de fachadas, checksums y `dist/RC_VALIDATION.json`.
-
-## Generar integraciones y ejecutar el MCP
-
-Todos los comandos se ejecutan desde la raíz del repositorio. Primero, para
-regenerar los archivos que las fachadas derivan del contrato compartido:
-
-```bash
-make facades
-make facades-check
-```
-
-`make facades` actualiza las copias del contrato y los comandos generados de
-las fachadas; no empaqueta una distribución instalable.
-
-Para crear todos los paquetes distribuibles de una vez:
-
-```bash
-make build
-```
-
-Los artefactos se escriben en `dist/artifacts/`:
-
-| Integración | Artefacto |
-| --- | --- |
-| Core MCP | wheel y sdist de `baldr-router` en `dist/artifacts/python/` |
-| Adaptador Kiro | wheel y sdist de `baldr-kiro-adapter` en `dist/artifacts/python/` |
-| Extensión VS Code | `baldr-router-vscode-<versión>.vsix` |
-| Kiro Power | `baldr-orchestrator-kiro-<versión>.zip` |
-| VS Code Agent Plugin | `baldr-router-agent-plugin-<versión>.zip` |
-
-Para empaquetar únicamente la extensión de VS Code, tras preparar su wheel de
-runtime, usá `make extension-package`. `make build` prepara ese wheel y mueve
-el VSIX a `dist/artifacts/` automáticamente.
-
-El servidor MCP no necesita generarse como un archivo separado durante el
-desarrollo: se ejecuta por stdio con:
-
-```bash
-make mcp
-```
-
-Para otros comandos de la CLI desde el checkout, usá:
-
-```bash
-make cli CLI_ARGS="qualification definitions"
-```
 
 ## Documentación
 
@@ -435,10 +400,10 @@ make cli CLI_ARGS="qualification definitions"
 La release se divide en source, artifacts y validation evidence. No se publica la SQLite de build ni caches internas dentro del source ZIP.
 
 ```bash
-make test
-make lint
-make build
-make verify-release
+python scripts/dev.py test
+python scripts/dev.py lint
+python scripts/dev.py build
+python scripts/dev.py verify-release
 ```
 
 Detalle: [`docs/release-packaging.md`](docs/release-packaging.md)

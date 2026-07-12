@@ -5,10 +5,36 @@ import * as vscode from 'vscode';
 
 import { redactSensitive } from './redaction.js';
 
-export const EXTENSION_VERSION = '0.16.1';
+export const EXTENSION_VERSION = '0.17.0';
 export const CONTEXT7_SECRET_KEY = 'baldr.context7ApiKey';
+const PROVIDER_MODELS_CACHE_TTL_MS = 5 * 60 * 1000;
 
-type JsonRecord = Record<string, unknown>;
+export type JsonRecord = Record<string, unknown>;
+
+export interface FacadeOptions {
+  workspaceRoot?: string;
+  task?: string;
+  recentLimit?: number;
+  workItemLimit?: number;
+  workItemId?: string;
+  includeArchived?: boolean;
+  dryRun?: boolean;
+  action?: string;
+  title?: string;
+  extraContext?: string;
+  attachments?: JsonRecord[];
+  safetyMode?: 'worktree' | 'current' | 'non-git';
+  preset?: 'fast' | 'balanced' | 'deep' | 'custom';
+  contextMode?: 'auto' | 'on' | 'off';
+  roleProfiles?: Record<string, string[]>;
+  allowNonGit?: boolean;
+  rememberWorkspace?: boolean;
+  reconciliationAction?: string;
+  cancelReason?: string;
+  profileDefinition?: JsonRecord;
+  itemConfig?: JsonRecord;
+  trustWorkspace?: boolean;
+}
 
 function wslDistroFromPath(value: string | undefined): string {
   const match = String(value ?? '').match(/^\\\\wsl(?:\.localhost|\$)\\([^\\/]+)[\\/]/i);
@@ -53,9 +79,19 @@ async function terminateChildTree(child: ChildProcess): Promise<void> {
   }
 }
 
+function pushFlag(args: string[], flag: string, value: unknown): void {
+  if (value === undefined || value === null || value === '') return;
+  args.push(flag, String(value));
+}
+
 export class BaldrRuntime {
   private readonly bootstrapPath: string;
   private readonly wheelPath: string;
+  private readonly providerModelsCache = new Map<
+    string,
+    { expiresAt: number; value: JsonRecord }
+  >();
+  private readonly providerModelsRequests = new Map<string, Promise<JsonRecord>>();
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -71,7 +107,7 @@ export class BaldrRuntime {
       ? fs.readdirSync(runtimeDir).filter((name) => /^baldr_router-.*\.whl$/i.test(name)).sort()
       : [];
     if (candidates.length === 0) {
-      return path.join(runtimeDir, 'baldr_router-0.16.1-py3-none-any.whl');
+      return path.join(runtimeDir, 'baldr_router-0.17.0-py3-none-any.whl');
     }
     return path.join(runtimeDir, candidates.at(-1)!);
   }
@@ -158,8 +194,12 @@ export class BaldrRuntime {
     return this.invokeBootstrapJson(['detect'], token);
   }
 
-  async runRouterJson(routerArgs: string[], token?: vscode.CancellationToken): Promise<JsonRecord> {
-    return this.invokeBootstrapJson(['exec', '--', ...routerArgs], token);
+  async runRouterJson(
+    routerArgs: string[],
+    token?: vscode.CancellationToken,
+    allowFailure = false,
+  ): Promise<JsonRecord> {
+    return this.invokeBootstrapJson(['exec', '--', ...routerArgs], token, allowFailure);
   }
 
   async runFacade(
@@ -169,26 +209,255 @@ export class BaldrRuntime {
       task?: string;
       recentLimit?: number;
       dryRun?: boolean;
+      workItemId?: string;
+      workItemAction?: string;
+      title?: string;
+      workspaceMode?: 'worktree' | 'current' | 'non-git';
+      executionPreset?: 'fast' | 'balanced' | 'deep' | 'custom';
+      contextMode?: 'auto' | 'on' | 'off';
+      roleProfiles?: Record<string, string[]>;
+      rememberWorkspace?: boolean;
+      allowNonGit?: boolean;
+      includeArchived?: boolean;
+      attachments?: JsonRecord[];
+      extraContext?: string;
+      reconciliationAction?: string;
+      cancelReason?: string;
+      itemConfig?: JsonRecord;
+      profileDefinition?: JsonRecord;
     } = {},
     token?: vscode.CancellationToken,
+    allowFailure = false,
   ): Promise<JsonRecord> {
     this.requireTrustedWorkspace(options.workspaceRoot);
     const args = ['facade', intent];
     if (intent === 'setup') {
-      if (options.workspaceRoot) {
-        args.push(options.workspaceRoot, '--trust-workspace');
+      if (options.workspaceRoot) args.push(options.workspaceRoot);
+      if (options.workspaceRoot && !options.workspaceMode) args.push('--trust-workspace');
+      if (options.workspaceMode) args.push('--workspace-safety-mode', options.workspaceMode);
+      if (options.executionPreset) args.push('--execution-preset', options.executionPreset);
+      if (options.contextMode) args.push('--context-mode', options.contextMode);
+      this.appendRoleProfiles(args, options.roleProfiles);
+      if (options.allowNonGit) args.push('--allow-non-git');
+      if (options.profileDefinition) {
+        args.push('--profile-definition-json', JSON.stringify(options.profileDefinition));
       }
     } else if (intent === 'status') {
       if (options.workspaceRoot) args.push(options.workspaceRoot);
       args.push('--recent-limit', String(options.recentLimit ?? 5));
+      if (options.workItemId) args.push('--work-item-id', options.workItemId);
+      if (options.includeArchived) args.push('--include-archived');
     } else {
       if (!options.workspaceRoot) throw new Error('An open workspace is required for /run.');
-      if (!options.task?.trim()) throw new Error('A non-empty task is required for /run.');
-      args.push(options.workspaceRoot, options.task.trim());
+      args.push(options.workspaceRoot, options.task?.trim() ?? '');
+      if (options.workItemAction) args.push('--work-item-action', options.workItemAction);
+      if (options.workItemId) args.push('--work-item-id', options.workItemId);
+      if (options.title) args.push('--title', options.title);
+      if (options.workspaceMode) args.push('--workspace-mode', options.workspaceMode);
+      if (options.executionPreset) args.push('--execution-preset', options.executionPreset);
+      if (options.contextMode) args.push('--context-mode', options.contextMode);
+      this.appendRoleProfiles(args, options.roleProfiles);
+      if (options.rememberWorkspace) args.push('--remember-workspace');
+      if (options.allowNonGit) args.push('--allow-non-git');
+      if (options.attachments) args.push('--attachments-json', JSON.stringify(options.attachments));
+      if (options.itemConfig) args.push('--item-config-json', JSON.stringify(options.itemConfig));
+      if (options.extraContext) args.push('--extra-context', options.extraContext);
+      if (options.reconciliationAction) {
+        args.push('--reconciliation-action', options.reconciliationAction);
+      }
+      if (options.cancelReason) args.push('--cancel-reason', options.cancelReason);
       if (options.dryRun) args.push('--dry-run');
     }
     args.push('--client', 'vscode-extension');
-    return this.runRouterJson(args, token);
+    return this.runRouterJson(args, token, allowFailure);
+  }
+
+  private appendRoleProfiles(
+    args: string[],
+    profiles: Record<string, string[]> | undefined,
+  ): void {
+    if (!profiles) return;
+    for (const role of ['architect', 'implementer', 'reviewer']) {
+      const selected = profiles[role]?.filter(Boolean);
+      if (selected?.length) args.push('--role-profile', `${role}=${selected.join(',')}`);
+    }
+  }
+
+  async workbenchStatus(
+    workspaceRoot: string,
+    workItemId?: string,
+    token?: vscode.CancellationToken,
+  ): Promise<JsonRecord> {
+    return this.runFacade('status', {
+      workspaceRoot,
+      workItemId,
+      recentLimit: 5,
+    }, token, true);
+  }
+
+  async configureWorkbench(
+    workspaceRoot: string,
+    options: {
+      workspaceMode?: 'worktree' | 'current' | 'non-git';
+      executionPreset?: 'fast' | 'balanced' | 'deep' | 'custom';
+      contextMode?: 'auto' | 'on' | 'off';
+      roleProfiles?: Record<string, string[]>;
+      allowNonGit?: boolean;
+      profileDefinition?: JsonRecord;
+    },
+    token?: vscode.CancellationToken,
+  ): Promise<JsonRecord> {
+    return this.runFacade('setup', { workspaceRoot, ...options }, token, true);
+  }
+
+  async createWorkItem(
+    workspaceRoot: string,
+    task: string,
+    options: {
+      title?: string;
+      workspaceMode?: 'worktree' | 'current' | 'non-git';
+      executionPreset?: 'fast' | 'balanced' | 'deep' | 'custom';
+      contextMode?: 'auto' | 'on' | 'off';
+      roleProfiles?: Record<string, string[]>;
+      allowNonGit?: boolean;
+      rememberWorkspace?: boolean;
+      attachments?: JsonRecord[];
+      extraContext?: string;
+    } = {},
+    token?: vscode.CancellationToken,
+  ): Promise<JsonRecord> {
+    return this.runFacade('run', {
+      workspaceRoot,
+      task,
+      workItemAction: 'create-item',
+      ...options,
+    }, token, true);
+  }
+
+  async startWorkItem(
+    workspaceRoot: string,
+    workItemId: string,
+    token?: vscode.CancellationToken,
+  ): Promise<JsonRecord> {
+    return this.runFacade('run', {
+      workspaceRoot,
+      workItemId,
+      workItemAction: 'start-item',
+    }, token, true);
+  }
+
+  async cancelWorkItem(
+    workspaceRoot: string,
+    workItemId: string,
+    reason = 'Cancellation requested from the Baldr Console.',
+    token?: vscode.CancellationToken,
+  ): Promise<JsonRecord> {
+    return this.runFacade('run', {
+      workspaceRoot,
+      workItemId,
+      workItemAction: 'cancel-item',
+      cancelReason: reason,
+    }, token, true);
+  }
+
+  async reconcileWorkItem(
+    workspaceRoot: string,
+    workItemId: string,
+    action: string,
+    token?: vscode.CancellationToken,
+  ): Promise<JsonRecord> {
+    return this.runFacade('run', {
+      workspaceRoot,
+      workItemId,
+      workItemAction: 'reconcile-item',
+      reconciliationAction: action,
+    }, token, true);
+  }
+
+  async archiveWorkItem(
+    workspaceRoot: string,
+    workItemId: string,
+    token?: vscode.CancellationToken,
+  ): Promise<JsonRecord> {
+    return this.runFacade('run', {
+      workspaceRoot,
+      workItemId,
+      workItemAction: 'archive-item',
+    }, token, true);
+  }
+
+
+  async consoleStatus(
+    workspaceRoot: string,
+    workItemId?: string,
+    token?: vscode.CancellationToken,
+  ): Promise<JsonRecord> {
+    return this.workbenchStatus(workspaceRoot, workItemId, token);
+  }
+
+  async setWorkspacePreferences(
+    workspaceRoot: string,
+    options: {
+      safetyMode?: 'worktree' | 'current' | 'non-git';
+      preset?: 'fast' | 'balanced' | 'deep' | 'custom';
+      contextMode?: 'auto' | 'on' | 'off';
+      roleProfiles?: Record<string, string[]>;
+      allowNonGit?: boolean;
+    },
+    token?: vscode.CancellationToken,
+  ): Promise<JsonRecord> {
+    return this.configureWorkbench(workspaceRoot, {
+      workspaceMode: options.safetyMode,
+      executionPreset: options.preset,
+      contextMode: options.contextMode,
+      roleProfiles: options.roleProfiles,
+      allowNonGit: options.allowNonGit,
+    }, token);
+  }
+
+  async upsertExecutionProfile(
+    workspaceRoot: string | undefined,
+    definition: JsonRecord,
+    token?: vscode.CancellationToken,
+  ): Promise<JsonRecord> {
+    if (!workspaceRoot) throw new Error('Open a workspace before configuring Baldr profiles.');
+    return this.configureWorkbench(workspaceRoot, {
+      profileDefinition: definition,
+    }, token);
+  }
+
+  async providerModels(
+    provider = 'codex',
+    token?: vscode.CancellationToken,
+  ): Promise<JsonRecord> {
+    const normalizedProvider = provider.trim().toLowerCase() || 'codex';
+    const cached = this.providerModelsCache.get(normalizedProvider);
+    if (cached && cached.expiresAt > Date.now()) return cached.value;
+    if (cached) this.providerModelsCache.delete(normalizedProvider);
+
+    const pending = this.providerModelsRequests.get(normalizedProvider);
+    if (pending) return pending;
+
+    const request = (async (): Promise<JsonRecord> => {
+      try {
+        const result = await this.runRouterJson(
+          ['provider-models', normalizedProvider],
+          token,
+          true,
+        );
+        if (result.ok === true) {
+          this.providerModelsCache.set(normalizedProvider, {
+            expiresAt: Date.now() + PROVIDER_MODELS_CACHE_TTL_MS,
+            value: result,
+          });
+        }
+        return result;
+      } finally {
+        this.providerModelsRequests.delete(normalizedProvider);
+      }
+    })();
+    this.providerModelsRequests.set(normalizedProvider, request);
+    return request;
   }
 
   qualificationProfile(detection?: JsonRecord): string {
@@ -221,6 +490,7 @@ export class BaldrRuntime {
       workspace_count: vscode.workspace.workspaceFolders?.length ?? 0,
       private_runtime: true,
       mcp_definition_provider: 'baldr.router',
+      console_view: 'baldr.console',
     };
     return this.runRouterJson([
       'qualification', 'client-receipt',
@@ -278,6 +548,7 @@ export class BaldrRuntime {
     return this.runRouterJson(
       ['enable-context7-env', '--mode', 'hybrid', '--env-name', 'CONTEXT7_API_KEY', '--install-codex-mcp'],
       token,
+      true,
     );
   }
 
@@ -286,29 +557,44 @@ export class BaldrRuntime {
   }
 
   async disableContext7(token?: vscode.CancellationToken): Promise<JsonRecord> {
-    return this.runRouterJson(['disable-context7', '--remove-codex-mcp'], token);
+    return this.runRouterJson(['disable-context7', '--remove-codex-mcp'], token, true);
   }
 
-  private async invokeBootstrapJson(args: string[], token?: vscode.CancellationToken): Promise<JsonRecord> {
+  private async invokeBootstrapJson(
+    args: string[],
+    token?: vscode.CancellationToken,
+    allowFailure = false,
+  ): Promise<JsonRecord> {
     await fs.promises.mkdir(this.context.globalStorageUri.fsPath, { recursive: true });
     const result = await this.spawnCapture(args, token);
     const stdout = result.stdout.trim();
     if (!stdout) throw new Error(result.stderr.trim() || 'Baldr returned no JSON output.');
+    let parsed: JsonRecord;
     try {
-      const parsed: unknown = JSON.parse(stdout);
-      if (!isRecord(parsed)) throw new Error('JSON root is not an object.');
-      return parsed;
+      const value: unknown = JSON.parse(stdout);
+      if (!isRecord(value)) throw new Error('JSON root is not an object.');
+      parsed = value;
     } catch (error) {
       const secrets = await this.knownSecrets();
       this.output.appendLine(`[parse-error] stdout: ${redactSensitive(stdout.slice(0, 4000), secrets)}`);
       throw new Error(`Baldr returned invalid JSON: ${error instanceof Error ? error.message : String(error)}`);
     }
+    if (result.code !== 0 && !allowFailure) {
+      throw new Error(
+        text(parsed.reason)
+        || text(record(parsed.error).message)
+        || result.stderr.trim()
+        || `Baldr exited with code ${result.code}.`,
+      );
+    }
+    parsed.process_exit_code = result.code;
+    return parsed;
   }
 
   private async spawnCapture(
     bootstrapArgs: string[],
     token?: vscode.CancellationToken,
-  ): Promise<{ stdout: string; stderr: string }> {
+  ): Promise<{ stdout: string; stderr: string; code: number }> {
     const env = await this.processEnvironment();
     const secrets = await this.knownSecrets();
     this.output.appendLine(`[runtime] ${bootstrapArgs.join(' ')}`);
@@ -353,11 +639,7 @@ export class BaldrRuntime {
           reject(new vscode.CancellationError());
           return;
         }
-        if (code !== 0) {
-          reject(new Error(stderr.trim() || stdout.trim() || `Baldr exited with code ${code}.`));
-          return;
-        }
-        resolve({ stdout, stderr });
+        resolve({ stdout, stderr, code: code ?? -1 });
       });
     });
   }

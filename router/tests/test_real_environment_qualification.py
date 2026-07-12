@@ -93,7 +93,7 @@ def test_client_receipt_is_redacted_and_discoverable(
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     receipt = record_client_receipt(
         client="vscode-extension",
-        client_version="0.16.1",
+        client_version="0.17.0",
         facts={
             "extension_host": "linux",
             "router_runtime": "host",
@@ -139,7 +139,7 @@ def test_real_environment_qualification_requires_real_evidence(
     )
     record_client_receipt(
         client="vscode-extension",
-        client_version="0.16.1",
+        client_version="0.17.0",
         facts={"extension_host": "linux", "router_runtime": "host"},
     )
 
@@ -167,7 +167,7 @@ def test_real_environment_qualification_qualifies_exact_profile_and_canaries(
     assert trust_workspace(str(workspace))["ok"] is True
     record_client_receipt(
         client="vscode-extension",
-        client_version="0.16.1",
+        client_version="0.17.0",
         facts={
             "extension_host": "linux",
             "router_runtime": "host",
@@ -217,7 +217,7 @@ def test_same_assertion_without_evidence_remains_provisional(
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     record_client_receipt(
         client="vscode-extension",
-        client_version="0.16.1",
+        client_version="0.17.0",
         facts={"extension_host": "linux", "router_runtime": "host"},
     )
     template_dir = tmp_path / "qualification"

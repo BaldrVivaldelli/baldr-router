@@ -30,7 +30,7 @@ It defines three stable user intents:
 - `status`: compact health and recent-run report;
 - `run`: execute the frozen orchestration workflow.
 
-Generated facade files are synchronized with `make facades`. CI-style validation uses `make facades-check`.
+Generated facade files are synchronized by `scripts/generate_facades.py`. CI-style validation uses `--check`.
 
 ## Core owns
 

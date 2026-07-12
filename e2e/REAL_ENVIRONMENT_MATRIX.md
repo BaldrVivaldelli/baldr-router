@@ -1,4 +1,4 @@
-# v0.16.1 real-environment qualification matrix
+# v0.17.0 real-environment qualification matrix
 
 A mandatory profile passes only after **three consecutive clean runs** from a restored snapshot or clean installation. Record the Baldr evidence ID for every run.
 

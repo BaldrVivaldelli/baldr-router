@@ -224,13 +224,32 @@ Extra context:
 
 
 def _context7_note(
-    workspace_root: Path, task: str, libraries: list[str] | None
+    workspace_root: Path,
+    task: str,
+    libraries: list[str] | None,
+    *,
+    context_config: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any]]:
+    settings = dict(context_config or {})
+    policy = str(settings.pop("work_item_policy", "auto") or "auto").lower()
+    if policy == "off":
+        return "Context7 docs were disabled for this work item.", {
+            "used": False,
+            "enabled": False,
+            "policy": "off",
+        }
+    if policy == "on":
+        settings["enabled"] = True
+        if str(settings.get("mode") or "off") == "off":
+            settings["mode"] = "hybrid"
+        settings["inject_docs"] = True
     bundle = prepare_context7_bundle(
         workspace_root=workspace_root,
         task_text=task,
         libraries=libraries,
+        config_override=settings,
     )
+    bundle["policy"] = policy
     if bundle.get("used"):
         note = (
             "Context7 documentation was prefetched and cached by Baldr. Treat it "
@@ -249,6 +268,10 @@ def _resolved_snapshot(
     implementer_provider: str | None,
     reviewer_provider: str | None,
     max_rounds: int | None,
+    role_profile_overrides: dict[str, list[str]] | None = None,
+    workspace_mode: str | None = None,
+    context7_policy: str | None = None,
+    execution_preset: str | None = None,
 ) -> dict[str, Any]:
     overrides = {
         "architect": architect_provider,
@@ -256,24 +279,73 @@ def _resolved_snapshot(
         "reviewer": reviewer_provider,
     }
     role_plans: dict[str, Any] = {}
+    profile_overrides = role_profile_overrides or {}
     for role_name in ("architect", "implementer", "reviewer"):
         role = copy.deepcopy(cfg.roles[role_name])
+        selected_profiles = profile_overrides.get(role_name)
+        if selected_profiles:
+            role.profiles = [str(item) for item in selected_profiles if str(item).strip()]
         role_plans[role_name] = role_execution_plan(
             cfg, role_name, role, provider_override=overrides[role_name]
         )
         role_plans[role_name]["description"] = role.description
+
+    selected_preset = str(execution_preset or "custom").strip().lower()
+    if selected_preset not in {"fast", "balanced", "deep", "custom"}:
+        raise ValueError(f"Unsupported execution preset: {selected_preset}")
+    effort_by_preset = {"fast": "low", "balanced": "medium", "deep": "high"}
+    if selected_preset == "fast":
+        for plan in role_plans.values():
+            plan["profiles"] = plan["profiles"][:1]
+            plan["strategy"] = "first-success"
+            plan["min_successes"] = 1
+            plan["min_approvals"] = 1
+    selected_effort = effort_by_preset.get(selected_preset)
+    if selected_effort:
+        for plan in role_plans.values():
+            for profile in plan["profiles"]:
+                # Providers consume their own field. Setting both keeps the
+                # preset abstract and lets adapters ignore the irrelevant one.
+                profile["reasoning_effort"] = selected_effort
+                profile["effort"] = selected_effort
+
     wf = cfg.workflows.get(cfg.router.default_workflow, WorkflowConfig())
     rounds = max_rounds if max_rounds is not None else min(wf.max_rounds, cfg.safety.max_rounds)
+    if selected_preset == "fast":
+        rounds = min(int(rounds), 1)
+    elif selected_preset == "deep":
+        rounds = min(cfg.safety.max_rounds, max(int(rounds), int(wf.max_rounds)))
+    workspace_snapshot = asdict(cfg.workspace)
+    selected_workspace_mode = str(workspace_mode or "").strip().lower()
+    if selected_workspace_mode == "worktree":
+        workspace_snapshot["write_isolation"] = "worktree"
+        workspace_snapshot["dirty_workspace_policy"] = "reject"
+        workspace_snapshot["publish_worktree_changes"] = True
+    elif selected_workspace_mode in {"current", "non-git"}:
+        workspace_snapshot["write_isolation"] = "in-place"
+        workspace_snapshot["dirty_workspace_policy"] = "in-place"
+        workspace_snapshot["publish_worktree_changes"] = False
+    context7_snapshot = asdict(cfg.context7)
+    context7_snapshot["work_item_policy"] = str(context7_policy or "auto").strip().lower()
+    if context7_snapshot["work_item_policy"] == "off":
+        context7_snapshot["enabled"] = False
+    elif context7_snapshot["work_item_policy"] == "on":
+        context7_snapshot["enabled"] = True
+        context7_snapshot["inject_docs"] = True
+        if str(context7_snapshot.get("mode") or "off") == "off":
+            context7_snapshot["mode"] = "hybrid"
+
     return {
         "engine_version": __version__,
+        "execution_preset": selected_preset,
         "workflow": asdict(wf),
         "max_rounds": max(0, min(int(rounds), cfg.safety.max_rounds)),
         "role_plans": role_plans,
-        "workspace": asdict(cfg.workspace),
+        "workspace": workspace_snapshot,
         "durability": asdict(cfg.durability),
         "sessions": asdict(cfg.sessions),
         "safety": asdict(cfg.safety),
-        "context7": asdict(cfg.context7),
+        "context7": context7_snapshot,
     }
 
 
@@ -407,6 +479,7 @@ class DurableWorkflowEngine:
         reconciliation_action: str | None = None,
         cancel: bool = False,
         cancel_reason: str = "Cancellation requested by client.",
+        work_item_id: str | None = None,
     ) -> dict[str, Any]:
         if cancel:
             if not resume_run_id:
@@ -509,6 +582,7 @@ class DurableWorkflowEngine:
                         "context7_libraries": context7_libraries or [],
                     },
                     config_snapshot=config_snapshot,
+                    work_item_id=work_item_id,
                 )
                 run_id = str(run["id"])
                 if not created:
@@ -570,7 +644,10 @@ class DurableWorkflowEngine:
 
             self._fault("workflow.running", {"run_id": run_id, "lease_epoch": lease.epoch})
             context7_note, _context7_meta = _context7_note(
-                workspace_root, task + "\n" + extra_context, context7_libraries
+                workspace_root,
+                task + "\n" + extra_context,
+                context7_libraries,
+                context_config=dict(config_snapshot.get("context7") or {}),
             )
             execution = self._restore_or_prepare_workspace(
                 run_id=run_id,

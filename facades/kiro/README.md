@@ -16,7 +16,9 @@ examples/
 Install core and adapter together:
 
 ```bash
-make install-kiro
+uv tool install --force --editable ./router \
+  --with-editable ./facades/kiro/adapter \
+  --with-executables-from baldr-kiro-adapter
 ```
 
 Then install the Power from `facades/kiro/baldr-orchestrator/`.

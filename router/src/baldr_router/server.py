@@ -14,6 +14,7 @@ from .context7_setup import (
 )
 from .extensions import extension_status, load_installed_extensions
 from .facade_contract import render_facade_prompt
+from .facade_runtime import run_facade
 from .discovery.environment_probe import environment_probe
 from .provider_registry import provider_status
 from .secrets import read_context7_api_key
@@ -220,7 +221,32 @@ def run_workflow(
     cancel_reason: str = "Cancellation requested by client.",
     client_name: str = "generic-mcp",
 ) -> dict[str, Any]:
-    """Run or resume the durable Baldr-led workflow."""
+    """Run or resume the durable Baldr-led workflow.
+
+    Fresh executions of the frozen default workflow are materialized as durable
+    Work Items so every MCP client shares the same task list as the VS Code
+    console. Low-level resume/cancel/idempotency calls retain the historical
+    workflow API and do not create a second item.
+    """
+    if (
+        not dry_run
+        and not idempotency_key
+        and not resume_run_id
+        and not reconciliation_action
+        and not cancel
+        and (workflow is None or workflow == "architect-implement-review")
+    ):
+        return run_facade(
+            workspace_root=workspace_root,
+            task=task,
+            extra_context=extra_context,
+            architect_provider=architect_provider,
+            implementer_provider=implementer_provider,
+            reviewer_provider=reviewer_provider,
+            max_rounds=max_rounds,
+            context7_libraries=context7_libraries,
+            client_name=client_name,
+        )
     return run_workflow_impl(
         workspace_root=workspace_root,
         task=task,
@@ -260,6 +286,24 @@ def run_architect_implement_review(
     client_name: str = "generic-mcp",
 ) -> dict[str, Any]:
     """Convenience wrapper for the durable architect -> implementer -> reviewer workflow."""
+    if (
+        not dry_run
+        and not idempotency_key
+        and not resume_run_id
+        and not reconciliation_action
+        and not cancel
+    ):
+        return run_facade(
+            workspace_root=workspace_root,
+            task=task,
+            extra_context=extra_context,
+            architect_provider=architect_provider,
+            implementer_provider=implementer_provider,
+            reviewer_provider=reviewer_provider,
+            max_rounds=max_rounds,
+            context7_libraries=context7_libraries,
+            client_name=client_name,
+        )
     return run_workflow_impl(
         workspace_root=workspace_root,
         task=task,

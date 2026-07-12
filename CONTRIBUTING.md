@@ -21,8 +21,8 @@ The current priority is reliability, not surface expansion.
 Edit `contracts/facade-v1.json`, then run:
 
 ```bash
-make facades
-make facades-check
+python scripts/generate_facades.py
+python scripts/generate_facades.py --check
 ```
 
 Do not edit generated contract copies or Agent Plugin command files independently.
@@ -30,17 +30,22 @@ Do not edit generated contract copies or Agent Plugin command files independentl
 ## Required checks
 
 ```bash
-make check
+PYTHONPATH=router/src python -m pytest router/tests -q
+PYTHONPATH=router/src:facades/kiro/adapter/src \
+  python -m pytest facades/kiro/adapter/tests -q
+npm --prefix launcher test
+npm --prefix facades/vscode-extension test
+npm --prefix facades/vscode-extension run check
+python scripts/generate_facades.py --check
 ```
 
 ## One development entrypoint
 
 ```bash
-make help
-make test
-make lint
-make build
-make verify-release
+python scripts/dev.py test
+python scripts/dev.py lint
+python scripts/dev.py build
+python scripts/dev.py verify-release
 ```
 
 Real-client qualification results must never be fabricated from synthetic CI. Use the templates and attach portable evidence references only.

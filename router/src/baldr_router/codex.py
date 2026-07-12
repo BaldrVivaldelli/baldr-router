@@ -3,14 +3,16 @@ from __future__ import annotations
 import os
 import shutil
 import time
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from .codex_app_server import run_codex_app_server
+from .codex_app_server import CodexAppServerSession, run_codex_app_server
 from .codex_exec_json import run_codex_exec_json
 from .codex_sdk import run_codex_sdk
 from .config import load_config
 from .provider_errors import provider_error
+from .redaction import redact_text
 from .run import run_command
 from .secrets import read_context7_api_key
 
@@ -21,11 +23,18 @@ def codex_found() -> str | None:
 
 _LOGIN_CACHE: tuple[float, dict[str, Any]] | None = None
 _LOGIN_CACHE_SECONDS = 20.0
+_MODEL_CATALOG_CACHE: tuple[float, dict[str, Any]] | None = None
+_MODEL_CATALOG_CACHE_SECONDS = 300.0
 
 
 def reset_codex_login_cache() -> None:
     global _LOGIN_CACHE
     _LOGIN_CACHE = None
+
+
+def reset_codex_model_catalog_cache() -> None:
+    global _MODEL_CATALOG_CACHE
+    _MODEL_CATALOG_CACHE = None
 
 
 def codex_preflight(*, force: bool = False) -> dict[str, Any]:
@@ -84,6 +93,142 @@ def _codex_env(extra_env: dict[str, str] | None = None) -> dict[str, str]:
     if extra_env:
         env.update(extra_env)
     return env
+
+
+def _normalize_codex_model_catalog(pages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    models: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for page in pages:
+        data = page.get("data") if isinstance(page, dict) else None
+        if not isinstance(data, list):
+            continue
+        for raw in data:
+            if not isinstance(raw, dict) or raw.get("hidden") is True:
+                continue
+            catalog_id = str(raw.get("id") or raw.get("model") or "").strip()
+            model_id = str(raw.get("model") or catalog_id).strip()
+            if not model_id or model_id in seen:
+                continue
+            seen.add(model_id)
+            efforts: list[dict[str, str]] = []
+            raw_efforts = raw.get("supportedReasoningEfforts")
+            if isinstance(raw_efforts, list):
+                for raw_effort in raw_efforts:
+                    if not isinstance(raw_effort, dict):
+                        continue
+                    effort = str(
+                        raw_effort.get("reasoningEffort")
+                        or raw_effort.get("effort")
+                        or ""
+                    ).strip()
+                    if not effort:
+                        continue
+                    efforts.append(
+                        {
+                            "id": effort,
+                            "description": str(raw_effort.get("description") or ""),
+                        }
+                    )
+            models.append(
+                {
+                    "id": catalog_id or model_id,
+                    "model": model_id,
+                    "display_name": str(raw.get("displayName") or model_id),
+                    "description": str(raw.get("description") or ""),
+                    "default_reasoning_effort": str(
+                        raw.get("defaultReasoningEffort") or ""
+                    ),
+                    "reasoning_efforts": efforts,
+                    "is_default": raw.get("isDefault") is True,
+                    "input_modalities": [
+                        str(item)
+                        for item in (raw.get("inputModalities") or [])
+                        if str(item).strip()
+                    ],
+                }
+            )
+    return models
+
+
+def codex_model_catalog(*, force: bool = False) -> dict[str, Any]:
+    """Return the authenticated Codex model and reasoning-effort catalog."""
+
+    global _MODEL_CATALOG_CACHE
+    now = time.monotonic()
+    if (
+        not force
+        and _MODEL_CATALOG_CACHE
+        and now - _MODEL_CATALOG_CACHE[0] < _MODEL_CATALOG_CACHE_SECONDS
+    ):
+        return deepcopy(_MODEL_CATALOG_CACHE[1])
+    if not codex_found():
+        return provider_error(
+            "codex_not_found",
+            "Codex CLI was not found. Install Codex CLI before listing models.",
+            provider="codex",
+        )
+
+    session: CodexAppServerSession | None = None
+    try:
+        session = CodexAppServerSession(env=_codex_env(), timeout=60)
+        pages: list[dict[str, Any]] = []
+        cursor = ""
+        seen_cursors: set[str] = set()
+        for _ in range(10):
+            params: dict[str, Any] = {"limit": 100, "includeHidden": False}
+            if cursor:
+                params["cursor"] = cursor
+            page = session.request("model/list", params, timeout=30)
+            if not isinstance(page, dict) or not isinstance(page.get("data"), list):
+                return provider_error(
+                    "codex_model_list_invalid_response",
+                    "Codex returned an invalid model catalog response.",
+                    provider="codex",
+                )
+            pages.append(page)
+            next_cursor = str(page.get("nextCursor") or "")
+            if not next_cursor:
+                cursor = ""
+                break
+            if next_cursor in seen_cursors:
+                return provider_error(
+                    "codex_model_list_cursor_loop",
+                    "Codex returned a repeated model catalog cursor.",
+                    provider="codex",
+                )
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+        if cursor:
+            return provider_error(
+                "codex_model_list_truncated",
+                "Codex model catalog exceeded the pagination limit.",
+                provider="codex",
+            )
+        models = _normalize_codex_model_catalog(pages)
+        if not models:
+            return provider_error(
+                "codex_models_empty",
+                "Codex returned no selectable models.",
+                provider="codex",
+            )
+        result = {
+            "ok": True,
+            "provider": "codex",
+            "source": "codex-app-server",
+            "models": models,
+        }
+        _MODEL_CATALOG_CACHE = (now, deepcopy(result))
+        return result
+    except Exception as exc:
+        return provider_error(
+            "codex_model_list_failed",
+            f"Could not list Codex models: {redact_text(str(exc))}",
+            retryable=True,
+            provider="codex",
+        )
+    finally:
+        if session is not None:
+            session.close()
 
 
 def build_codex_exec_command(

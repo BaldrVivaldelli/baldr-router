@@ -58,8 +58,6 @@ export function renderSetup(result: JsonRecord): string {
 
 export function renderStatus(result: JsonRecord): string {
   const summary = record(result.summary);
-  const router = record(record(result.health).router);
-  const rolePlans = record(router.resolved_role_plans);
   const warnings = list(summary.warnings);
   const verification = record(result.verification);
   const evidence = record(verification.evidence);
@@ -93,22 +91,6 @@ export function renderStatus(result: JsonRecord): string {
     lines.push('', '## Warnings');
     for (const warning of warnings) lines.push(`- ${warning}`);
   }
-  const roleLines = ['architect', 'implementer', 'reviewer'].flatMap((role) => {
-    const plan = record(rolePlans[role]);
-    const profiles = Array.isArray(plan.profiles) ? plan.profiles : [];
-    const profile = record(profiles[0]);
-    if (!Object.keys(profile).length) return [];
-    const provider = text(profile.provider, 'unconfigured');
-    const details = [`model: ${text(profile.model, 'provider default')}`];
-    if (provider === 'kiro-cli') {
-      details.push(`agent: ${text(profile.agent, 'provider default')}`);
-      details.push(`effort: ${text(profile.effort, 'provider default')}`);
-    } else {
-      details.push(`effort: ${text(profile.reasoning_effort, 'provider default')}`);
-    }
-    return [`- **${role}:** ${provider} · ${details.join(' · ')}`];
-  });
-  if (roleLines.length) lines.push('', '## Execution profiles', ...roleLines);
   return lines.join('\n');
 }
 

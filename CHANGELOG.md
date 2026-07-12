@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.17.0 — Baldr Console & Durable Work Items
+
+- Added a dedicated Baldr Activity Bar section as the primary VS Code experience.
+- Added durable SQLite-backed work items shared by the console, chat facade, and workflow engine.
+- Added a fixed composer, `+` menu, slash autocomplete, and clickable Git/preset/role/Context7 chips.
+- Added visual task status, architecture/implementation/review timeline, cancellation, and reconciliation actions.
+- Added explicit Git worktree/current/non-Git modes; non-Git requires user confirmation and keeps reduced-guarantee semantics visible.
+- Added lightweight Fast/Balanced/Deep/Custom presets and sequential role-profile Quick Picks instead of a configuration form.
+- Kept Copilot Chat as an optional shortcut that creates the same durable items.
+- Preserved the frozen public facade intents `setup`, `status`, and `run`; no provider, role, or workflow was added.
+
 ## 0.16.1 — Real Environment Qualification
 
 - Added real-client qualification profiles for VS Code Windows/WSL, Remote WSL, native Linux, and Kiro/WSL.

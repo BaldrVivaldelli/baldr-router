@@ -69,8 +69,6 @@ def set_role_provider(
     role: str,
     provider: str,
     *,
-    model: str | None = None,
-    reasoning_effort: str | None = None,
     agent: str | None = None,
     effort: str | None = None,
 ) -> dict[str, Any]:
@@ -80,10 +78,6 @@ def set_role_provider(
     # profiles remain configurable under [execution_profiles] + roles.*.profiles.
     current.profiles = []
     current.provider = provider
-    if model is not None:
-        current.model = model
-    if reasoning_effort is not None:
-        current.reasoning_effort = reasoning_effort
     if agent is not None:
         current.agent = agent
     if effort is not None:
@@ -120,6 +114,11 @@ def run_workflow_impl(
     cancel: bool = False,
     cancel_reason: str = "Cancellation requested by client.",
     client_name: str = "generic-mcp",
+    workspace_mode: str | None = None,
+    context7_policy: str | None = None,
+    role_profile_overrides: dict[str, list[str]] | None = None,
+    execution_preset: str | None = None,
+    work_item_id: str | None = None,
 ) -> dict[str, Any]:
     cfg = load_config()
     if cfg.safety.prevent_router_reentry:
@@ -162,6 +161,10 @@ def run_workflow_impl(
             implementer_provider=implementer_provider,
             reviewer_provider=reviewer_provider,
             max_rounds=max_rounds,
+            role_profile_overrides=role_profile_overrides,
+            workspace_mode=workspace_mode,
+            context7_policy=context7_policy,
+            execution_preset=execution_preset,
         )
     except Exception as exc:
         return {"ok": False, "reason": f"Invalid execution profile configuration: {exc}"}
@@ -171,6 +174,7 @@ def run_workflow_impl(
             workspace_root=cwd,
             task_text=task + "\n" + extra_context,
             libraries=context7_libraries,
+            config_override=snapshot.get("context7", {}),
         )
         meta = {key: value for key, value in bundle.items() if key != "bundle"}
         return engine.dry_run(
@@ -192,6 +196,7 @@ def run_workflow_impl(
         reconciliation_action=reconciliation_action,
         cancel=cancel,
         cancel_reason=cancel_reason,
+        work_item_id=work_item_id,
     )
 
 

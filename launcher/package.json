@@ -1,6 +1,6 @@
 {
   "name": "@baldr/router-launcher",
-  "version": "0.16.1",
+  "version": "0.17.0",
   "description": "Optional cross-platform launcher for the baldr-router MCP server, with automatic Windows -> WSL fallback only when needed.",
   "type": "module",
   "bin": {

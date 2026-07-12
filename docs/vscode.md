@@ -9,16 +9,26 @@ The native extension in `facades/vscode-extension/` provides **Instalación A UN
 - registers Baldr as an MCP server programmatically;
 - detects host, Windows/WSL, and Remote WSL;
 - stores an optional Context7 key in VS Code SecretStorage;
-- exposes one Command Palette entry and three chat intents;
-- renders the core SQLite schema, durable recovery state, evidence, and resolved execution profiles.
+- contributes a dedicated Baldr Activity Bar console with durable work items;
+- exposes one Command Palette entry and keeps chat as an optional shortcut;
+- renders workflow phases, cancellation, reconciliation, evidence, and resolved execution profiles.
 
 Install the generated artifact:
 
 ```text
-dist/baldr-router-vscode-0.16.1.vsix
+dist/baldr-router-vscode-0.17.0.vsix
 ```
 
-Then use:
+Then use the dedicated view:
+
+```text
+Activity Bar -> Baldr
+  type a task and press Enter
+  + for attachments and configuration
+  /new /run /status /profile /git /context /cancel /resume
+```
+
+Optional shortcuts remain available:
 
 ```text
 Baldr: Open
@@ -28,7 +38,7 @@ Baldr: Open
 @baldr <task>
 ```
 
-No workspace `mcp.json`, global npm launcher, or manual Python package installation is needed for this path.
+No workspace `mcp.json`, global npm launcher, manual Python package installation, or configuration form is needed for this path. See [`baldr-console.md`](baldr-console.md).
 
 Provider authentication and explicit trust dialogs remain provider/VS Code security steps, not manual Baldr configuration.
 

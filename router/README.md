@@ -95,8 +95,9 @@ El runner `exec-json` clasifica binario/login ausente, timeout, aborto, salida n
 ## Desarrollo
 
 ```bash
-make router-test
-make router-lint
+uv run --extra dev pytest -q
+uv run --extra dev ruff check src tests
+python -m compileall -q src
 ```
 
 La línea v0.16 está bajo feature freeze. Ver `../FEATURE_FREEZE.md`.

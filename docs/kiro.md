@@ -13,7 +13,9 @@ baldr-orchestrator Power
 Install core and adapter in the same Python environment:
 
 ```bash
-make install-kiro
+uv tool install --force --editable ./router \
+  --with-editable ./facades/kiro/adapter \
+  --with-executables-from baldr-kiro-adapter
 ```
 
 Install the Power from:

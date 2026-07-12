@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "0.16.1"
+VERSION = "0.17.0"
 DIST = ROOT / "dist"
 ARTIFACTS = DIST / "artifacts"
 PYTHON_DIST = ARTIFACTS / "python"
@@ -144,7 +144,7 @@ def zip_directory(
         for item in sorted(source.rglob("*")):
             if not item.is_file() or any(part in excluded for part in item.parts):
                 continue
-            if item.suffix in {".pyc", ".sqlite3"}:
+            if item.suffix.lower() in {".pyc", ".sqlite3", ".vsix"}:
                 continue
             relative = item.relative_to(source)
             arcname = Path(root_name) / relative if root_name else relative
@@ -258,7 +258,7 @@ def build_validation_report() -> Path:
         "release": VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "feature_freeze": True,
-        "qualification_stage": "real-environment-qualification",
+        "qualification_stage": "baldr-console-durable-work-items",
         "live_environment_qualified": False,
         "live_environment_note": (
             "Build and synthetic validation cannot qualify a real client environment. "
@@ -284,6 +284,7 @@ def write_release_manifest(bundles: dict[str, Path]) -> Path:
         "version": VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "feature_freeze": True,
+        "primary_vscode_experience": "baldr-console",
         "qualification_required_for_promotion": True,
         "bundles": {name: path.relative_to(DIST).as_posix() for name, path in bundles.items()},
         "artifacts": [
@@ -309,7 +310,7 @@ def write_checksums() -> Path:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Build Baldr Router v0.16.1 real-environment qualification artifacts")
+    parser = argparse.ArgumentParser(description="Build Baldr Router v0.17 Baldr Console and durable work-item artifacts")
     parser.add_argument("--skip-tests", action="store_true")
     parser.add_argument("--keep-dist", action="store_true")
     args = parser.parse_args()
@@ -413,12 +414,28 @@ def main() -> int:
     isolated_python_validation(uv, core_wheel, adapter_wheel)
 
     run(npm, "run", "compile", cwd=EXTENSION, label="compile VS Code extension")
-    run(npm, "run", "package", cwd=EXTENSION, label="package VSIX")
-    vsix_candidates = sorted(EXTENSION.glob("*.vsix"))
-    if len(vsix_candidates) != 1:
-        raise SystemExit(f"Expected one VSIX, found {vsix_candidates}")
-    vsix_target = ARTIFACTS / vsix_candidates[0].name
-    shutil.move(str(vsix_candidates[0]), vsix_target)
+    extension_manifest = json.loads((EXTENSION / "package.json").read_text(encoding="utf-8"))
+    extension_name = str(extension_manifest.get("name") or "").strip()
+    extension_version = str(extension_manifest.get("version") or "").strip()
+    if not extension_name or not extension_version:
+        raise SystemExit("VS Code extension package.json must declare name and version")
+    vsix_target = ARTIFACTS / f"{extension_name}-{extension_version}.vsix"
+    if vsix_target.exists():
+        vsix_target.unlink()
+    run(
+        npm,
+        "run",
+        "package",
+        "--",
+        "--out",
+        str(vsix_target),
+        cwd=EXTENSION,
+        label="package VSIX",
+    )
+    if not vsix_target.is_file():
+        raise SystemExit(
+            f"VSIX packaging did not create the expected artifact: {vsix_target}"
+        )
 
     zip_directory(
         ROOT / "facades" / "kiro" / "baldr-orchestrator",

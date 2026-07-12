@@ -34,8 +34,19 @@ def _run(*args: str, cwd: Path = ROOT, env: dict[str, str] | None = None) -> Non
 def test_all() -> None:
     uv = _tool("uv")
     npm = _tool("npm")
-    _run(uv, "run", "--extra", "dev", "pytest", "-q", cwd=ROUTER)
-    _run(uv, "run", "--extra", "dev", "pytest", "-q", cwd=ADAPTER)
+    # Durable tests must never reuse a developer's real Baldr state. Running
+    # both Python suites under one disposable XDG root also makes local and CI
+    # behavior reproducible.
+    with tempfile.TemporaryDirectory(prefix="baldr-test-state-") as temp:
+        root = Path(temp)
+        test_env = {
+            **os.environ,
+            "XDG_CONFIG_HOME": str(root / "config"),
+            "XDG_CACHE_HOME": str(root / "cache"),
+            "XDG_STATE_HOME": str(root / "state"),
+        }
+        _run(uv, "run", "--extra", "dev", "pytest", "-q", cwd=ROUTER, env=test_env)
+        _run(uv, "run", "--extra", "dev", "pytest", "-q", cwd=ADAPTER, env=test_env)
     _run(npm, "test", cwd=LAUNCHER)
     if not (EXTENSION / "node_modules").exists():
         _run(npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund", cwd=EXTENSION)
@@ -91,9 +102,10 @@ def verify_release() -> None:
             for name in names
             if any(part in name for part in ("validation-state/", "node_modules/", "__pycache__/", ".pytest_cache/", ".ruff_cache/"))
             or name.endswith("baldr.sqlite3")
+            or name.lower().endswith(".vsix")
         ]
         if forbidden:
-            failures.append(f"source bundle contains forbidden runtime state: {forbidden[:10]}")
+            failures.append(f"source bundle contains forbidden generated/runtime content: {forbidden[:10]}")
     reports = [DIST / "validation" / "build-validation.json", DIST / "validation" / "synthetic-qualification.json"]
     raw_fragments = [
         str(ROOT),

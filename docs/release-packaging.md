@@ -1,14 +1,14 @@
 # Release packaging
 
-v0.16.1 separates source, executable artifacts, and validation evidence.
+v0.17.0 separates source, executable artifacts, and validation evidence.
 
 ```text
-dist/baldr-router-0.16.1-source.zip
+dist/baldr-router-0.17.0-source.zip
   source, tests, docs, workflows, contracts; no runtime database or cache
 
-dist/baldr-router-0.16.1-artifacts.zip
+dist/baldr-router-0.17.0-artifacts.zip
   wheels, VSIX, Kiro Power, Agent Plugin, SBOM and provenance
-dist/baldr-router-0.16.1-validation-evidence.zip
+dist/baldr-router-0.17.0-validation-evidence.zip
   portable synthetic build reports only
 ```
 
@@ -36,13 +36,6 @@ private evidence from a user machine
 Build and verify with one cross-platform entrypoint:
 
 ```bash
-make build
-make verify-release
+python scripts/dev.py build
+python scripts/dev.py verify-release
 ```
-
-`make build` writes the individual installable artifacts under
-`dist/artifacts/`: the core and Kiro adapter wheels/sdists in `python/`, the
-VS Code `.vsix`, the Kiro Power ZIP, and the VS Code Agent Plugin ZIP. Use
-`make facades` only to regenerate facade files from the shared contract; it
-does not produce installable packages. For local MCP development, run
-`make mcp` instead of building an artifact.

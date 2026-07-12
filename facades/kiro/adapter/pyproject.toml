@@ -4,14 +4,14 @@ build-backend = "hatchling.build"
 
 [project]
 name = "baldr-kiro-adapter"
-version = "0.16.1"
+version = "0.17.0"
 description = "Optional Kiro client adapter for the client-agnostic baldr-router MCP runtime."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 authors = [{ name = "Baldr" }]
 dependencies = [
-  "baldr-router>=0.16.1,<0.17.0",
+  "baldr-router>=0.17.0,<0.18.0",
   "mcp>=1.10.0"
 ]
 
