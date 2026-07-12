@@ -4,7 +4,7 @@ from pathlib import Path
 
 from baldr_router.config import RoleConfig
 from baldr_router.provider_api import ProviderCapabilities, ProviderRunRequest
-from baldr_router.provider_registry import ProviderRegistry
+from baldr_router.provider_registry import ProviderRegistry, provider_isolation_status
 
 
 class FakeProvider:
@@ -56,3 +56,26 @@ def test_registry_marks_advisory_boundaries(tmp_path: Path):
     assert result["ok"] is True
     assert result["boundary_enforcement"] == "advisory"
     assert result["warnings"]
+
+
+def test_protected_workspace_boundary_fails_closed_for_advisory_or_unsafe_runners():
+    kiro = provider_isolation_status(
+        "kiro-cli", can_write=False, runner="cli", sandbox="read-only"
+    )
+    sdk = provider_isolation_status(
+        "codex", can_write=True, runner="sdk", sandbox="workspace-write"
+    )
+    unrestricted = provider_isolation_status(
+        "codex", can_write=True, runner="exec-json", sandbox="danger-full-access"
+    )
+    enforced = provider_isolation_status(
+        "codex", can_write=True, runner="exec-json", sandbox="workspace-write"
+    )
+
+    assert kiro["ok"] is False
+    assert "advisory-provider-boundary" in kiro["reasons"]
+    assert sdk["ok"] is False
+    assert "sdk-cwd-not-enforced" in sdk["reasons"]
+    assert unrestricted["ok"] is False
+    assert "unrestricted-sandbox" in unrestricted["reasons"]
+    assert enforced["ok"] is True

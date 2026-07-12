@@ -306,6 +306,55 @@ MIGRATIONS: tuple[Migration, ...] = (
             "ALTER TABLE work_items ADD COLUMN config_json TEXT NOT NULL DEFAULT '{}'",
         ),
     ),
+    Migration(
+        7,
+        "durable-workspace-publications",
+        (
+            """
+            CREATE TABLE IF NOT EXISTS workspace_publications (
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
+                checkpoint_id TEXT NOT NULL UNIQUE REFERENCES workspace_checkpoints(id) ON DELETE CASCADE,
+                plan_artifact_id TEXT NOT NULL,
+                plan_digest TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'planned' CHECK(length(status) > 0),
+                next_ordinal INTEGER NOT NULL DEFAULT 0 CHECK(next_ordinal >= 0),
+                inflight_ordinal INTEGER CHECK(inflight_ordinal IS NULL OR inflight_ordinal >= 0),
+                conflict_artifact_id TEXT,
+                error_code TEXT,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                completed_at TEXT,
+                CHECK(status NOT IN ('published', 'discarded') OR inflight_ordinal IS NULL)
+            )
+            """,
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_workspace_publications_checkpoint_run_insert
+            BEFORE INSERT ON workspace_publications
+            WHEN NOT EXISTS (
+                SELECT 1 FROM workspace_checkpoints
+                WHERE id = NEW.checkpoint_id AND run_id = NEW.run_id
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'workspace publication checkpoint belongs to another run');
+            END
+            """,
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_workspace_publications_checkpoint_run_update
+            BEFORE UPDATE OF run_id, checkpoint_id ON workspace_publications
+            WHEN NOT EXISTS (
+                SELECT 1 FROM workspace_checkpoints
+                WHERE id = NEW.checkpoint_id AND run_id = NEW.run_id
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'workspace publication checkpoint belongs to another run');
+            END
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_workspace_publications_run_created ON workspace_publications(run_id, created_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_workspace_publications_status_updated ON workspace_publications(status, updated_at)",
+        ),
+    ),
 
 )
 

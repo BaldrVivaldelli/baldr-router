@@ -1,14 +1,14 @@
 # Release packaging
 
-v0.17.0 separates source, executable artifacts, and validation evidence.
+v0.18.0 separates source, executable artifacts, and validation evidence.
 
 ```text
-dist/baldr-router-0.17.0-source.zip
+dist/baldr-router-0.18.0-source.zip
   source, tests, docs, workflows, contracts; no runtime database or cache
 
-dist/baldr-router-0.17.0-artifacts.zip
+dist/baldr-router-0.18.0-artifacts.zip
   wheels, VSIX, Kiro Power, Agent Plugin, SBOM and provenance
-dist/baldr-router-0.17.0-validation-evidence.zip
+dist/baldr-router-0.18.0-validation-evidence.zip
   portable synthetic build reports only
 ```
 

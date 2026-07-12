@@ -351,3 +351,99 @@ def test_write_side_effect_crash_is_never_retried_blindly(
     write_steps = [step for step in snapshot["steps"] if step["phase"] == "implementer"]
     assert write_steps[0]["status"] == "unknown"
     assert write_steps[0]["participants"][0]["attempts"][0]["status"] == "unknown"
+
+
+def test_non_git_reconciliation_accepts_files_but_never_offers_checkpoint_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    workspace = tmp_path / "plain-workspace"
+    workspace.mkdir()
+    store = DurableStore(path=tmp_path / "state.sqlite3")
+    snapshot = _resolved_snapshot(
+        _config(),
+        architect_provider=None,
+        implementer_provider=None,
+        reviewer_provider=None,
+        max_rounds=0,
+        workspace_mode="non-git",
+    )
+
+    def crash_inside_non_git_write(**kwargs):
+        role = kwargs["role_name"]
+        if role == "implementer":
+            (kwargs["cwd"] / "unprotected.txt").write_text(
+                "keep after explicit acceptance\n", encoding="utf-8"
+            )
+            raise SimulatedProcessCrash("non-git-provider-side-effect")
+        return {
+            "ok": True,
+            "thread_id": f"thread-{role}",
+            "final_report": _report("planned", role),
+        }
+
+    with pytest.raises(SimulatedProcessCrash):
+        DurableWorkflowEngine(
+            store=store, provider_runner=crash_inside_non_git_write
+        ).run(
+            workspace_root=workspace,
+            task="Create a non-Git side effect",
+            extra_context="",
+            config_snapshot=snapshot,
+            context7_libraries=None,
+            client_name="test",
+            idempotency_key="non-git-side-effect",
+        )
+
+    run_id = _single_run_id(store)
+    _expire_run_lease(store, run_id)
+    recover_stale_runs(store)
+    recovered = store.get_run(run_id)
+    assert recovered is not None
+    assert recovered["reconciliation"]["allowed_actions"] == [
+        "accept_existing_changes",
+        "mark_failed",
+    ]
+    assert store.latest_checkpoint(run_id) is None
+
+    unsafe = DurableWorkflowEngine(store=store, provider_runner=lambda **_: {}).run(
+        workspace_root=workspace,
+        task="ignored",
+        extra_context="",
+        config_snapshot=snapshot,
+        context7_libraries=None,
+        client_name="test",
+        resume_run_id=run_id,
+        reconciliation_action="resume_from_checkpoint",
+    )
+    assert unsafe["ok"] is False
+    assert unsafe["error"]["code"] == "unsafe_reconciliation_action"
+
+    def review_after_acceptance(**kwargs):
+        role = kwargs["role_name"]
+        assert role == "reviewer"
+        return {
+            "ok": True,
+            "thread_id": "thread-reviewer",
+            "final_report": _report("approved", role),
+        }
+
+    accepted = DurableWorkflowEngine(
+        store=store, provider_runner=review_after_acceptance
+    ).run(
+        workspace_root=workspace,
+        task="ignored",
+        extra_context="",
+        config_snapshot=snapshot,
+        context7_libraries=None,
+        client_name="test",
+        resume_run_id=run_id,
+        reconciliation_action="accept_existing_changes",
+    )
+
+    assert accepted["ok"] is True
+    assert (workspace / "unprotected.txt").read_text(encoding="utf-8") == (
+        "keep after explicit acceptance\n"
+    )
+    assert store.latest_checkpoint(run_id) is None

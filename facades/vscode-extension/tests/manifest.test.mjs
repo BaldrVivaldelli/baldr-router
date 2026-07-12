@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const manifest = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
 const contract = JSON.parse(fs.readFileSync(path.join(root, 'resources', 'facade-v1.json'), 'utf8'));
+const runtimeSource = fs.readFileSync(path.join(root, 'src', 'runtime.ts'), 'utf8');
 
 test('exposes one command palette command', () => {
   assert.deepEqual(manifest.contributes.commands.map((item) => item.command), ['baldr.open']);
@@ -30,8 +31,10 @@ test('requires VS Code Workspace Trust before provider execution', () => {
   assert.equal(manifest.capabilities.untrustedWorkspaces.supported, false);
 });
 
-test('packages the v0.17.6 Baldr Console facade', () => {
-  assert.equal(manifest.version, '0.17.6');
+test('packages the v0.18.0 Baldr Console facade', () => {
+  assert.equal(manifest.version, '0.18.0');
+  const extensionVersion = runtimeSource.match(/export const EXTENSION_VERSION = '([^']+)'/)?.[1];
+  assert.equal(extensionVersion, manifest.version);
   assert.match(contract.intents.setup.description, /lifecycle verification/);
 });
 

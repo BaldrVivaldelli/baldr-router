@@ -146,10 +146,13 @@ def run_workflow_impl(
             }
         return engine.request_cancel(resume_run_id, reason=cancel_reason)
 
+    selected_workspace_mode = str(workspace_mode or "automatic").strip().lower()
+    protected_non_git = selected_workspace_mode in {"auto", "automatic"}
     try:
         cwd = require_workspace(
             workspace_root,
             access="read" if dry_run else "write",
+            protected_non_git=protected_non_git,
         )
     except WorkspacePolicyError as exc:
         return exc.to_dict()

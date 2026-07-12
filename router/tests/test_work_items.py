@@ -12,6 +12,7 @@ from baldr_router.durability.migrations import MIGRATIONS
 from baldr_router.facade import facade_run, facade_status_report
 from baldr_router.work_items import (
     WorkItemService,
+    _allowed_actions,
     available_execution_profiles,
     workbench_options,
 )
@@ -78,6 +79,7 @@ def test_work_item_schema_and_private_task_artifact(tmp_path: Path, monkeypatch:
     )
 
     assert item["status"] == "draft"
+    assert item["safety_mode"] == "automatic"
     assert item["title"] == "Implement refresh token rotation"
     assert item["task"] == "Implement refresh token rotation"
     assert item["extra_context"] == "Use the current auth service."
@@ -139,6 +141,27 @@ def test_non_git_mode_requires_explicit_consent_and_is_remembered(
     assert item["safety_mode"] == "non-git"
 
 
+def test_automatic_is_the_default_and_auto_alias_is_canonicalized(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _isolated_runtime(tmp_path, monkeypatch)
+    workspace = tmp_path / "plain-workspace"
+    workspace.mkdir()
+    monkeypatch.setenv(RUNTIME_ROOTS_ENV, json.dumps([str(workspace)]))
+    service = WorkItemService()
+
+    defaults = service.preferences(workspace)
+    saved = service.set_preferences(workspace, safety_mode="auto")
+    item = service.create(workspace_root=workspace, task="Protected task")
+
+    assert defaults["safety_mode"] == "automatic"
+    assert defaults["non_git_confirmed"] is False
+    assert saved["safety_mode"] == "automatic"
+    assert saved["non_git_confirmed"] is False
+    assert item["safety_mode"] == "automatic"
+    assert load_config().workspace.trusted_non_git_roots == []
+
+
 def test_frozen_run_intent_manages_durable_items_and_dry_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -197,10 +220,16 @@ def test_console_options_are_aliases_over_setup_status_run():
         "help",
     }
     assert {entry["id"] for entry in options["safety_modes"]} == {
-        "worktree",
+        "automatic",
         "current",
         "non-git",
     }
+    safety = {entry["id"]: entry for entry in options["safety_modes"]}
+    assert safety["automatic"]["label"] == "Protección automática"
+    assert safety["automatic"]["recommended"] is True
+    assert safety["automatic"]["default"] is True
+    assert safety["current"]["label"] == "Trabajar directamente"
+    assert safety["non-git"]["label"] == "Sin protección"
     assert {entry["id"] for entry in options["presets"]} == {
         "fast",
         "balanced",
@@ -209,7 +238,37 @@ def test_console_options_are_aliases_over_setup_status_run():
     }
 
 
-def test_workspace_policy_block_returns_the_saved_draft(
+def test_work_item_actions_respect_recorded_reconciliation_capabilities():
+    item = {"status": "needs_attention", "safety_mode": "non-git"}
+    snapshot = {
+        "run": {
+            "status": "awaiting_reconciliation",
+            "reconciliation": {
+                "allowed_actions": ["mark_failed", "accept_existing_changes"]
+            },
+        }
+    }
+
+    assert _allowed_actions(item, snapshot) == [
+        "accept_existing_changes",
+        "mark_failed",
+        "archive",
+    ]
+
+
+def test_work_item_actions_do_not_restore_unrecorded_recovery_options():
+    item = {"status": "needs_attention", "safety_mode": "non-git"}
+    snapshot = {
+        "run": {
+            "status": "awaiting_reconciliation",
+            "reconciliation": {"allowed_actions": ["mark_failed"]},
+        }
+    }
+
+    assert _allowed_actions(item, snapshot) == ["mark_failed", "archive"]
+
+
+def test_automatic_mode_allows_a_trusted_non_git_workspace_without_direct_consent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     _isolated_runtime(tmp_path, monkeypatch)
@@ -222,12 +281,15 @@ def test_workspace_policy_block_returns_the_saved_draft(
         "Create a small generated file",
         client="vscode-extension",
         work_item_action="execute",
+        dry_run=True,
     )
 
-    assert result["ok"] is False
-    assert result["error"]["code"] == "workspace_non_git_confirmation_required"
+    assert result["ok"] is True
+    assert result["dry_run"] is True
     assert result["work_item"]["status"] == "draft"
     assert result["work_item"]["task"] == "Create a small generated file"
+    assert result["work_item"]["safety_mode"] == "automatic"
+    assert load_config().workspace.trusted_non_git_roots == []
 
 
 def test_provider_context_includes_only_workspace_scoped_attachments(

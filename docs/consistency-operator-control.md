@@ -37,11 +37,11 @@ El input privado y el run se crean en una única transacción, evitando artifact
 Un run durable solo puede reanudarse contra:
 
 - la ruta original normalizada;
-- el mismo Git common directory;
-- el mismo fingerprint de roots/remotes del repositorio;
+- en modo Git, el mismo common directory y fingerprint de roots/remotes;
+- en modo sombra, el mismo ownership, manifest, política congelada y ubicación durable;
 - un workspace todavía confiable.
 
-Baldr rechaza el resume si el repo fue reemplazado en la misma carpeta o si un cliente intenta mover el run a otra ruta.
+Baldr rechaza el resume si el repo fue reemplazado en la misma carpeta, si el estado del shadow fue manipulado o si un cliente intenta mover el run a otra ruta.
 
 ## 4. Cancelación durable
 
@@ -61,36 +61,49 @@ La solicitud es idempotente. Si el cliente desaparece después de pedirla, recov
 
 Un write attempt que pierde confirmación durable pasa a `unknown`; el run pasa a `awaiting_reconciliation`. Baldr nunca lo reintenta ciegamente.
 
-Acciones aceptadas mediante `run`:
+Las acciones se calculan desde el checkpoint, el manifest y el cursor de publicación. Para un workspace sombra pueden ser:
 
 ```text
-resume_from_checkpoint
-  descarta efectos no confirmados y continúa desde el último checkpoint durable
+inspect_shadow
+  devuelve ruta, manifests, delta, conflictos y estado de publicación sin modificar archivos
 
-accept_existing_changes
-  checkpointa el estado existente, registra la decisión del operador y continúa a review
+continue_from_shadow
+  restaura el último manifest confirmado y vuelve a ejecutar el paso incierto
 
-discard_worktree
-  elimina el worktree ambiguo, lo reconstruye y vuelve a ejecutar el write step
+apply_shadow_changes
+  retoma la publicación idempotente desde el cursor durable después de un nuevo preflight
+
+discard_shadow
+  elimina la copia sólo si la publicación no pudo dejar efectos en el original
 
 mark_failed
   termina el workflow preservando journal y evidence
 ```
 
-`status` incluye el diagnóstico del workspace y las acciones seguras para ese estado.
+Una publicación sombra persiste el plan y marca cada operación como inflight antes de modificar el filesystem; después avanza el cursor. Si el proceso cae entre ambas marcas, recovery trata el original como posiblemente modificado. En ese estado no ofrece `discard_shadow`: sólo permite inspeccionar o reintentar `apply_shadow_changes`, que reconoce operaciones ya terminadas y continúa las restantes. Un conflicto de hashes también conserva el shadow; ninguna escritura incierta se reintenta sin una decisión del operador.
 
-## 6. Reconstrucción de worktrees
+Para worktrees existentes continúan `resume_from_checkpoint`, `accept_existing_changes` y `discard_worktree`. Para el modo legado `non-git` sólo se ofrecen las acciones compatibles con una ejecución directa sin checkpoint restaurable. `status` incluye el diagnóstico y la lista exacta de acciones seguras; la UI no inventa capacidades a partir del nombre del modo.
+
+## 6. Worktrees y workspaces sombra
 
 Si un worktree desaparece, Baldr verifica el repo original y lo recrea desde `checkpoint_commit` o `base_commit`. Si existe pero HEAD, identidad o artifacts no coinciden, bloquea la ejecución y exige reconciliación.
 
-El default para workspaces sucios es:
+Un workspace sombra se guarda en el directorio de estado local de Baldr, bajo `shadow-workspaces/<run-id>`, nunca en `/tmp`. `tree/` contiene la copia y un Git privado auxiliar; `control/` guarda ownership, estado, manifests SHA-256, blobs y un journal por evento. Los manifests son la autoridad de recuperación: el Git privado no reemplaza la verificación por contenido.
+
+En protección automática, una raíz Git exacta y limpia usa worktree. Una raíz Git sucia o sin commit, una carpeta sin Git y una subcarpeta seleccionada dentro de un repositorio padre usan shadow; Baldr no expande el alcance al padre ni obliga a hacer stash. El original permanece sin cambios hasta que review aprueba o la persona elige aplicar el checkpoint verificado.
+
+La política siguiente permanece para flujos legados explícitos de worktree/in-place; no degrada `automatic` a escritura directa:
 
 ```toml
 [workspace]
 dirty_workspace_policy = "reject"
 ```
 
-El modo in-place debe habilitarse explícitamente cuando el aislamiento por worktree no sea posible.
+`current` e `in-place` son modos avanzados de escritura directa y conservan exactamente la subcarpeta elegida como cwd, aunque Git se encuentre en un padre. `non-git` corresponde a **Sin protección** y exige consentimiento explícito. `worktree` se conserva como valor legado para preferencias y tareas ya persistidas; el default nuevo es `automatic` (`auto` en el core de bajo nivel).
+
+Antes de crear un shadow, Baldr excluye `.git`, `.hg`, `.svn`, un denylist mínimo no reemplazable de credenciales, patrones sensibles configurados y artefactos generados. Aplica límites visibles de entradas (incluidos directorios), bytes totales, tamaño individual, profundidad y enlaces. Sólo acepta symlinks relativos que permanezcan dentro del alcance; rechaza rutas no portables y reparse points no soportados. Los modos POSIX se conservan donde el filesystem los soporte; Windows usa semántica de permisos de mejor esfuerzo y falla explícitamente si no puede recrear un enlace.
+
+Un cwd no se considera una frontera. En modos protegidos, adapters `advisory`, Codex SDK sin cwd demostrable y sandboxes irrestrictos se bloquean antes de ejecutar; sólo `read-only` o `workspace-write` con enforcement real son aceptados.
 
 ## 7. Salud y mantenimiento SQLite
 
@@ -101,12 +114,15 @@ PRAGMA quick_check / integrity_check
 PRAGMA foreign_key_check
 backup transaccional antes de migraciones
 retención de terminal runs
+retención y limpieza segura de workspaces sombra
 GC de artifacts no referenciados
 expiración de provider sessions
 WAL checkpoint
 ```
 
-En un maintenance full también crea un backup verificable. La base debe vivir en el filesystem local del runtime, especialmente dentro de WSL.
+En un maintenance full también crea un backup verificable. La base y los shadows deben vivir en el filesystem local del runtime, especialmente dentro de WSL.
+
+Por defecto, un shadow publicado y verificado se elimina inmediatamente; uno fallido se retiene 30 días y uno con conflicto terminal 90 días. `cleanup_successful_shadow_workspaces`, `retain_failed_shadow_workspaces`, `shadow_success_retention_hours`, `shadow_failed_retention_days` y `shadow_conflict_retention_days` permiten ajustar ese comportamiento. Si `cleanup_successful_shadow_workspaces=false`, maintenance tampoco elimina automáticamente los aprobados. Un conflicto no terminal sigue retenido hasta una decisión segura. Maintenance valida ownership, estado terminal y recuperabilidad antes de borrar.
 
 ## 8. Lifecycle de sesiones
 
@@ -152,8 +168,13 @@ La suite cubre:
 - conflicto de idempotency fingerprint;
 - resume contra ruta o repo distinto;
 - cancelación idempotente y materializada;
-- las cuatro acciones de reconciliación;
+- acciones seguras de reconciliación calculadas por modo y estado;
 - reconstrucción de worktree;
+- creación y checkpoint durable de workspaces sombra;
+- preflight por hashes y publicación sombra idempotente;
+- crash durante una operación y recuperación desde cursor durable;
+- conflicto del original y descarte bloqueado después de publicación parcial;
+- límites, exclusiones, permisos, symlinks y repositorios anidados;
 - integrity, backup, WAL, GC y session expiry;
 - reducers con conflicto y quorum;
 - random walks de la state machine;

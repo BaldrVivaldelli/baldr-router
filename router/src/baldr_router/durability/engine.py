@@ -16,7 +16,12 @@ from baldr_router.config import AppConfig, RoleConfig, WorkflowConfig
 from baldr_router.context7 import prepare_context7_bundle
 from baldr_router.execution_profiles import role_execution_plan
 from baldr_router.process_control import terminate_processes_for_run
-from baldr_router.provider_registry import provider_runtime_identity, run_provider_role
+from baldr_router.provider_registry import (
+    provider_isolation_status,
+    provider_runtime_identity,
+    run_provider_role,
+)
+from baldr_router.redaction import redact_text
 from baldr_router.runtime_guard import child_provider_env, new_run_id
 from baldr_router.telemetry import append_run, utc_now_iso
 
@@ -41,6 +46,10 @@ RECONCILIATION_ACTIONS = {
     "resume_from_checkpoint",
     "accept_existing_changes",
     "discard_worktree",
+    "inspect_shadow",
+    "continue_from_shadow",
+    "apply_shadow_changes",
+    "discard_shadow",
     "mark_failed",
 }
 
@@ -316,8 +325,26 @@ def _resolved_snapshot(
         rounds = min(cfg.safety.max_rounds, max(int(rounds), int(wf.max_rounds)))
     workspace_snapshot = asdict(cfg.workspace)
     selected_workspace_mode = str(workspace_mode or "").strip().lower()
+    requested_safety_mode = selected_workspace_mode or "auto"
+    allow_non_git = selected_workspace_mode == "non-git"
+    protected_automatic = selected_workspace_mode in {"", "auto", "automatic"}
+    workspace_snapshot.update(
+        {
+            "requested_safety_mode": requested_safety_mode,
+            "allow_non_git": allow_non_git,
+            "effective_require_git_repository": bool(
+                cfg.workspace.require_git_repository
+                and not allow_non_git
+                and not protected_automatic
+            ),
+        }
+    )
     if selected_workspace_mode == "worktree":
         workspace_snapshot["write_isolation"] = "worktree"
+        workspace_snapshot["dirty_workspace_policy"] = "reject"
+        workspace_snapshot["publish_worktree_changes"] = True
+    elif protected_automatic:
+        workspace_snapshot["write_isolation"] = "auto"
         workspace_snapshot["dirty_workspace_policy"] = "reject"
         workspace_snapshot["publish_worktree_changes"] = True
     elif selected_workspace_mode in {"current", "non-git"}:
@@ -654,6 +681,53 @@ class DurableWorkflowEngine:
                 config_snapshot=config_snapshot,
                 lease=lease,
             )
+            if execution.isolated:
+                violations: list[dict[str, Any]] = []
+                for phase, plan in config_snapshot["role_plans"].items():
+                    for profile in plan["profiles"]:
+                        status = provider_isolation_status(
+                            str(profile["provider"]),
+                            can_write=bool(plan["can_write"]),
+                            runner=str(profile.get("runner") or ""),
+                            sandbox=str(plan.get("sandbox") or ""),
+                        )
+                        if not status["ok"]:
+                            violations.append(
+                                {
+                                    "phase": phase,
+                                    "profile": str(profile.get("name") or ""),
+                                    **status,
+                                }
+                            )
+                if violations:
+                    cleanup_error: GitWorkspaceError | None = None
+                    try:
+                        # No provider has run yet, so this allocation contains
+                        # only the verified baseline and is safe to discard.
+                        self.workspace_manager.discard_workspace(execution, lease=lease)
+                    except GitWorkspaceError as exc:
+                        cleanup_error = exc
+                    return self._finish_failed(
+                        run_id,
+                        started,
+                        "blocked",
+                        "A selected provider cannot be confined to BALDR's protected copy.",
+                        {
+                            "ok": False,
+                            "error": {
+                                "code": "provider_isolation_not_enforced",
+                                "retryable": False,
+                                "violations": violations,
+                            },
+                            "reason": (
+                                "Choose a provider with an enforced workspace boundary, "
+                                "or explicitly select a direct/unprotected workspace mode."
+                            ),
+                        },
+                        lease,
+                        error_code="provider_isolation_not_enforced",
+                        execution=execution if cleanup_error is not None else None,
+                    )
             workspace_id = str(requested_identity["workspace_id"])
 
             architecture = self._execute_phase(
@@ -665,7 +739,7 @@ class DurableWorkflowEngine:
                 sequence_number=10,
                 round_number=0,
                 plan=config_snapshot["role_plans"]["architect"],
-                cwd=workspace_root,
+                cwd=execution.execution_root,
                 prompt=architect_prompt(task, extra_context, context7_note),
                 report_kind="plan",
                 lease=lease,
@@ -673,7 +747,13 @@ class DurableWorkflowEngine:
             )
             if not architecture.get("ok"):
                 return self._finish_failed(
-                    run_id, started, "blocked", "Architecture phase failed.", architecture, lease
+                    run_id,
+                    started,
+                    "blocked",
+                    "Architecture phase failed.",
+                    architecture,
+                    lease,
+                    execution=execution,
                 )
             plan_summary = _extract_summary(architecture)
 
@@ -703,6 +783,7 @@ class DurableWorkflowEngine:
                     "Implementation phase failed.",
                     implementation,
                     lease,
+                    execution=execution,
                 )
             implementation_summary = _extract_summary(implementation)
 
@@ -733,7 +814,13 @@ class DurableWorkflowEngine:
                 )
                 if not review_result.get("ok"):
                     return self._finish_failed(
-                        run_id, started, "blocked", "Review phase failed.", review_result, lease
+                        run_id,
+                        started,
+                        "blocked",
+                        "Review phase failed.",
+                        review_result,
+                        lease,
+                        execution=execution,
                     )
                 if not _has_blockers(review_result):
                     break
@@ -762,12 +849,29 @@ class DurableWorkflowEngine:
                 )
                 if not fix_result.get("ok"):
                     return self._finish_failed(
-                        run_id, started, "blocked", "Fix phase failed.", fix_result, lease
+                        run_id,
+                        started,
+                        "blocked",
+                        "Fix phase failed.",
+                        fix_result,
+                        lease,
+                        execution=execution,
                     )
                 implementation_summary = _extract_summary(fix_result)
 
             approved = bool(review_result and not _has_blockers(review_result))
             publication: dict[str, Any] | None = None
+            if approved:
+                # Publication is an externally visible, retryable finalization
+                # step. Keeping it non-terminal lets recovery safely re-enter
+                # an idempotent publish after a process or machine restart.
+                self.store.transition_run(
+                    run_id,
+                    "finalizing",
+                    event_type="workflow.finalization_started",
+                    payload={"workspace_mode": execution.mode},
+                    lease=lease,
+                )
             if approved and config_snapshot["workspace"].get("publish_worktree_changes", True):
                 try:
                     publication = self.workspace_manager.publish(execution, lease=lease)
@@ -777,12 +881,15 @@ class DurableWorkflowEngine:
                         run_id,
                         "awaiting_reconciliation",
                         event_type="workflow.publication_requires_reconciliation",
-                        payload={"reason": str(exc)},
-                        error_code="git_publication_conflict",
+                        payload={"reason": str(exc), "error_code": exc.code},
+                        error_code=exc.code or "workspace_publication_conflict",
                         error_reason=str(exc),
                         reconciliation={
-                            "reason": "git-publication-conflict",
+                            "reason": "workspace-publication-conflict",
                             "message": str(exc),
+                            "error_code": exc.code,
+                            "review_approved": True,
+                            "details": exc.details,
                             **details,
                         },
                         lease=lease,
@@ -805,6 +912,20 @@ class DurableWorkflowEngine:
                 run_id=run_id, kind="workflow-final-report", value=final_report
             )
             target = "approved" if approved else "needs_changes"
+            if not approved and execution.mode == "shadow":
+                return self._retain_shadow_for_reconciliation(
+                    run_id=run_id,
+                    report=final_report,
+                    execution=execution,
+                    error_code="workflow_review_needs_changes",
+                    error_reason=(
+                        "Review did not approve the protected changes. Inspect, continue, "
+                        "apply, or discard the durable copy."
+                    ),
+                    review_approved=False,
+                    lease=lease,
+                    final_artifact_id=final_artifact,
+                )
             self.store.transition_run(
                 run_id,
                 target,
@@ -814,12 +935,57 @@ class DurableWorkflowEngine:
                 lease=lease,
             )
             evidence = create_workflow_evidence(self.store, run_id)
-            if (
+            cleanup_requested = bool(
                 approved
-                and execution.mode == "worktree"
-                and config_snapshot["workspace"].get("cleanup_successful_worktrees", True)
-            ):
-                self.workspace_manager.cleanup(execution)
+                and (
+                    (
+                        execution.mode == "worktree"
+                        and config_snapshot["workspace"].get(
+                            "cleanup_successful_worktrees", True
+                        )
+                    )
+                    or (
+                        execution.mode == "shadow"
+                        and config_snapshot["workspace"].get(
+                            "cleanup_successful_shadow_workspaces", True
+                        )
+                        and int(
+                            config_snapshot["workspace"].get(
+                                "shadow_success_retention_hours", 0
+                            )
+                            or 0
+                        )
+                        <= 0
+                    )
+                )
+            )
+            if cleanup_requested:
+                try:
+                    cleanup = self.workspace_manager.cleanup(execution)
+                    if execution.checkpoint_id:
+                        self.store.mark_checkpoint_status(
+                            execution.checkpoint_id,
+                            "cleaned",
+                            metadata={
+                                "cleaned_at": utc_now_iso(),
+                                "cleanup": cleanup,
+                            },
+                            lease=lease,
+                        )
+                except GitWorkspaceError as exc:
+                    # Publication is already verified. Keep durable metadata so
+                    # startup maintenance can retry cleanup without changing
+                    # the approved result.
+                    if execution.checkpoint_id:
+                        self.store.mark_checkpoint_status(
+                            execution.checkpoint_id,
+                            "cleanup_pending",
+                            metadata={
+                                "cleanup_error_code": exc.code,
+                                "cleanup_error": str(exc),
+                            },
+                            lease=lease,
+                        )
             result = self._result_from_snapshot(self.store.snapshot_run(run_id))
             result["evidence"] = evidence
             self._append_telemetry(result)
@@ -847,6 +1013,7 @@ class DurableWorkflowEngine:
             return result
         except GitWorkspaceError as exc:
             try:
+                current_run = self.store.get_run(run_id) or {}
                 checkpoint = self.store.latest_checkpoint(run_id)
                 execution = (
                     self.workspace_manager.from_checkpoint(checkpoint) if checkpoint else None
@@ -860,9 +1027,21 @@ class DurableWorkflowEngine:
                     run_id,
                     "awaiting_reconciliation",
                     event_type="workflow.workspace_requires_reconciliation",
-                    error_code="workspace_reconciliation_required",
+                    error_code=exc.code or "workspace_reconciliation_required",
                     error_reason=str(exc),
-                    reconciliation={"reason": "workspace-state-invalid", "message": str(exc), **details},
+                    reconciliation={
+                        "reason": "workspace-state-invalid",
+                        "message": str(exc),
+                        "error_code": exc.code,
+                        "review_approved": bool(
+                            str(current_run.get("status") or "") == "finalizing"
+                            or (current_run.get("reconciliation") or {}).get(
+                                "review_approved"
+                            )
+                        ),
+                        "details": exc.details,
+                        **details,
+                    },
                     lease=lease,
                 )
             except Exception:
@@ -874,13 +1053,44 @@ class DurableWorkflowEngine:
             run = self.store.get_run(run_id)
             if run and run["status"] not in TERMINAL_RUN_STATES:
                 try:
-                    self.store.transition_run(
-                        run_id,
-                        "failed",
-                        error_code="durable_engine_failed",
-                        error_reason=str(exc),
-                        lease=lease,
+                    checkpoint = self.store.latest_checkpoint(run_id)
+                    execution = (
+                        self.workspace_manager.from_checkpoint(checkpoint)
+                        if checkpoint
+                        else None
                     )
+                    if execution is not None and execution.mode == "shadow":
+                        details = self.workspace_manager.reconciliation_status(
+                            execution
+                        )
+                        self.store.transition_run(
+                            run_id,
+                            "awaiting_reconciliation",
+                            event_type="workflow.shadow_retained_after_engine_failure",
+                            error_code="durable_engine_failed",
+                            error_reason=str(exc),
+                            reconciliation={
+                                "reason": "durable-engine-failure",
+                                "message": str(exc),
+                                "error_code": "durable_engine_failed",
+                                "review_approved": bool(
+                                    str(run.get("status") or "") == "finalizing"
+                                    or (run.get("reconciliation") or {}).get(
+                                        "review_approved"
+                                    )
+                                ),
+                                **details,
+                            },
+                            lease=lease,
+                        )
+                    else:
+                        self.store.transition_run(
+                            run_id,
+                            "failed",
+                            error_code="durable_engine_failed",
+                            error_reason=str(exc),
+                            lease=lease,
+                        )
                 except Exception:
                     pass
             result = self._result_from_snapshot(self.store.snapshot_run(run_id))
@@ -901,11 +1111,25 @@ class DurableWorkflowEngine:
         run_id = str(run["id"])
         checkpoint = self.store.latest_checkpoint(run_id)
         execution = self.workspace_manager.from_checkpoint(checkpoint) if checkpoint else None
-        details = (
-            self.workspace_manager.reconciliation_status(execution)
-            if execution
-            else {"allowed_actions": ["mark_failed"]}
+        workspace_config = (run.get("config_snapshot") or {}).get("workspace") or {}
+        repository_identity = run.get("repository_identity") or {}
+        non_git_run = bool(
+            workspace_config.get("allow_non_git") is True
+            or repository_identity.get("git") is False
         )
+        if execution:
+            details = self.workspace_manager.reconciliation_status(execution)
+        elif non_git_run:
+            details = {
+                "allowed_actions": ["accept_existing_changes", "mark_failed"],
+                "mode": "in-place",
+                "original_exists": workspace_root.exists(),
+                "execution_exists": workspace_root.exists(),
+                "execution_is_git": False,
+                "recoverable": False,
+            }
+        else:
+            details = {"allowed_actions": ["mark_failed"]}
         if not action:
             result = self._result_from_snapshot(self.store.snapshot_run(run_id))
             result.update(
@@ -943,6 +1167,22 @@ class DurableWorkflowEngine:
             )
             return {"continue": False, "result": result}
 
+        if action == "inspect_shadow":
+            result = self._result_from_snapshot(self.store.snapshot_run(run_id))
+            result.update(
+                {
+                    "ok": False,
+                    "status": "awaiting_reconciliation",
+                    "reason": run.get("error_reason"),
+                    "reconciliation": {
+                        **(run.get("reconciliation") or {}),
+                        **details,
+                        "inspected_at": utc_now_iso(),
+                    },
+                }
+            )
+            return {"continue": False, "result": result}
+
         if action == "mark_failed":
             self.store.transition_run(
                 run_id,
@@ -956,31 +1196,122 @@ class DurableWorkflowEngine:
             result = self._result_from_snapshot(self.store.snapshot_run(run_id))
             return {"continue": False, "result": result}
 
+        if action == "discard_shadow":
+            if execution is None or execution.mode != "shadow":
+                raise GitWorkspaceError(
+                    "No shadow workspace exists for this reconciliation.",
+                    code="shadow_workspace_missing",
+                )
+            self.workspace_manager.discard_workspace(execution, lease=lease)
+            self.store.transition_run(
+                run_id,
+                "failed",
+                event_type="workflow.shadow_discarded",
+                error_code="operator_discarded_shadow",
+                error_reason="The operator discarded the protected shadow workspace.",
+                reconciliation={"resolved_by": action, "resolved_at": utc_now_iso()},
+                lease=lease,
+            )
+            result = self._result_from_snapshot(self.store.snapshot_run(run_id))
+            return {"continue": False, "result": result}
+
         snapshot = self.store.snapshot_run(run_id, include_events=False)
         unknown_steps = [step for step in snapshot["steps"] if step["status"] == "unknown"]
-        if execution is None:
-            raise GitWorkspaceError("No workspace checkpoint exists for reconciliation.")
 
-        if action in {"resume_from_checkpoint", "discard_worktree"}:
-            if execution.mode == "worktree":
-                self.workspace_manager.discard_worktree(execution, lease=lease)
-                # Recreate at the last durable checkpoint/base. The checkpoint
-                # row remains the reconstruction source even after discard.
-                execution.execution_root = Path(str(checkpoint["execution_root"]))
-                self.workspace_manager.restore_or_reconstruct(
-                    run_id=run_id, workspace_root=workspace_root, lease=lease
-                )
+        if action in {
+            "resume_from_checkpoint",
+            "continue_from_shadow",
+            "discard_worktree",
+        }:
+            if execution is None:
+                raise GitWorkspaceError("No workspace checkpoint exists for reconciliation.")
+            self.workspace_manager.restore_checkpoint(execution, lease=lease)
             for step in unknown_steps:
                 self.store.reset_step_for_retry(
                     str(step["id"]), reason=f"operator:{action}", lease=lease
                 )
+        elif action == "apply_shadow_changes":
+            if execution is None or execution.mode != "shadow":
+                raise GitWorkspaceError(
+                    "No shadow checkpoint exists to apply.",
+                    code="shadow_checkpoint_missing",
+                )
+            publication = self.workspace_manager.publish(execution, lease=lease)
+            review_approved = bool((run.get("reconciliation") or {}).get("review_approved"))
+            target = "approved" if review_approved else "needs_changes"
+            report = {
+                "status": target,
+                "summary": (
+                    "The operator safely applied the verified shadow checkpoint."
+                ),
+                "publication": publication,
+                "operator_action": action,
+            }
+            artifact = self.store.store_artifact(
+                run_id=run_id,
+                kind="workflow-final-report",
+                value=report,
+            )
+            self.store.transition_run(
+                run_id,
+                target,
+                event_type="workflow.shadow_applied_by_operator",
+                final_artifact_id=artifact,
+                reconciliation={
+                    "resolved_by": action,
+                    "resolved_at": utc_now_iso(),
+                    "publication_id": publication.get("publication_id"),
+                },
+                lease=lease,
+            )
+            cleanup_requested = bool(
+                workspace_config.get("cleanup_successful_shadow_workspaces", True)
+                and int(workspace_config.get("shadow_success_retention_hours", 0) or 0)
+                <= 0
+            )
+            if cleanup_requested:
+                try:
+                    cleanup = self.workspace_manager.cleanup(execution)
+                    if execution.checkpoint_id:
+                        self.store.mark_checkpoint_status(
+                            execution.checkpoint_id,
+                            "cleaned",
+                            metadata={"cleaned_at": utc_now_iso(), "cleanup": cleanup},
+                            lease=lease,
+                        )
+                except GitWorkspaceError as exc:
+                    if execution.checkpoint_id:
+                        self.store.mark_checkpoint_status(
+                            execution.checkpoint_id,
+                            "cleanup_pending",
+                            metadata={
+                                "cleanup_error_code": exc.code,
+                                "cleanup_error": str(exc),
+                            },
+                            lease=lease,
+                        )
+            result = self._result_from_snapshot(self.store.snapshot_run(run_id))
+            result["evidence"] = create_workflow_evidence(self.store, run_id)
+            result["publication"] = publication
+            self._append_telemetry(result)
+            return {"continue": False, "result": result}
         elif action == "accept_existing_changes":
             for step in unknown_steps:
-                checkpoint_result = self.workspace_manager.checkpoint(
-                    execution,
-                    step_id=str(step["id"]),
-                    label="operator-accepted-existing-changes",
-                    lease=lease,
+                checkpoint_result = (
+                    self.workspace_manager.checkpoint(
+                        execution,
+                        step_id=str(step["id"]),
+                        label="operator-accepted-existing-changes",
+                        lease=lease,
+                    )
+                    if execution is not None
+                    else {
+                        "ok": True,
+                        "mode": "in-place",
+                        "checkpoint_id": None,
+                        "recoverable": False,
+                        "observation_only": True,
+                    }
                 )
                 report = {
                     "ok": True,
@@ -994,6 +1325,13 @@ class DurableWorkflowEngine:
                         "verification_needed": ["Review the reconciled diff before approval."],
                         "risks": [],
                         "follow_up": [],
+                        "decisions": {},
+                        "constraints": [],
+                        "assumptions": [],
+                        "alternatives_rejected": [],
+                        "acceptance_criteria": [],
+                        "blockers": [],
+                        "review_decision": "not_applicable",
                     },
                     "checkpoint": checkpoint_result,
                     "reconciled": True,
@@ -1038,6 +1376,7 @@ class DurableWorkflowEngine:
             workspace_root=workspace_root,
             mode=str(workspace_cfg.get("write_isolation") or "auto"),
             dirty_policy=str(workspace_cfg.get("dirty_workspace_policy") or "reject"),
+            workspace_config=dict(workspace_cfg),
             lease=lease,
         )
 
@@ -1213,28 +1552,45 @@ class DurableWorkflowEngine:
                 attempt_id=attempt_id,
             )
             with heartbeat:
-                result = self.provider_runner(
-                    provider=str(profile["provider"]),
-                    role_name=phase,
-                    role=role,
-                    cwd=cwd,
-                    prompt=prompt,
-                    workflow="architect-implement-review",
-                    report_kind=report_kind,
-                    extra_env=env,
-                    profile_name=str(profile["name"]),
-                    model=str(profile.get("model") or ""),
-                    reasoning_effort=str(profile.get("reasoning_effort") or ""),
-                    agent=str(profile.get("agent") or ""),
-                    effort=str(profile.get("effort") or ""),
-                    runner=str(profile.get("runner") or ""),
-                    session_scope=str(profile.get("session_scope") or ""),
-                    session_key=session_key,
-                    resume_session_id=(session or {}).get("thread_id"),
-                    durable_run_id=run_id,
-                    durable_step_id=step_id,
-                    durable_attempt_id=attempt_id,
-                )
+                try:
+                    result = self.provider_runner(
+                        provider=str(profile["provider"]),
+                        role_name=phase,
+                        role=role,
+                        cwd=cwd,
+                        prompt=prompt,
+                        workflow="architect-implement-review",
+                        report_kind=report_kind,
+                        extra_env=env,
+                        profile_name=str(profile["name"]),
+                        model=str(profile.get("model") or ""),
+                        reasoning_effort=str(profile.get("reasoning_effort") or ""),
+                        agent=str(profile.get("agent") or ""),
+                        effort=str(profile.get("effort") or ""),
+                        runner=str(profile.get("runner") or ""),
+                        session_scope=str(profile.get("session_scope") or ""),
+                        session_key=session_key,
+                        resume_session_id=(session or {}).get("thread_id"),
+                        durable_run_id=run_id,
+                        durable_step_id=step_id,
+                        durable_attempt_id=attempt_id,
+                    )
+                except (WorkflowCancelled, LeaseFenceError):
+                    raise
+                except Exception as exc:
+                    reason = redact_text(
+                        f"Provider raised {type(exc).__name__}: {exc}"
+                    )
+                    result = {
+                        "ok": False,
+                        "status": "failed",
+                        "reason": reason,
+                        "error": {
+                            "code": "provider_unexpected_exception",
+                            "message": reason,
+                            "retryable": True,
+                        },
+                    }
             heartbeat.raise_if_unhealthy()
             self.store.assert_lease(lease)
             artifact = self.store.store_artifact(
@@ -1364,6 +1720,9 @@ class DurableWorkflowEngine:
         summary: str,
         detail: dict[str, Any],
         lease: LeaseToken,
+        *,
+        error_code: str = "workflow_phase_failed",
+        execution: WorkspaceExecution | None = None,
     ) -> dict[str, Any]:
         report = {
             "status": status,
@@ -1374,12 +1733,62 @@ class DurableWorkflowEngine:
         artifact = self.store.store_artifact(
             run_id=run_id, kind="workflow-final-report", value=report
         )
+        if execution is not None and execution.mode == "shadow":
+            return self._retain_shadow_for_reconciliation(
+                run_id=run_id,
+                report=report,
+                execution=execution,
+                error_code=error_code,
+                error_reason=summary,
+                review_approved=False,
+                lease=lease,
+                final_artifact_id=artifact,
+            )
         self.store.transition_run(
             run_id,
             status,
             final_artifact_id=artifact,
-            error_code="workflow_phase_failed",
+            error_code=error_code,
             error_reason=summary,
+            lease=lease,
+        )
+        result = self._result_from_snapshot(self.store.snapshot_run(run_id))
+        result["evidence"] = create_workflow_evidence(self.store, run_id)
+        self._append_telemetry(result)
+        return result
+
+    def _retain_shadow_for_reconciliation(
+        self,
+        *,
+        run_id: str,
+        report: dict[str, Any],
+        execution: WorkspaceExecution,
+        error_code: str,
+        error_reason: str,
+        review_approved: bool,
+        lease: LeaseToken,
+        final_artifact_id: str | None = None,
+    ) -> dict[str, Any]:
+        artifact = final_artifact_id or self.store.store_artifact(
+            run_id=run_id,
+            kind="workflow-final-report",
+            value=report,
+        )
+        details = self.workspace_manager.reconciliation_status(execution)
+        self.store.transition_run(
+            run_id,
+            "awaiting_reconciliation",
+            event_type="workflow.shadow_retained_for_reconciliation",
+            final_artifact_id=artifact,
+            error_code=error_code,
+            error_reason=error_reason,
+            reconciliation={
+                "reason": "shadow-work-remains",
+                "message": error_reason,
+                "error_code": error_code,
+                "review_approved": review_approved,
+                **details,
+            },
             lease=lease,
         )
         result = self._result_from_snapshot(self.store.snapshot_run(run_id))

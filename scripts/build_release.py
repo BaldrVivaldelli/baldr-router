@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "0.17.0"
+VERSION = "0.18.0"
 DIST = ROOT / "dist"
 ARTIFACTS = DIST / "artifacts"
 PYTHON_DIST = ARTIFACTS / "python"
@@ -258,7 +258,7 @@ def build_validation_report() -> Path:
         "release": VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "feature_freeze": True,
-        "qualification_stage": "baldr-console-durable-work-items",
+        "qualification_stage": "automatic-workspace-protection",
         "live_environment_qualified": False,
         "live_environment_note": (
             "Build and synthetic validation cannot qualify a real client environment. "
@@ -310,7 +310,7 @@ def write_checksums() -> Path:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Build Baldr Router v0.17 Baldr Console and durable work-item artifacts")
+    parser = argparse.ArgumentParser(description="Build Baldr Router v0.18 automatic-protection artifacts")
     parser.add_argument("--skip-tests", action="store_true")
     parser.add_argument("--keep-dist", action="store_true")
     args = parser.parse_args()

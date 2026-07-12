@@ -582,7 +582,10 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Persistently trust this workspace after client/user consent",
     )
-    f.add_argument("--workspace-safety-mode", choices=["worktree", "current", "non-git"])
+    f.add_argument(
+        "--workspace-safety-mode",
+        choices=["automatic", "worktree", "current", "non-git"],
+    )
     f.add_argument("--execution-preset", choices=["fast", "balanced", "deep", "custom"])
     f.add_argument("--context-mode", choices=["auto", "on", "off"])
     f.add_argument("--context7-policy", choices=["auto", "on", "off"], help=argparse.SUPPRESS)
@@ -614,7 +617,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     f.add_argument("--work-item-id")
     f.add_argument("--title")
-    f.add_argument("--workspace-mode", choices=["worktree", "current", "non-git"])
+    f.add_argument(
+        "--workspace-mode",
+        choices=["automatic", "worktree", "current", "non-git"],
+    )
     f.add_argument("--execution-preset", choices=["fast", "balanced", "deep", "custom"])
     f.add_argument("--context-mode", choices=["auto", "on", "off"])
     f.add_argument("--context7-policy", choices=["auto", "on", "off"], help=argparse.SUPPRESS)
@@ -632,7 +638,19 @@ def build_parser() -> argparse.ArgumentParser:
     f.add_argument("--dry-run", action="store_true")
     f.add_argument("--idempotency-key")
     f.add_argument("--resume-run-id")
-    f.add_argument("--reconciliation-action", choices=["resume_from_checkpoint", "accept_existing_changes", "discard_worktree", "mark_failed"])
+    f.add_argument(
+        "--reconciliation-action",
+        choices=[
+            "resume_from_checkpoint",
+            "accept_existing_changes",
+            "discard_worktree",
+            "inspect_shadow",
+            "continue_from_shadow",
+            "apply_shadow_changes",
+            "discard_shadow",
+            "mark_failed",
+        ],
+    )
     f.add_argument("--cancel", action="store_true")
     f.add_argument("--cancel-reason", default="Cancellation requested by client.")
     f.add_argument("--client", default="generic-mcp")
@@ -836,7 +854,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--idempotency-key")
     p.add_argument("--resume-run-id")
-    p.add_argument("--reconciliation-action", choices=["resume_from_checkpoint", "accept_existing_changes", "discard_worktree", "mark_failed"])
+    p.add_argument(
+        "--reconciliation-action",
+        choices=[
+            "resume_from_checkpoint",
+            "accept_existing_changes",
+            "discard_worktree",
+            "inspect_shadow",
+            "continue_from_shadow",
+            "apply_shadow_changes",
+            "discard_shadow",
+            "mark_failed",
+        ],
+    )
     p.add_argument("--cancel", action="store_true")
     p.add_argument("--cancel-reason", default="Cancellation requested by client.")
     p.add_argument("--client", default="cli")

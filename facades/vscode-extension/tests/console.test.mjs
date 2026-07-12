@@ -48,12 +48,23 @@ test('composer uses stable SVG icons, focus states, and a disabled empty submit'
 });
 
 test('primary and secondary UI use plain Spanish wording', () => {
-  for (const wording of ['Todavía no hay tareas', 'Baldr lo organiza y te muestra el avance.', 'Protección de cambios', 'Nivel de detalle', 'Equipo de Baldr', 'Ayuda adicional', 'Continuar sin respaldo']) {
+  for (const wording of ['Todavía no hay tareas', 'Baldr lo organiza y te muestra el avance.', 'Protección de cambios', 'Nivel de detalle', 'Equipo de Baldr', 'Ayuda adicional', 'Protección automática', 'Trabajar directamente', 'Sin protección']) {
     assert.ok(source.includes(wording), `missing plain-language wording: ${wording}`);
   }
-  for (const stale of ['No items yet', 'Git worktree', 'Context7 Auto', 'Baldr execution preset', 'durable draft']) {
+  for (const stale of ['No items yet', 'Git worktree', 'Context7 Auto', 'Baldr execution preset', 'durable draft', 'Con Git y respaldo', 'Con Git, en esta carpeta']) {
     assert.ok(!source.includes(stale), `stale technical wording remains: ${stale}`);
   }
+});
+
+test('automatic protection is the visible default while legacy worktree keeps its alias', () => {
+  assert.match(source, /type SafetyMode = 'automatic' \| 'worktree' \| 'current' \| 'non-git'/);
+  assert.match(source, /normalized === 'automatic' \|\| normalized === 'auto'/);
+  assert.match(source, /automatic:\s*'Protección automática'/);
+  assert.match(source, /worktree:\s*'Protección automática'/);
+  assert.match(source, /current:\s*'Trabajar directamente'/);
+  assert.match(source, /'non-git':\s*'Sin protección'/);
+  assert.match(source, /text\(preference\.safety_mode, 'automatic'\)/);
+  assert.match(source, /id: 'automatic', label: '\$\(shield\) Protección automática'/);
 });
 
 test('attachments render inside the composer and can be removed', () => {
@@ -64,10 +75,19 @@ test('attachments render inside the composer and can be removed', () => {
 });
 
 
-test('console turns Git policy blocks into a guided non-Git or open-folder choice', () => {
+test('console turns legacy Git policy blocks into automatic, unprotected, or open-folder choices', () => {
   assert.match(source, /workspace_git_required/);
-  assert.match(source, /Continuar sin respaldo/);
+  assert.match(source, /Protección automática/);
+  assert.match(source, /Sin protección/);
   assert.match(source, /Abrir otra carpeta/);
+});
+
+test('recovery only shows actions authorized by the durable workspace state', () => {
+  const recovery = section(source, '  private async chooseReconciliation(', '  private async attachCurrentFile(');
+  assert.match(recovery, /const actions = allowedActions\(item\)/);
+  assert.match(recovery, /filter\(\(option\) => actions\.includes\(option\.id\)\)/);
+  assert.match(recovery, /Continuar con los archivos actuales/);
+  assert.match(recovery, /no hay un respaldo para volver atrás/);
 });
 
 test('Codex models are loaded lazily through the provider catalog and cached only on success', () => {

@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - 'v0.16.*'
+      - 'v0.18.*'
   workflow_dispatch:
 
 permissions:

@@ -12,6 +12,7 @@ from baldr_router.config import AppConfig, load_config
 from baldr_router.workspace_policy import (
     RUNTIME_ROOTS_ENV,
     inspect_workspace,
+    require_workspace,
     trust_workspace,
     untrust_workspace,
 )
@@ -81,6 +82,44 @@ def test_git_repository_is_required_by_default(tmp_path: Path, monkeypatch):
     assert allowed["ok"] is True
     assert allowed["intentional_non_git"] is True
     assert str(workspace.resolve()) in load_config().workspace.trusted_non_git_roots
+
+
+def test_protected_non_git_exception_does_not_grant_direct_write_consent(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    workspace = tmp_path / "protected-copy-source"
+    workspace.mkdir()
+    monkeypatch.setenv(RUNTIME_ROOTS_ENV, json.dumps([str(workspace)]))
+
+    protected = inspect_workspace(workspace, protected_non_git=True)
+
+    assert protected["ok"] is True
+    assert protected["protected_non_git"] is True
+    assert protected["intentional_non_git"] is False
+    assert require_workspace(workspace, protected_non_git=True) == workspace.resolve()
+
+    direct = inspect_workspace(workspace)
+    assert direct["ok"] is False
+    assert direct["error"]["code"] == "workspace_git_required"
+    assert load_config().workspace.trusted_non_git_roots == []
+
+
+def test_trusting_protected_non_git_workspace_does_not_persist_direct_consent(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    workspace = tmp_path / "protected-copy-source"
+    workspace.mkdir()
+
+    result = trust_workspace(workspace, protected_non_git=True)
+    cfg = load_config()
+
+    assert result["ok"] is True
+    assert result["protected_non_git"] is True
+    assert result["intentional_non_git"] is False
+    assert str(workspace.resolve()) in cfg.workspace.trusted_roots
+    assert cfg.workspace.trusted_non_git_roots == []
 
 
 @pytest.mark.parametrize("relative_path", [Path(".ssh"), Path(".ssh") / "project"])

@@ -101,3 +101,51 @@ def test_publish_is_idempotent_after_crash_between_apply_and_sqlite_commit(
     assert second["published"] is True
     assert second["already_applied"] is True
     assert (repo / "idempotent.txt").read_text(encoding="utf-8") == "once\n"
+
+
+def test_non_git_workspace_records_observation_without_claiming_recoverable_checkpoint(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "plain-workspace"
+    workspace.mkdir()
+    store = DurableStore(path=tmp_path / "non-git.sqlite3")
+    task = store.store_artifact(
+        run_id=None, kind="task", value={"task": "non-git"}, redact=False
+    )
+    store.create_run(
+        run_id="run-non-git",
+        idempotency_key=None,
+        resume_token="resume-non-git",
+        workflow_name="architect-implement-review",
+        workflow_version=1,
+        workspace_root=str(workspace),
+        workspace_id="workspace-non-git",
+        client_name="test",
+        task_artifact_id=task,
+        config_snapshot={},
+    )
+    manager = GitWorkspaceManager(store)
+    execution = manager.prepare(
+        run_id="run-non-git", workspace_root=workspace, mode="in-place"
+    )
+    (workspace / "generated.txt").write_text("generated\n", encoding="utf-8")
+
+    observation = manager.checkpoint(
+        execution, step_id="step-non-git", label="implement"
+    )
+
+    assert observation["ok"] is True
+    assert observation["observation_only"] is True
+    assert observation["recoverable"] is False
+    assert observation["checkpoint_commit"] is None
+    assert observation["patch_artifact_id"] is None
+    assert observation["patch_bytes"] == 0
+
+    # The observation is returned to the phase, but it is deliberately not
+    # persisted as a workspace checkpoint because it cannot restore files.
+    assert store.latest_checkpoint("run-non-git") is None
+
+    allowed = set(manager.reconciliation_status(execution)["allowed_actions"])
+    assert allowed == {"accept_existing_changes", "mark_failed"}
+    assert "resume_from_checkpoint" not in allowed
+    assert "discard_worktree" not in allowed

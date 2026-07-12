@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.18.0 — Automatic Workspace Protection
+
+- Made **Automatic protection** the recommended default: exact Git roots use managed worktrees, while non-Git folders and selected repository subdirectories use durable BALDR-managed shadow workspaces.
+- Added private helper Git repositories, content-addressed manifests, original-state hash verification, and diff-only publication from protected copies.
+- Added durable publication cursors, idempotent retry, conflict evidence, restart recovery, and safe inspect, continue, apply, and discard actions.
+- Added portable file, mode, symlink, secret, generated-file, size, depth, and path-collision protections for shadow copies.
+- Added dirty/unborn Git fallback to shadow, per-operation TOCTOU guards, a non-replaceable credential denylist, and hard provider/sandbox confinement gates.
+- Retained shadows with inspect/continue/apply/discard actions after phase failures or review changes, and preserved exact selected scope in direct modes.
+- Preserved the frozen providers, roles, workflows, MCP tools, prompts, and public `setup/status/run` facade contract.
+
 ## 0.17.0 — Baldr Console & Durable Work Items
 
 - Added a dedicated Baldr Activity Bar section as the primary VS Code experience.

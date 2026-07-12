@@ -19,7 +19,7 @@ export const SLASH_COMMANDS = [
   { command: '/run', detail: 'Start the selected item or create and run a task' },
   { command: '/status', detail: 'Refresh Baldr status' },
   { command: '/profile', detail: 'Choose fast, balanced, deep, or custom' },
-  { command: '/git', detail: 'Choose worktree, current, or off' },
+  { command: '/git', detail: 'Choose automatic, current, or off' },
   { command: '/context', detail: 'Choose auto, on, or off' },
   { command: '/roles', detail: 'Choose architecture, implementation, and review profiles' },
   { command: '/cancel', detail: 'Cancel the selected item' },
@@ -68,8 +68,9 @@ export function statusGlyph(status: string): string {
   return '○';
 }
 
-export function normalizeGitMode(value: string | undefined): 'worktree' | 'current' | 'non-git' | undefined {
+export function normalizeGitMode(value: string | undefined): 'automatic' | 'worktree' | 'current' | 'non-git' | undefined {
   const normalized = String(value ?? '').trim().toLowerCase();
+  if (normalized === 'automatic' || normalized === 'auto' || normalized === 'protected') return 'automatic';
   if (normalized === 'worktree' || normalized === 'isolated') return 'worktree';
   if (normalized === 'current' || normalized === 'in-place' || normalized === 'inplace') return 'current';
   if (normalized === 'off' || normalized === 'none' || normalized === 'non-git' || normalized === 'nongit') return 'non-git';

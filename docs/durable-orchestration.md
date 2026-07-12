@@ -105,7 +105,7 @@ Control plane
   SQLite
 
 Code plane
-  Git worktree + checkpoints + patch
+  Git worktree o workspace sombra + checkpoints + publicación idempotente
 
 Artifact plane
   outputs/evidence content-addressed
@@ -178,7 +178,7 @@ Los efectos externos no pueden formar parte de esa transacción. Por eso Baldr n
 at-least-once controlado
 + idempotency keys
 + reconciliation
-+ Git checkpoints
++ checkpoints verificables
 ```
 
 `unknown` significa que un proceso externo pudo haber producido efectos antes de perderse la confirmación durable.
@@ -195,7 +195,7 @@ Al arrancar:
 4. un paso con escritura pasa a `unknown`;
 5. el workflow con efectos de escritura inciertos pasa a `awaiting_reconciliation` y no se reintenta ciegamente.
 
-Una ejecución reanudada usa el snapshot original de perfiles, límites, sandbox y versión del workflow, incluso si la configuración actual cambió. El resume también queda ligado a la ruta y a la identidad Git original; mover el run o reemplazar el repo en la misma carpeta se rechaza.
+Una ejecución reanudada usa el snapshot original de perfiles, límites, sandbox y versión del workflow, incluso si la configuración actual cambió. El resume también queda ligado a la ruta original y, según el modo, a la identidad Git o al manifest y la política del workspace sombra. Mover el run, reemplazar el repo o alterar el estado durable se rechaza.
 
 ## Sesiones persistentes por perfil
 
@@ -215,7 +215,21 @@ implementation report
 review report
 ```
 
-## Git worktrees y checkpoints
+## Protección automática: worktree o workspace sombra
+
+`Protección automática` es el modo recomendado y predeterminado. Baldr conserva exactamente el alcance que eligió la persona:
+
+```text
+raíz exacta de un repositorio Git limpio y con commit
+  -> worktree detached administrado por Baldr
+
+Git sucio/sin commit, carpeta sin Git o subcarpeta dentro de otro repo
+  -> workspace sombra durable administrado por Baldr
+```
+
+Baldr no amplía una subcarpeta seleccionada hasta la raíz Git de un directorio padre. Una raíz Git debe tener un commit y estar limpia para obtener el aislamiento por worktree; si está sucia o todavía no tiene commit, automatic captura ese estado como baseline de un shadow en vez de bloquear, hacer stash o escribir directamente.
+
+### Raíz Git exacta
 
 Para un repositorio Git limpio y `write_isolation = "auto"`, Baldr crea un worktree detached bajo su directorio de estado.
 
@@ -237,7 +251,79 @@ Cada checkpoint registra:
 
 La publicación es idempotente: si Baldr se cae después de aplicar el patch pero antes de persistir `published`, el siguiente intento detecta que el mismo patch ya está presente y reconcilia sin aplicarlo dos veces.
 
-Un workspace sucio, sin primer commit o no-Git usa modo `in-place` cuando la política lo permite. Ese modo conserva fingerprints, pero no ofrece el mismo aislamiento transaccional.
+### Carpeta sin Git o alcance parcial
+
+Para una carpeta sin Git —o una subcarpeta elegida dentro de un repositorio padre— el modo automático crea:
+
+```text
+<estado-local-de-baldr>/shadow-workspaces/<run-id>/
+  tree/                 copia sobre la que trabajan los agentes
+    .git/               Git privado auxiliar
+  control/
+    state.json          estado durable y manifests seleccionados
+    journal/            eventos de preparación, checkpoint y publicación
+    manifests/          manifests inmutables por contenido
+    blobs/              contenido inmutable identificado por SHA-256
+```
+
+Esta ubicación pertenece al estado durable de Baldr; no usa `/tmp` y puede abrirse nuevamente después de reiniciar VS Code, el router o la máquina. El Git privado de `tree/` facilita inspección y checkpoints locales, pero no es la fuente de verdad: la autoridad portable son los manifests y blobs identificados por hash.
+
+Baldr toma un manifest inicial, materializa la copia, vuelve a escanear el origen y comprueba que ambos hashes coincidan antes de ejecutar un provider. Arquitectura, implementación, revisión y correcciones reciben `tree/` como workspace. Un adapter `advisory`, un Codex SDK que no demuestre cwd o un sandbox irrestricto se bloquean antes de invocarse; el usuario puede elegir explícitamente un modo directo si acepta esa garantía reducida. La carpeta original queda intacta hasta que la revisión aprueba el resultado o la persona decide aplicar el checkpoint verificado.
+
+Después de cada fase con escritura se crea otro manifest. El delta incluye archivos nuevos, modificados y eliminados, cambios de tipo y modos. Antes de tocar el original, Baldr vuelve a calcular sus hashes. Cada ruta que Baldr modificó debe seguir igual al manifest inicial o coincidir ya con el resultado esperado; una ruta ajena al delta tampoco puede haber cambiado. Si alguna condición falla, la publicación se detiene con un conflicto sin empezar a aplicar el plan.
+
+La publicación guarda primero su plan y su cursor en SQLite y en el journal del workspace sombra. Cada operación de borrar, crear, reemplazar o cambiar modo se registra antes y después del efecto junto con un guard del contenido/identidad del target y sus padres. El guard se vuelve a validar después de registrar el intent y justo antes del efecto, cerrando cambios posteriores al preflight. Por eso un reintento puede omitir rutas ya aplicadas y continuar las restantes sin duplicar cambios. Si un crash ocurre durante una operación, el estado se clasifica como publicación parcial: se conserva la copia y no se ofrece un descarte que pueda dejar efectos sin reconciliar.
+
+Las acciones visibles se calculan desde el estado durable; no todas están disponibles en todos los estados:
+
+```text
+Ver la copia protegida              inspect_shadow
+Continuar desde la copia protegida  continue_from_shadow
+Aplicar los cambios protegidos      apply_shadow_changes
+Descartar la copia protegida        discard_shadow
+```
+
+`Descartar` sólo se ofrece si la publicación todavía no pudo modificar el original (o existe un rollback verificado). Las mismas opciones aparecen ante un fallo de fase o un review con cambios pendientes. `Aplicar` publica el último checkpoint verificado por decisión explícita; sólo recupera `approved` cuando review ya había aprobado. Ante un conflicto o una publicación parcial, la opción segura es inspeccionar y, cuando el preflight lo permita, reintentar la aplicación idempotente. También se puede marcar el run como fallido conservando su journal y evidencia.
+
+### Exclusiones, límites y portabilidad
+
+El snapshot nunca sigue enlaces simbólicos. Sólo admite enlaces relativos cuyo destino permanezca dentro del workspace; rechaza enlaces absolutos, destinos externos, archivos especiales y reparse points de Windows que no sean enlaces soportados. Los manifests registran el destino de cada enlace y los modos de archivos y directorios. En Linux y macOS se restauran los modos POSIX; en Windows la ejecutabilidad/read-only es de mejor esfuerzo y un sistema que no permita crear el enlace devuelve un error explícito. También se rechazan nombres no portables, colisiones por mayúsculas/minúsculas y rutas reservadas de Windows antes de ejecutar agentes.
+
+Las reglas duras excluyen metadatos `.git`, `.hg` y `.svn` en cualquier profundidad. Así, un repositorio anidado se copia como contenido normal, pero nunca se expone su metadata de control. Por defecto también se excluyen directorios generados como `node_modules`, `.venv`, caches, `dist`, `build` y `target`, además de patrones de binarios intermedios. Existe un piso no reemplazable para `.ssh`, `.aws`, `.gnupg`, `.npmrc`, `.netrc`, claves privadas, `.env` y credenciales; la configuración sólo agrega patrones, salvo una inclusión explícita. Si un agente intenta crear una ruta sensible equivalente, el checkpoint falla de forma visible. Las plantillas como `.env.example` están permitidas. Contenido excluido nunca se infiere como borrado y bloquea la eliminación de un padre si pudiera perderse.
+
+La política queda congelada en el run y expone estos campos de `[workspace]`:
+
+```toml
+write_isolation = "auto"
+shadow_max_files = 100000
+shadow_max_total_bytes = 5368709120
+shadow_max_single_file_bytes = 536870912
+shadow_max_depth = 64
+shadow_max_symlinks = 10000
+shadow_exclude_generated = true
+shadow_generated_directories = ["node_modules", ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".gradle", "target", "dist", "build"]
+shadow_secret_patterns = [".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "credentials.json", "secrets.toml"]
+shadow_exclude_patterns = []
+shadow_include_patterns = []
+```
+
+`shadow_max_files` limita todas las entradas administradas, incluidos directorios. Los patrones generados internos también excluyen extensiones intermedias como `*.pyc`, `*.class` y `*.obj`. `.git`, `.hg` y `.svn` no pueden reincorporarse con `shadow_include_patterns`. Si se supera un límite, Baldr falla antes de iniciar el provider y muestra cuál fue; nunca cae silenciosamente a escritura directa.
+
+### Limpieza, retención y compatibilidad
+
+Tras una publicación verificada, el default elimina el workspace sombra inmediatamente. Si la limpieza falla, el checkpoint queda `cleanup_pending` para que maintenance la reintente sin cambiar el resultado aprobado. La retención es configurable:
+
+```toml
+cleanup_successful_shadow_workspaces = true
+retain_failed_shadow_workspaces = true
+shadow_success_retention_hours = 0
+shadow_failed_retention_days = 30
+shadow_conflict_retention_days = 90
+```
+
+Maintenance valida ownership y estado terminal antes de eliminar una copia; nunca borra un shadow todavía recuperable por inferencia de edad solamente. `cleanup_successful_shadow_workspaces=false` conserva también los aprobados, independientemente de la retención de éxito.
+
+Los work items nuevos usan `automatic`. Los valores guardados existentes conservan su semántica: `worktree` sigue siendo el modo Git aislado legado, `current` trabaja directamente sobre un repositorio Git y `non-git` es la opción explícita **Sin protección**, con confirmación y sin rollback automático. El alias de core `auto` equivale a `automatic`; `in-place` permanece como configuración avanzada de bajo nivel.
 
 ## Idempotencia
 
@@ -261,16 +347,15 @@ running -> cancelling -> cancelled
 
 Baldr persiste timestamp/reason, termina el process tree del run y marca attempts, participants y steps como `cancelled`. Una solicitud repetida es idempotente y recovery puede completarla si el cliente desaparece.
 
-Un write attempt con efectos inciertos queda `unknown` y el workflow pasa a `awaiting_reconciliation`. El operador puede continuar usando la misma intención `run` con una acción explícita:
+Un write attempt con efectos inciertos queda `unknown` y el workflow pasa a `awaiting_reconciliation`. El operador puede continuar usando la misma intención `run` con una acción que el core haya habilitado para ese estado:
 
 ```text
-resume_from_checkpoint
-accept_existing_changes
-discard_worktree
+shadow:   inspect_shadow | continue_from_shadow | apply_shadow_changes | discard_shadow
+worktree: resume_from_checkpoint | accept_existing_changes | discard_worktree
 mark_failed
 ```
 
-Baldr inspecciona identidad, HEAD, patch y worktree antes de ofrecer acciones; ninguna escritura incierta se reintenta automáticamente.
+Baldr inspecciona ownership, manifests, cursor y conflictos del shadow, o identidad, HEAD, patch y worktree, antes de ofrecer acciones. Ninguna escritura incierta se reintenta automáticamente y `discard_shadow` se omite si una publicación parcial pudo modificar el original.
 
 ## Maintenance, sessions y reducers
 
@@ -322,6 +407,9 @@ La suite cubre:
 - migraciones SQLite y checksum;
 - journal y estado materializado consistentes;
 - publicación Git idempotente;
+- copia, checkpoint y publicación sombra idempotente;
+- conflicto por hash y crash durante una publicación parcial;
+- límites, exclusiones, modos, symlinks y repositorios anidados;
 - evidence reconstruido desde SQLite.
 
 Los tests sintéticos no reemplazan la matriz E2E real de VS Code, WSL y Kiro, pero permiten reproducir fallos de proceso de manera determinística.

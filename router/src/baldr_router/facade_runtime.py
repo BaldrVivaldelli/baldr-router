@@ -69,11 +69,23 @@ def setup_facade(
                 role_profiles=role_profiles,
                 allow_non_git=allow_non_git,
             )
-            workspace_trust = inspect_workspace(workspace_root, access="read")
+            workspace_trust = inspect_workspace(
+                workspace_root,
+                access="read",
+                protected_non_git=str(
+                    workbench_preferences.get("safety_mode") or ""
+                ).lower()
+                in {"auto", "automatic"},
+            )
         elif trust_current_workspace:
             workspace_trust = trust_workspace(
                 workspace_root,
                 force=bool(allow_non_git and workspace_safety_mode == "non-git"),
+                # Setup follows the default protected path when the caller did
+                # not choose an explicit direct/non-Git mode. This trusts the
+                # original folder without recording consent for unprotected
+                # writes in ``trusted_non_git_roots``.
+                protected_non_git=workspace_safety_mode in {None, "automatic", "auto"},
             )
 
     cfg = load_config()
@@ -122,6 +134,9 @@ def setup_facade(
         workbench["preferences"] = workbench_preferences or service.preferences(workspace_root)
         workbench["profiles"] = service.summary(workspace_root, limit=1).get("profiles")
 
+    effective_safety_mode = str(
+        ((workbench.get("preferences") or {}).get("safety_mode") or "")
+    ).lower()
     return {
         # ``setup`` reports whether the requested configuration operation was
         # accepted. Provider health is exposed separately so a missing login
@@ -132,7 +147,15 @@ def setup_facade(
         "contract": facade_contract_status(),
         "workspace_root": workspace_root,
         "workspace_trust": workspace_trust
-        or (inspect_workspace(workspace_root, access="read") if workspace_root else None),
+        or (
+            inspect_workspace(
+                workspace_root,
+                access="read",
+                protected_non_git=effective_safety_mode in {"auto", "automatic"},
+            )
+            if workspace_root
+            else None
+        ),
         "health": health,
         "environment_probe": health.get("environment_probe"),
         "workspace_profile": profile or health.get("workspace_profile"),

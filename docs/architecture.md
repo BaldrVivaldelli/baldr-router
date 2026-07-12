@@ -96,13 +96,27 @@ v0.16 keeps orchestration deterministic in Baldr and treats provider output as e
 
 ```text
 control plane   -> SQLite state machine + append-only event journal
-code plane      -> Git worktree/checkpoints + idempotent patch publication
+code plane      -> Git worktree o shadow/manifests + publicación idempotente
 artifact plane  -> content-addressed reports, patches, telemetry and evidence
 ```
 
 The workflow snapshot freezes the resolved execution profiles, provider/model settings, permissions, round limits, and workflow version at creation time. Recovery therefore does not silently adopt a later configuration.
 
 Each phase references one or many named execution profiles. A single shared profile can back all phases, or architecture/implementation/review can independently use n/m/l profiles. Provider sessions are keyed by scope, workspace/run, role, provider, model/agent, and profile.
+
+El code plane usa **Protección automática** por defecto sin cambiar el alcance elegido por el usuario:
+
+```text
+raíz Git exacta y limpia
+  -> worktree detached + checkpoints Git + patch
+
+Git sucio/sin commit, carpeta sin Git o subcarpeta de un repo padre
+  -> workspace sombra durable + manifests/blobs SHA-256 + Git privado auxiliar
+```
+
+Todos los providers reciben sólo la ruta aislada. El core bloquea modos protegidos cuando el adapter/runner declara límites `advisory`, usa un runner SDK sin cwd demostrable o solicita un sandbox irrestricto. En shadow, el Git privado facilita checkpoints e inspección, pero los manifests son la autoridad para recuperar y publicar. El plan de publicación se registra de forma durable, verifica nuevamente el original y aplica por ruta únicamente el delta aprobado. Cada efecto conserva un guard de contenido/identidad de la ruta y sus padres, además del cursor antes/después, para detectar cambios posteriores al preflight y continuar después de un crash; si pudo existir una aplicación parcial, el core conserva la copia y no ofrece un descarte inseguro.
+
+Los shadows viven bajo el estado local de Baldr (`shadow-workspaces/<run-id>`), no en `/tmp`. Las políticas de copia excluyen metadata VCS, secretos configurados y artefactos generados; aplican límites explícitos y validan modos, symlinks y nombres portables antes de ejecutar agentes. La limpieza ocurre después de una publicación verificada, con retención configurable para fallos y conflictos.
 
 See [`durable-orchestration.md`](durable-orchestration.md) and [`consistency-operator-control.md`](consistency-operator-control.md).
 

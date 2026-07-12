@@ -246,6 +246,57 @@ def provider_status() -> dict[str, Any]:
     return get_provider_registry().status()
 
 
+def provider_isolation_status(
+    provider: str,
+    *,
+    can_write: bool,
+    runner: str = "",
+    sandbox: str = "",
+) -> dict[str, Any]:
+    """Prove that a provider invocation stays inside an isolated workspace.
+
+    A working directory is not a security boundary. Protected worktrees and
+    shadow workspaces therefore fail closed for advisory providers/runners or
+    an unrestricted sandbox. Direct modes remain available as the explicit
+    reduced-guarantee escape hatch.
+    """
+
+    adapter = get_provider_registry().resolve(provider)
+    if adapter is None:
+        return {
+            "ok": False,
+            "provider": provider,
+            "reason": "provider-not-implemented",
+            "enforcement": "unsupported",
+        }
+    capabilities = adapter.capabilities
+    enforcement = (
+        capabilities.write_enforcement
+        if can_write
+        else capabilities.read_only_enforcement
+    )
+    normalized_provider = _normalize_provider_name(adapter.name)
+    normalized_runner = str(runner or "").strip().lower()
+    normalized_sandbox = str(sandbox or "").strip().lower()
+    reasons: list[str] = []
+    if enforcement != "enforced":
+        reasons.append(f"{enforcement or 'unknown'}-provider-boundary")
+    if normalized_sandbox not in {"read-only", "workspace-write"}:
+        reasons.append("unrestricted-sandbox")
+    # The legacy SDK fallback can start or resume a thread without proving its
+    # cwd. Exec-json and app-server both bind cwd+sandbox for every invocation.
+    if normalized_provider == "codex" and normalized_runner == "sdk":
+        reasons.append("sdk-cwd-not-enforced")
+    return {
+        "ok": not reasons,
+        "provider": adapter.name,
+        "runner": normalized_runner,
+        "sandbox": normalized_sandbox,
+        "enforcement": enforcement,
+        "reasons": reasons,
+    }
+
+
 def run_provider_role(
     *,
     provider: str,

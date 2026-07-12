@@ -5,7 +5,7 @@ import * as vscode from 'vscode';
 
 import { redactSensitive } from './redaction.js';
 
-export const EXTENSION_VERSION = '0.17.0';
+export const EXTENSION_VERSION = '0.18.0';
 export const CONTEXT7_SECRET_KEY = 'baldr.context7ApiKey';
 const PROVIDER_MODELS_CACHE_TTL_MS = 5 * 60 * 1000;
 
@@ -23,7 +23,7 @@ export interface FacadeOptions {
   title?: string;
   extraContext?: string;
   attachments?: JsonRecord[];
-  safetyMode?: 'worktree' | 'current' | 'non-git';
+  safetyMode?: 'automatic' | 'worktree' | 'current' | 'non-git';
   preset?: 'fast' | 'balanced' | 'deep' | 'custom';
   contextMode?: 'auto' | 'on' | 'off';
   roleProfiles?: Record<string, string[]>;
@@ -107,7 +107,7 @@ export class BaldrRuntime {
       ? fs.readdirSync(runtimeDir).filter((name) => /^baldr_router-.*\.whl$/i.test(name)).sort()
       : [];
     if (candidates.length === 0) {
-      return path.join(runtimeDir, 'baldr_router-0.17.0-py3-none-any.whl');
+      return path.join(runtimeDir, 'baldr_router-0.18.0-py3-none-any.whl');
     }
     return path.join(runtimeDir, candidates.at(-1)!);
   }
@@ -212,7 +212,7 @@ export class BaldrRuntime {
       workItemId?: string;
       workItemAction?: string;
       title?: string;
-      workspaceMode?: 'worktree' | 'current' | 'non-git';
+      workspaceMode?: 'automatic' | 'worktree' | 'current' | 'non-git';
       executionPreset?: 'fast' | 'balanced' | 'deep' | 'custom';
       contextMode?: 'auto' | 'on' | 'off';
       roleProfiles?: Record<string, string[]>;
@@ -298,7 +298,7 @@ export class BaldrRuntime {
   async configureWorkbench(
     workspaceRoot: string,
     options: {
-      workspaceMode?: 'worktree' | 'current' | 'non-git';
+      workspaceMode?: 'automatic' | 'worktree' | 'current' | 'non-git';
       executionPreset?: 'fast' | 'balanced' | 'deep' | 'custom';
       contextMode?: 'auto' | 'on' | 'off';
       roleProfiles?: Record<string, string[]>;
@@ -315,7 +315,7 @@ export class BaldrRuntime {
     task: string,
     options: {
       title?: string;
-      workspaceMode?: 'worktree' | 'current' | 'non-git';
+      workspaceMode?: 'automatic' | 'worktree' | 'current' | 'non-git';
       executionPreset?: 'fast' | 'balanced' | 'deep' | 'custom';
       contextMode?: 'auto' | 'on' | 'off';
       roleProfiles?: Record<string, string[]>;
@@ -398,7 +398,7 @@ export class BaldrRuntime {
   async setWorkspacePreferences(
     workspaceRoot: string,
     options: {
-      safetyMode?: 'worktree' | 'current' | 'non-git';
+      safetyMode?: 'automatic' | 'worktree' | 'current' | 'non-git';
       preset?: 'fast' | 'balanced' | 'deep' | 'custom';
       contextMode?: 'auto' | 'on' | 'off';
       roleProfiles?: Record<string, string[]>;

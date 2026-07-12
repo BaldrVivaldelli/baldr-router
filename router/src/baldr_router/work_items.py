@@ -31,10 +31,25 @@ WORK_ITEM_STATUSES = {
     "archived",
 }
 TERMINAL_ITEM_STATUSES = {"completed", "failed", "cancelled", "archived"}
-SAFETY_MODES = {"worktree", "current", "non-git"}
+# ``automatic`` is the canonical default. The other values remain accepted so
+# already-persisted items keep their exact execution semantics:
+# ``worktree`` is the legacy isolated-Git mode, ``current`` works in place in a
+# Git repository, and ``non-git`` is the explicitly confirmed unprotected mode.
+SAFETY_MODES = {"automatic", "worktree", "current", "non-git"}
+SAFETY_MODE_ALIASES = {"auto": "automatic"}
 EXECUTION_PRESETS = {"fast", "balanced", "deep", "custom"}
 CONTEXT_MODES = {"auto", "on", "off"}
 ROLE_NAMES = ("architect", "implementer", "reviewer")
+RECONCILIATION_ACTION_ORDER = (
+    "inspect_shadow",
+    "continue_from_shadow",
+    "apply_shadow_changes",
+    "discard_shadow",
+    "resume_from_checkpoint",
+    "accept_existing_changes",
+    "discard_worktree",
+    "mark_failed",
+)
 
 
 def _json(value: Any) -> str:
@@ -48,6 +63,11 @@ def _parse_json(value: str | None, fallback: Any) -> Any:
         return json.loads(value)
     except Exception:
         return fallback
+
+
+def _safety_mode(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    return SAFETY_MODE_ALIASES.get(normalized, normalized)
 
 
 def _workspace(path: str | Path) -> tuple[Path, dict[str, Any]]:
@@ -117,7 +137,7 @@ def _run_to_item_status(status: str | None) -> str:
         return "needs_attention"
     if normalized == "cancelling":
         return "cancelling"
-    if normalized in {"pending", "running", "recovering"}:
+    if normalized in {"pending", "running", "recovering", "finalizing"}:
         return "running"
     return "draft"
 
@@ -206,13 +226,19 @@ def _allowed_actions(item: dict[str, Any], snapshot: dict[str, Any] | None) -> l
         actions.append("cancel")
     run_status = str(((snapshot or {}).get("run") or {}).get("status") or "")
     if run_status == "awaiting_reconciliation":
+        run = (snapshot or {}).get("run") or {}
+        reconciliation = run.get("reconciliation") or {}
+        raw_actions = reconciliation.get("allowed_actions")
+        if isinstance(raw_actions, list):
+            recorded = {str(action) for action in raw_actions}
+        elif item.get("safety_mode") == "non-git":
+            # Legacy non-Git runs predate recorded action capabilities. They
+            # may keep the current files, but never claim a restorable backup.
+            recorded = {"accept_existing_changes", "mark_failed"}
+        else:
+            recorded = {"mark_failed"}
         actions.extend(
-            [
-                "resume_from_checkpoint",
-                "accept_existing_changes",
-                "discard_worktree",
-                "mark_failed",
-            ]
+            action for action in RECONCILIATION_ACTION_ORDER if action in recorded
         )
     elif status == "needs_attention":
         actions.append("start")
@@ -225,20 +251,21 @@ def workbench_options() -> dict[str, Any]:
     return {
         "safety_modes": [
             {
-                "id": "worktree",
-                "label": "Git worktree",
-                "description": "Isolated execution with checkpoints and idempotent publication.",
+                "id": "automatic",
+                "label": "Protección automática",
+                "description": "Recomendada y predeterminada: Baldr trabaja en una copia protegida y recuperable.",
                 "recommended": True,
+                "default": True,
             },
             {
                 "id": "current",
-                "label": "Current Git workspace",
-                "description": "Run in place. The repository must be clean.",
+                "label": "Trabajar directamente",
+                "description": "Modifica esta carpeta directamente y usa su repositorio Git para revisar los cambios.",
             },
             {
                 "id": "non-git",
-                "label": "Non-Git workspace",
-                "description": "Reduced recovery guarantees; requires explicit consent.",
+                "label": "Sin protección",
+                "description": "Trabaja directamente, sin exigir Git y sin recuperación automática.",
                 "requires_confirmation": True,
             },
         ],
@@ -259,7 +286,7 @@ def workbench_options() -> dict[str, Any]:
             {"id": "run", "usage": "/run [task]", "description": "Start the selected item or create and run one."},
             {"id": "status", "usage": "/status", "description": "Refresh runtime and item status."},
             {"id": "profile", "usage": "/profile <fast|balanced|deep|custom>", "description": "Change the workspace preset."},
-            {"id": "git", "usage": "/git <worktree|current|off>", "description": "Change workspace safety mode."},
+            {"id": "git", "usage": "/git <automatic|current|off>", "description": "Elegí cómo proteger los cambios de esta carpeta."},
             {"id": "context", "usage": "/context <auto|on|off>", "description": "Change Context7 behavior."},
             {"id": "roles", "usage": "/roles", "description": "Choose execution profiles for architecture, implementation, and review."},
             {"id": "cancel", "usage": "/cancel", "description": "Cancel the selected running item."},
@@ -311,7 +338,7 @@ class WorkItemService:
             return {
                 "workspace_id": identity["workspace_id"],
                 "workspace_root": str(root),
-                "safety_mode": "worktree" if identity.get("git") else "non-git",
+                "safety_mode": "automatic",
                 "preset": "balanced",
                 "context_mode": "auto",
                 "context7_policy": "auto",
@@ -358,7 +385,7 @@ class WorkItemService:
     ) -> dict[str, Any]:
         root, identity = _workspace(workspace_root)
         current = self.preferences(root)
-        selected_safety = str(safety_mode or current["safety_mode"]).strip().lower()
+        selected_safety = _safety_mode(safety_mode or current["safety_mode"])
         selected_preset = str(preset or current["preset"]).strip().lower()
         selected_context = str(
             context7_policy or context_mode or current["context_mode"]
@@ -372,7 +399,12 @@ class WorkItemService:
             raise ValueError(f"Invalid Context7 mode: {selected_context}")
         self._validate_profiles(selected_roles)
 
-        inspection = inspect_workspace(root, access="write")
+        protected_non_git = selected_safety == "automatic"
+        inspection = inspect_workspace(
+            root,
+            access="write",
+            protected_non_git=protected_non_git,
+        )
         if selected_safety == "non-git":
             if not inspection.get("intentional_non_git") and not allow_non_git:
                 raise WorkspacePolicyError(
@@ -381,10 +413,16 @@ class WorkItemService:
                     details=inspection,
                 )
             trust_result = trust_workspace(root, force=True)
+        elif selected_safety == "automatic":
+            trust_result = (
+                {"ok": True}
+                if inspection.get("ok")
+                else trust_workspace(root, protected_non_git=True)
+            )
         else:
             trust_result = (
                 {"ok": True}
-                if inspection.get("trusted") and inspection.get("git_root")
+                if inspection.get("ok")
                 else trust_workspace(root, force=False)
             )
         if not trust_result.get("ok"):
@@ -445,7 +483,7 @@ class WorkItemService:
             raise ValueError("A work item task must not be empty.")
         root, identity = _workspace(workspace_root)
         defaults = self.preferences(root)
-        safety = str(safety_mode or defaults["safety_mode"]).strip().lower()
+        safety = _safety_mode(safety_mode or defaults["safety_mode"])
         selected_preset = str(preset or defaults["preset"]).strip().lower()
         context = str(
             context7_policy or context_mode or defaults["context_mode"]
@@ -560,7 +598,7 @@ class WorkItemService:
         current = self.get(item_id, include_timeline=False)
         if current["status"] in {"running", "cancelling"}:
             raise ValueError("A running work item cannot be edited.")
-        selected_safety = str(safety_mode or current["safety_mode"]).strip().lower()
+        selected_safety = _safety_mode(safety_mode or current["safety_mode"])
         selected_preset = str(preset or current["preset"]).strip().lower()
         selected_context = str(
             context7_policy or context_mode or current["context_mode"]
@@ -928,7 +966,12 @@ class WorkItemService:
         # Validate workspace policy before materializing a running state. A
         # blocked run remains a durable draft that the client can configure
         # and retry without creating a phantom running item.
-        inspection = inspect_workspace(item["workspace_root"], access="write")
+        protected_non_git = item.get("safety_mode") == "automatic"
+        inspection = inspect_workspace(
+            item["workspace_root"],
+            access="write",
+            protected_non_git=protected_non_git,
+        )
         if item.get("safety_mode") == "non-git" and not inspection.get(
             "intentional_non_git"
         ):
@@ -937,7 +980,11 @@ class WorkItemService:
                 code="workspace_non_git_confirmation_required",
                 details=inspection,
             )
-        require_workspace(item["workspace_root"], access="write")
+        require_workspace(
+            item["workspace_root"],
+            access="write",
+            protected_non_git=protected_non_git,
+        )
         if dry_run:
             from .workflows import run_workflow_impl
 

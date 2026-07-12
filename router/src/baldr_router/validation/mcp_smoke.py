@@ -19,12 +19,23 @@ async def _handshake() -> dict[str, Any]:
         args=["-m", "baldr_router", "mcp"],
         env=env,
     )
-    async with stdio_client(params) as streams:
-        read_stream, write_stream = streams
-        async with ClientSession(read_stream, write_stream) as session:
-            initialized = await session.initialize()
-            tools = await session.list_tools()
-            prompts = await session.list_prompts()
+    stage = "starting server"
+    try:
+        async with asyncio.timeout(15):
+            async with stdio_client(params) as streams:
+                stage = "opening client session"
+                read_stream, write_stream = streams
+                async with ClientSession(read_stream, write_stream) as session:
+                    stage = "initializing"
+                    initialized = await session.initialize()
+                    stage = "listing tools"
+                    tools = await session.list_tools()
+                    stage = "listing prompts"
+                    prompts = await session.list_prompts()
+                    stage = "closing client session"
+                stage = "stopping server"
+    except TimeoutError as exc:
+        raise RuntimeError(f"MCP smoke timed out while {stage}.") from exc
     tool_names = sorted(tool.name for tool in tools.tools)
     prompt_names = sorted(prompt.name for prompt in prompts.prompts)
     missing_tools = sorted(set(FROZEN_CORE_MCP_TOOLS) - set(tool_names))

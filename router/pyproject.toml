@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "baldr-router"
-version = "0.17.0"
+version = "0.18.0"
 description = "Client-agnostic MCP orchestration runtime with a frozen setup/status/run facade contract, provider adapters, roles, workflows, Context7 cache, telemetry, and structured reports."
 readme = "README.md"
 requires-python = ">=3.11"

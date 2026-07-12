@@ -21,9 +21,9 @@ Context7 is optional and is configured during `/setup`.
 
 ## VS Code: clean Windows machine with optional WSL
 
-1. Install the `baldr-router-vscode-0.17.0.vsix`, or install Baldr Router from the Marketplace when published.
+1. Install the `baldr-router-vscode-0.18.0.vsix`, or install Baldr Router from the Marketplace when published.
 2. Accept VS Code's publisher and MCP trust dialogs.
-3. Open a Git repository.
+3. Open the folder you want BALDR to work on; Git is optional under Automatic protection.
 4. Open the **Baldr** icon in the Activity Bar. The dedicated console prepares status and setup; `@baldr /setup` remains an optional shortcut.
 5. The extension tries a private Windows runtime first. If Windows cannot provide a compatible runtime and WSL is available, it installs/uses the private WSL runtime automatically.
 6. Complete `codex login` in the environment reported by Baldr if status requests it.

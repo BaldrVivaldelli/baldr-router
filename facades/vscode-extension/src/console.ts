@@ -54,6 +54,8 @@ interface CodexTeamChoice {
   effort: string;
 }
 
+type SafetyMode = 'automatic' | 'worktree' | 'current' | 'non-git';
+
 function roleLabel(role: BaldrRole): string {
   return ({
     architect: 'planificación',
@@ -115,8 +117,12 @@ function allowedActions(item: WorkItem | undefined): string[] {
   return Array.isArray(raw) ? raw.map(String) : [];
 }
 
-function normalizeMode(value: string): 'worktree' | 'current' | 'non-git' | undefined {
+function normalizeMode(value: string): SafetyMode | undefined {
   const normalized = value.trim().toLowerCase();
+  if (normalized === 'automatic' || normalized === 'auto' || normalized === 'protected') return 'automatic';
+  // Keep the legacy value instead of silently rewriting saved worktree tasks;
+  // the UI presents it as automatic protection, but its execution semantics
+  // remain unchanged.
   if (normalized === 'worktree' || normalized === 'git') return 'worktree';
   if (normalized === 'current' || normalized === 'in-place' || normalized === 'inplace') return 'current';
   if (normalized === 'off' || normalized === 'none' || normalized === 'non-git' || normalized === 'nogit') return 'non-git';
@@ -139,8 +145,12 @@ function normalizeContext(value: string): 'auto' | 'on' | 'off' | undefined {
 }
 
 function safetyModeLabel(value: string): string {
-  return ({ worktree: 'Con respaldo', current: 'En esta carpeta', 'non-git': 'Sin respaldo' } as Record<string, string>)[value]
-    ?? 'Con respaldo';
+  return ({
+    automatic: 'Protección automática',
+    worktree: 'Protección automática',
+    current: 'Trabajar directamente',
+    'non-git': 'Sin protección',
+  } as Record<string, string>)[value] ?? 'Protección automática';
 }
 
 function presetModeLabel(value: string): string {
@@ -468,19 +478,30 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
 
     const item = record(result.work_item);
     const choice = await vscode.window.showWarningMessage(
-      'La tarea quedó guardada, pero esta carpeta no permite crear un respaldo automático. Podés abrir otra carpeta o continuar sin respaldo.',
+      'La tarea quedó guardada, pero esta opción necesita un repositorio Git. Podés volver a la protección automática, abrir otra carpeta o trabajar sin protección.',
       { modal: true },
-      'Continuar sin respaldo',
+      'Protección automática',
+      'Sin protección',
       'Abrir otra carpeta…',
     );
     if (choice === 'Abrir otra carpeta…') {
       await vscode.commands.executeCommand('workbench.action.files.openFolder');
       return true;
     }
-    if (choice === 'Continuar sin respaldo') {
+    if (choice === 'Protección automática') {
+      const configured = await this.setSafetyMode('automatic');
+      if (configured && item.id) {
+        this.launchOperation('Iniciando la tarea con protección automática…', () => this.runtime.startWorkItem(
+          this.requireWorkspace(),
+          String(item.id),
+        ));
+      }
+      return true;
+    }
+    if (choice === 'Sin protección') {
       const configured = await this.setSafetyMode('non-git');
       if (configured && item.id) {
-        this.launchOperation('Iniciando la tarea sin respaldo…', () => this.runtime.startWorkItem(
+        this.launchOperation('Iniciando la tarea sin protección…', () => this.runtime.startWorkItem(
           this.requireWorkspace(),
           String(item.id),
         ));
@@ -594,25 +615,25 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
 
   private async chooseSafetyMode(): Promise<void> {
     const preference = record(record(this.lastStatus.workbench).preferences);
-    const current = text(preference.safety_mode, 'worktree');
+    const current = text(preference.safety_mode, 'automatic');
     const selected = await vscode.window.showQuickPick([
-      { id: 'worktree', label: '$(shield) Con respaldo', description: 'Recomendado: trabaja en una copia protegida y recuperable' },
-      { id: 'current', label: 'En esta carpeta', description: 'Aplica los cambios directamente; la carpeta debe estar lista' },
-      { id: 'non-git', label: 'Sin respaldo', description: 'Aplica los cambios directamente y reduce las opciones de recuperación' },
+      { id: 'automatic', label: '$(shield) Protección automática', description: 'Recomendada y predeterminada: trabaja en una copia protegida y recuperable' },
+      { id: 'current', label: 'Trabajar directamente', description: 'Modifica esta carpeta y usa su repositorio Git para revisar los cambios' },
+      { id: 'non-git', label: 'Sin protección', description: 'Trabaja directamente, sin exigir Git y sin recuperación automática' },
     ], { title: 'Protección de cambios', placeHolder: `Actual: ${safetyModeLabel(current)}`, ignoreFocusOut: true });
-    if (selected) await this.setSafetyMode(selected.id as 'worktree' | 'current' | 'non-git');
+    if (selected) await this.setSafetyMode(selected.id as SafetyMode);
   }
 
-  private async setSafetyMode(mode: 'worktree' | 'current' | 'non-git'): Promise<boolean> {
+  private async setSafetyMode(mode: SafetyMode): Promise<boolean> {
     const root = this.requireWorkspace();
     let allowNonGit = false;
     if (mode === 'non-git') {
       const confirm = await vscode.window.showWarningMessage(
-        'Sin respaldo, Baldr modificará esta carpeta directamente y tendrá menos opciones para recuperar el trabajo si algo se interrumpe.',
+        'Baldr modificará los archivos de esta carpeta directamente, sin un respaldo automático para recuperarlos si algo se interrumpe.',
         { modal: true },
-        'Continuar sin respaldo',
+        'Continuar sin protección',
       );
-      if (confirm !== 'Continuar sin respaldo') return false;
+      if (confirm !== 'Continuar sin protección') return false;
       allowNonGit = true;
     }
     await this.withProgress('Actualizando la protección de cambios…', () => this.runtime.setWorkspacePreferences(root, {
@@ -1024,9 +1045,20 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
     if (!itemId) return;
     const item = this.selectedItem();
     const actions = allowedActions(item);
+    const nonGit = text(item?.safety_mode) === 'non-git';
     const options = [
+      { id: 'inspect_shadow', label: 'Ver la copia protegida', description: 'Revisar el trabajo guardado por Baldr sin cambiar tus archivos' },
+      { id: 'continue_from_shadow', label: 'Continuar desde la copia protegida', description: 'Retomar desde el último punto que Baldr verificó' },
+      { id: 'apply_shadow_changes', label: 'Aplicar los cambios protegidos', description: 'Comprobar de nuevo la carpeta y copiar sólo los cambios de Baldr' },
+      { id: 'discard_shadow', label: 'Descartar la copia protegida', description: 'Eliminar esta copia sin modificar la carpeta original' },
       { id: 'resume_from_checkpoint', label: 'Continuar desde el último respaldo', description: 'Recuperar el último punto seguro de Baldr' },
-      { id: 'accept_existing_changes', label: 'Conservar los cambios actuales', description: 'Tomar como válidos los cambios que ya están en la carpeta' },
+      {
+        id: 'accept_existing_changes',
+        label: nonGit ? 'Continuar con los archivos actuales' : 'Conservar los cambios actuales',
+        description: nonGit
+          ? 'Seguir con lo que ya está en la carpeta; no hay un respaldo para volver atrás'
+          : 'Tomar como válidos los cambios que ya están en la carpeta',
+      },
       { id: 'discard_worktree', label: 'Descartar los cambios interrumpidos', description: 'Eliminar la copia aislada que no se terminó' },
       { id: 'mark_failed', label: 'Dar la tarea por fallida', description: 'Detener la recuperación y conservar los detalles' },
     ].filter((option) => actions.includes(option.id));
@@ -1040,6 +1072,23 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
     });
     if (!selected) return;
     const root = this.requireWorkspace();
+    if (selected.id === 'inspect_shadow') {
+      this.launchOperation('Preparando la copia para revisar…', async () => {
+        const result = await this.runtime.reconcileWorkItem(root, itemId, selected.id);
+        const shadowPath = text(record(result.reconciliation).execution_root, '');
+        if (shadowPath) {
+          const choice = await vscode.window.showInformationMessage(
+            `La copia protegida está en ${shadowPath}`,
+            'Mostrar carpeta',
+          );
+          if (choice === 'Mostrar carpeta') {
+            await vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(shadowPath));
+          }
+        }
+        return { ...result, ok: true };
+      });
+      return;
+    }
     this.launchOperation('Recuperando la tarea…', () => this.runtime.reconcileWorkItem(root, itemId, selected.id));
   }
 
@@ -1261,7 +1310,7 @@ textarea::placeholder { color: var(--vscode-input-placeholderForeground); opacit
       <div class="composer-row">
         <button type="button" class="plus" id="plus" title="Agregar archivos u opciones" aria-label="Agregar archivos u opciones" aria-expanded="false" aria-controls="plusMenu"><svg class="button-icon" viewBox="0 0 16 16" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" d="M8 3v10M3 8h10"/></svg></button>
         <div class="chips" aria-label="Opciones de la tarea">
-          <button type="button" class="chip" data-chip="git" id="gitChip"><svg class="chip-icon" viewBox="0 0 16 16" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.15" stroke-linejoin="round" d="M8 1.8 12.8 3.4v3.45c0 3.15-1.9 5.65-4.8 7.35-2.9-1.7-4.8-4.2-4.8-7.35V3.4L8 1.8Z"/></svg><span id="gitChipLabel">Con respaldo</span></button>
+          <button type="button" class="chip" data-chip="git" id="gitChip"><svg class="chip-icon" viewBox="0 0 16 16" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.15" stroke-linejoin="round" d="M8 1.8 12.8 3.4v3.45c0 3.15-1.9 5.65-4.8 7.35-2.9-1.7-4.8-4.2-4.8-7.35V3.4L8 1.8Z"/></svg><span id="gitChipLabel">Protección automática</span></button>
           <button type="button" class="chip" data-chip="preset" id="presetChip"><svg class="chip-icon" viewBox="0 0 16 16" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.15" stroke-linecap="round" d="M3 4h10M3 8h10M3 12h10M6 2.8v2.4M10 6.8v2.4M7 10.8v2.4"/></svg><span id="presetChipLabel">Estándar</span></button>
           <button type="button" class="chip" data-chip="roles" id="rolesChip"><svg class="chip-icon" viewBox="0 0 16 16" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.15" stroke-linecap="round" stroke-linejoin="round" d="M6.2 7a2.2 2.2 0 1 0 0-4.4A2.2 2.2 0 0 0 6.2 7ZM2.5 13.2c.25-2.55 1.5-3.8 3.7-3.8s3.45 1.25 3.7 3.8M10.2 3.2a2 2 0 0 1 0 3.8M10.9 9.5c1.55.25 2.4 1.45 2.6 3.4"/></svg><span id="rolesChipLabel">Equipo estándar</span></button>
           <button type="button" class="chip" data-chip="context" id="contextChip"><svg class="chip-icon" viewBox="0 0 16 16" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.15" stroke-linecap="round" stroke-linejoin="round" d="M8 1.8c.35 2.65 1.55 3.85 4.2 4.2C9.55 6.35 8.35 7.55 8 10.2 7.65 7.55 6.45 6.35 3.8 6 6.45 5.65 7.65 4.45 8 1.8ZM12.2 10.2c.18 1.35.85 2.02 2.2 2.2-1.35.18-2.02.85-2.2 2.2-.18-1.35-.85-2.02-2.2-2.2 1.35-.18 2.02-.85 2.2-2.2Z"/></svg><span id="contextChipLabel">Ayuda automática</span></button>
@@ -1300,8 +1349,9 @@ const commands = () => ((workbench().options || {}).slash_commands || [
 function statusClass(status){ return String(status || 'draft').replace(/[^a-z_]/g,'_'); }
 function statusLabel(status){ const labels={draft:'Pendiente',queued:'En espera',running:'En curso',cancelling:'Cancelando',completed:'Lista',archived:'Archivada',failed:'Necesita atención',cancelled:'Cancelada',needs_attention:'Necesita atención'}; return labels[String(status || 'draft')] || String(status || 'Pendiente'); }
 function presetLabel(value){ return ({fast:'Rápido',balanced:'Estándar',deep:'Detallado',custom:'A medida'}[value]||'Estándar'); }
-function safetyLabel(value){ return ({worktree:'Con respaldo',current:'En esta carpeta','non-git':'Sin respaldo'}[value]||'Con respaldo'); }
+function safetyLabel(value){ return ({automatic:'Protección automática',worktree:'Protección automática',current:'Trabajar directamente','non-git':'Sin protección'}[value]||'Protección automática'); }
 function contextLabel(value){ return ({auto:'Ayuda automática',on:'Ayuda activa',off:'Ayuda desactivada'}[value]||'Ayuda automática'); }
+function itemErrorMessage(item){ if(item.error_code==='workspace_reconciliation_required'&&item.safety_mode==='non-git')return 'La tarea se detuvo al intentar crear un respaldo Git que esta carpeta no usa. Tus archivos siguen en la carpeta: revisá las opciones para continuar con ellos.'; return item.error_reason||item.error_code||''; }
 function phaseLabel(value){ return ({architecture:'Planificación',architect:'Planificación',implementation:'Ejecución',implementer:'Ejecución',review:'Revisión',reviewer:'Revisión'}[String(value||'').toLowerCase()]||String(value||'Etapa')); }
 function emptyMark(){ return '<div class="empty-mark"><svg class="empty-logo" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 20V5.5h6.1c3 0 5 1.5 5 4 0 1.8-1 3-2.5 3.6 2 .5 3.4 1.8 3.4 3.8 0 2.4-2 3.1-5.4 3.1H6Z"/><path d="M9.3 8.5h2.8c1.2 0 1.8.4 1.8 1.2s-.6 1.3-1.8 1.3H9.3V8.5Zm0 5.5h3.3c1.4 0 2.1.5 2.1 1.4 0 1-.7 1.5-2.1 1.5H9.3V14Z"/></svg></div>'; }
 function renderTasks(){
@@ -1319,7 +1369,7 @@ function phaseHtml(phase){
 function actionButtons(item){ const actions = item.allowed_actions || []; const rows=[];
  if(actions.includes('start')) rows.push('<button class="action primary" data-action="start">Empezar</button>');
  if(actions.includes('cancel')) rows.push('<button class="action" data-action="cancel">Cancelar</button>');
- if(actions.some(a => ['resume_from_checkpoint','accept_existing_changes','discard_worktree','mark_failed'].includes(a))) rows.push('<button class="action primary" data-action="reconcile">Revisar opciones</button>');
+ if(actions.some(a => ['inspect_shadow','continue_from_shadow','apply_shadow_changes','discard_shadow','resume_from_checkpoint','accept_existing_changes','discard_worktree','mark_failed'].includes(a))) rows.push('<button class="action primary" data-action="reconcile">Revisar opciones</button>');
  if(actions.includes('archive')) rows.push('<button class="action" data-action="archive">Archivar</button>');
  rows.push('<button class="action" data-action="logs">Ver detalles</button>'); return rows.join(''); }
 function renderContent(){
@@ -1327,14 +1377,14 @@ function renderContent(){
  if(state.emptyWorkspace){ els.content.innerHTML='<div class="empty"><div class="empty-inner">'+emptyMark()+'<div class="empty-title">Abrí una carpeta para empezar</div><div class="empty-detail">Baldr necesita una carpeta donde guardar el trabajo.</div></div></div>'; return; }
  if(state.trusted===false){ els.content.innerHTML='<div class="empty"><div class="empty-inner">'+emptyMark()+'<div class="empty-title">Falta tu permiso</div><div class="empty-detail">Autorizá esta carpeta para que Baldr pueda trabajar.</div><p><button type="button" class="action primary" id="trust">Revisar permisos</button></p></div></div>'; document.getElementById('trust')?.addEventListener('click',()=>post({type:'requestTrust'})); return; }
  if(!item){ els.content.innerHTML='<div class="empty"><div class="empty-inner">'+emptyMark()+'<div class="empty-title">¿Qué querés hacer?</div><div class="empty-detail">Escribí lo que necesitás. Baldr lo organiza y te muestra el avance.</div></div></div>'; return; }
- const error = item.error_reason || item.error_code; const phases=(item.phases||[]).map(phaseHtml).join('');
+ const error = itemErrorMessage(item); const phases=(item.phases||[]).map(phaseHtml).join('');
  els.content.innerHTML='<h2 class="item-title">'+escapeHtml(item.title || 'Sin título')+'</h2><div class="item-meta"><span>'+escapeHtml(statusLabel(item.status))+'</span><span>'+escapeHtml(presetLabel(item.preset))+'</span><span>'+escapeHtml(safetyLabel(item.safety_mode))+'</span></div>'+(error?'<div class="notice">'+escapeHtml(error)+'</div>':'')+'<div class="task-body">'+escapeHtml(item.task || '')+'</div>'+(phases?'<div class="timeline">'+phases+'</div>':'')+'<div class="actions">'+actionButtons(item)+'</div><div class="loading '+(state.busy?'visible':'')+'" id="loading"></div>';
  els.content.querySelectorAll('[data-action]').forEach(node => node.addEventListener('click',()=>{ const action=node.dataset.action; if(action==='logs')post({type:'openLogs'}); else post({type:'itemAction',action,itemId:item.id}); }));
 }
 function shortModelLabel(value){ const raw=String(value||'').trim(); const named=raw.match(/^gpt-[0-9]+(?:[.][0-9]+)*-(sol|terra|luna|spark)$/i); if(named)return named[1].charAt(0).toUpperCase()+named[1].slice(1).toLowerCase(); const version=raw.match(/^gpt-([0-9]+(?:[.][0-9]+)*)(?:-(mini))?$/i); if(version)return 'GPT-'+version[1]+(version[2]?' Mini':''); return raw||''; }
 function effortChipLabel(value){ return ({minimal:'Mínimo',low:'Bajo',medium:'Medio',high:'Alto',xhigh:'Muy alto',max:'Máximo',ultra:'Ultra'}[String(value||'').toLowerCase()]||String(value||'')); }
 function configuredRole(role){ const wb=workbench(); const pref=wb.preferences||{}; const profiles=wb.profiles||{}; const selected=(((pref.role_profiles||{})[role]||[])[0]); if(selected&&profiles.execution_profiles&&profiles.execution_profiles[selected])return profiles.execution_profiles[selected]; return (((profiles.resolved_roles||{})[role]||[])[0])||{}; }
-function renderChips(){ const pref=workbench().preferences||{}; const safety=safetyLabel(pref.safety_mode); const preset=presetLabel(pref.preset); const context=contextLabel(pref.context_mode); const roleNames={architect:'Planificación',implementer:'Ejecución',reviewer:'Revisión'}; const roleConfigurations=['architect','implementer','reviewer'].map(role=>{const config=configuredRole(role);const raw=config.model||config.agent||config.provider||'';return {role,label:shortModelLabel(raw),effort:effortChipLabel(config.reasoning_effort||config.effort)};}); const modelNames=[...new Set(roleConfigurations.map(item=>item.label).filter(Boolean))]; const team=modelNames.length?modelNames.join(' · '):'Equipo estándar'; const teamDetail=roleConfigurations.filter(item=>item.label).map(item=>roleNames[item.role]+': '+item.label+(item.effort?' ('+item.effort+')':'')).join(' · '); els.gitChipLabel.textContent=safety; els.gitChip.title='Protección de cambios: '+safety; els.gitChip.setAttribute('aria-label',els.gitChip.title); els.presetChipLabel.textContent=preset; els.presetChip.title='Nivel de detalle: '+preset; els.presetChip.setAttribute('aria-label',els.presetChip.title); els.rolesChipLabel.textContent=team; els.rolesChip.title='Equipo de Baldr: '+(teamDetail||team); els.rolesChip.setAttribute('aria-label',els.rolesChip.title); els.contextChipLabel.textContent=context; els.contextChip.title='Ayuda adicional: '+context; els.contextChip.setAttribute('aria-label',els.contextChip.title); }
+function renderChips(){ const pref=workbench().preferences||{}; const safety=safetyLabel(pref.safety_mode); const preset=presetLabel(pref.preset); const context=contextLabel(pref.context_mode); const roleNames={architect:'Planificación',implementer:'Ejecución',reviewer:'Revisión'}; const roleConfigurations=['architect','implementer','reviewer'].map(role=>{const config=configuredRole(role);const raw=config.model||config.agent||config.provider||'';return {role,label:shortModelLabel(raw),effort:effortChipLabel(config.reasoning_effort||config.effort)};}); const modelNames=[...new Set(roleConfigurations.map(item=>item.label).filter(Boolean))]; const team=modelNames.length?modelNames.join(' · '):'Equipo estándar'; const teamDetail=roleConfigurations.filter(item=>item.label).map(item=>roleNames[item.role]+': '+item.label+(item.effort?' ('+item.effort+')':'')).join(' · '); els.gitChipLabel.textContent=safety; els.gitChip.title='Uso de Git y protección: '+safety; els.gitChip.setAttribute('aria-label',els.gitChip.title); els.presetChipLabel.textContent=preset; els.presetChip.title='Nivel de detalle: '+preset; els.presetChip.setAttribute('aria-label',els.presetChip.title); els.rolesChipLabel.textContent=team; els.rolesChip.title='Equipo de Baldr: '+(teamDetail||team); els.rolesChip.setAttribute('aria-label',els.rolesChip.title); els.contextChipLabel.textContent=context; els.contextChip.title='Ayuda adicional: '+context; els.contextChip.setAttribute('aria-label',els.contextChip.title); }
 function renderPending(){ const items=(state.pending||{}).attachments||[]; const kindLabels={file:'Archivo',folder:'Carpeta',selection:'Selección'}; els.attachments.innerHTML=items.map((item,index)=>'<div class="attachment"><div class="attachment-icon" aria-hidden="true">'+({file:'▤',folder:'◇',selection:'≡'}[item.kind]||'▤')+'</div><div><div class="attachment-label" title="'+escapeHtml(item.label||'Archivo')+'">'+escapeHtml(item.label||'Archivo')+'</div><div class="attachment-kind">'+escapeHtml(kindLabels[item.kind]||'Archivo')+'</div></div><button type="button" class="remove-attachment" data-remove-pending="'+index+'" title="Quitar" aria-label="Quitar '+escapeHtml(item.label||'archivo')+'">×</button></div>').join(''); els.attachments.querySelectorAll('[data-remove-pending]').forEach(node=>node.addEventListener('click',()=>post({type:'removePending',index:Number(node.dataset.removePending)}))); }
 function updateSendState(){ els.send.disabled=Boolean(state.busy)||!els.input.value.trim(); }
 function render(){ renderTasks(); renderContent(); renderChips(); renderPending(); updateSendState(); }

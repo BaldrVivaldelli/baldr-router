@@ -14,7 +14,7 @@ VS Code / Kiro / Codex / Claude Desktop / otro cliente MCP
        -> structured output + telemetry + verification
 ```
 
-> **v0.17.0 — Baldr Console & Durable Work Items.** La superficie de orquestación sigue congelada: no se agregan providers, roles, workflows ni intenciones públicas. VS Code ahora tiene una sección propia en la Activity Bar con items durables, composer, menú `+`, slash autocomplete, chips de configuración, timeline, cancelación y reconciliación visual.
+> **v0.18.0 — Protección automática del workspace.** La superficie de orquestación sigue congelada: las raíces Git limpias usan worktrees y los estados Git sucios/unborn o demás carpetas usan una copia sombra durable administrada por BALDR, con publicación verificada del diff al finalizar.
 
 
 ## Real Environment Qualification
@@ -96,7 +96,7 @@ Instalación local:
 Extensions
   -> …
   -> Install from VSIX
-  -> baldr-router-vscode-0.17.0.vsix
+  -> baldr-router-vscode-0.18.0.vsix
 ```
 
 Superficie diaria:
@@ -120,7 +120,7 @@ Chat opcional:
   @baldr <task>
 ```
 
-No hay un formulario obligatorio. Escribir una tarea en el composer crea y ejecuta un item durable con la configuración activa. Git, preset, perfiles por rol y Context7 se ajustan mediante chips, `+` o slash commands.
+No hay un formulario obligatorio. Escribir una tarea en el composer crea y ejecuta un item durable con la configuración activa. Protección de cambios, nivel de detalle, equipo y ayuda adicional se ajustan mediante chips, `+` o slash commands.
 
 Guía de la consola: [`docs/baldr-console.md`](docs/baldr-console.md)
 
@@ -195,7 +195,7 @@ Un solo perfil puede respaldar las tres fases o cada fase puede tener su lista o
 Baldr control plane
   -> SQLite state machine + event journal
   -> architecture participants
-  -> isolated implementation worktree
+  -> implementación en worktree o workspace sombra aislado
   -> review participants
   -> bounded fixes
   -> durable evidence
@@ -221,12 +221,32 @@ idempotency key + request fingerprint
 write attempt incierto
   -> unknown
   -> awaiting_reconciliation
-  -> resume_from_checkpoint | accept_existing_changes | discard_worktree | mark_failed
+  -> inspeccionar | continuar | aplicar | descartar, sólo cuando sea seguro
 ```
 
-La cancelación se persiste antes de terminar procesos; el resume está ligado a la ruta y a la identidad Git original; los worktrees borrados se reconstruyen desde checkpoints verificables; las sesiones expiran o se invalidan ante cambios de repositorio, provider o límites de turnos. `status` presenta runs no terminales, reconciliación, schema, maintenance y perfiles resueltos sin agregar nuevas intenciones públicas.
+La cancelación se persiste antes de terminar procesos; el resume está ligado a la ruta y a la identidad Git o manifest original; los worktrees borrados se reconstruyen desde checkpoints verificables y los shadows sobreviven reinicios en el estado durable de Baldr. Las sesiones expiran o se invalidan ante cambios de repositorio, provider o límites de turnos. `status` presenta runs no terminales, reconciliación, schema, maintenance y perfiles resueltos sin agregar nuevas intenciones públicas.
 
 Detalle: [`docs/consistency-operator-control.md`](docs/consistency-operator-control.md)
+
+## Protección automática del workspace
+
+La opción recomendada y predeterminada es **Protección automática**:
+
+```text
+raíz exacta de un repositorio Git limpio  -> worktree administrado por Baldr
+Git sucio, sin primer commit o sin Git    -> workspace sombra durable
+subcarpeta elegida dentro de otro repo    -> workspace sombra durable
+```
+
+Baldr no amplía una subcarpeta hasta el repositorio padre ni exige guardar cambios Git preexistentes. En un shadow copia el estado inicial bajo su directorio local (`shadow-workspaces/<run-id>/tree`), inicializa allí un Git privado auxiliar y ejecuta los agentes únicamente sobre esa copia. Los manifests y blobs SHA-256 —no el Git privado— son la fuente de verdad portable. Protección automática falla de forma cerrada si un provider, runner o sandbox no puede demostrar ese límite; los modos directos quedan como elección explícita de garantía reducida.
+
+La carpeta original permanece intacta durante planificación, implementación y revisión. Si review aprueba, Baldr recalcula los hashes, registra un plan durable y aplica sólo archivos nuevos, modificados o eliminados, cambios de tipo y modos. Cada operación tiene un cursor antes/después, por lo que reintentar tras un crash omite efectos ya aplicados. Si el original cambió o la publicación quedó parcial, se conserva la copia y sólo se muestran acciones seguras para inspeccionar, continuar, aplicar o descartar; **Descartar** no aparece si pudiera abandonar efectos en el original.
+
+La copia excluye `.git`, `.hg`, `.svn`, un piso no reemplazable de secretos, patrones sensibles adicionales y artefactos generados, con límites visibles de entradas, tamaño, profundidad y symlinks. Sólo admite enlaces relativos internos; los modos POSIX se preservan donde la plataforma lo permite y Windows informa explícitamente enlaces/reparse points no soportados. Un shadow publicado y verificado se elimina por defecto; los fallos y conflictos usan retención configurable.
+
+Las opciones avanzadas son **Trabajar directamente** (`current`) y **Sin protección** (`non-git`, con confirmación). Los valores legados guardados como `worktree`, `current` o `non-git` conservan su semántica; las preferencias nuevas usan `automatic`.
+
+Detalle: [`docs/durable-orchestration.md`](docs/durable-orchestration.md)
 
 ## Baldr Lab + Probe + Verify
 
@@ -263,8 +283,9 @@ Antes de que un provider lea o escriba un workspace, Baldr exige por defecto que
 
 - la ruta haya sido confiada explícitamente o provista por una fachada confiable;
 - exista y sea un directorio;
-- sea un repositorio Git;
 - no sea el home completo ni una ruta sensible/sistémica.
+
+Un worktree requiere Git. Una carpeta no-Git puede ejecutarse con Protección automática porque los providers escriben en el shadow administrado; esta excepción por operación no concede permiso para editar el original directamente. **Sin protección** sigue exigiendo consentimiento explícito y guarda esa excepción únicamente para la carpeta elegida.
 
 ```bash
 baldr-router workspace-status /path/to/repo
@@ -272,7 +293,7 @@ baldr-router trust-workspace /path/to/repo
 baldr-router untrust-workspace /path/to/repo
 ```
 
-Las fachadas nativas pueden pasar roots temporales mediante `BALDR_TRUSTED_WORKSPACE_ROOTS_JSON`; eso no desactiva el bloqueo de rutas sensibles ni el requisito Git.
+Las fachadas nativas pueden pasar roots confiables mediante `BALDR_TRUSTED_WORKSPACE_ROOTS_JSON`; eso no desactiva el bloqueo de rutas sensibles, las reglas de copia del shadow ni la confirmación requerida para escribir sin protección.
 
 ## Error handling y cancelación
 

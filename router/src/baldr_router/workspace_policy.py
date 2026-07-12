@@ -214,6 +214,7 @@ def inspect_workspace(
     *,
     access: AccessMode = "read",
     cfg: AppConfig | None = None,
+    protected_non_git: bool = False,
 ) -> dict[str, Any]:
     current = cfg or load_config()
     path = _resolved(workspace_root)
@@ -246,7 +247,12 @@ def inspect_workspace(
             "workspace_not_trusted",
             "Workspace is not under a configured or client-provided trusted root.",
         )
-    elif current.workspace.require_git_repository and git_root is None and not intentional_non_git:
+    elif (
+        current.workspace.require_git_repository
+        and git_root is None
+        and not intentional_non_git
+        and not protected_non_git
+    ):
         code, reason = (
             "workspace_git_required",
             "Workspace policy requires a Git repository before providers may access it.",
@@ -260,6 +266,10 @@ def inspect_workspace(
         "is_directory": is_directory,
         "git_root": str(git_root) if git_root else None,
         "intentional_non_git": intentional_non_git,
+        # This is a per-operation exception for an isolated, BALDR-managed
+        # workspace. It deliberately does not grant consent for direct
+        # non-Git writes and is never persisted in ``trusted_non_git_roots``.
+        "protected_non_git": bool(protected_non_git and git_root is None),
         "trusted": trusted_by is not None,
         "trusted_by": str(trusted_by) if trusted_by else None,
         "trusted_roots": [str(root) for root in roots],
@@ -277,8 +287,14 @@ def require_workspace(
     *,
     access: AccessMode = "read",
     cfg: AppConfig | None = None,
+    protected_non_git: bool = False,
 ) -> Path:
-    status = inspect_workspace(workspace_root, access=access, cfg=cfg)
+    status = inspect_workspace(
+        workspace_root,
+        access=access,
+        cfg=cfg,
+        protected_non_git=protected_non_git,
+    )
     if not status["ok"]:
         error = status["error"] or {}
         raise WorkspacePolicyError(
@@ -289,7 +305,12 @@ def require_workspace(
     return Path(status["path"])
 
 
-def trust_workspace(workspace_root: str | Path, *, force: bool = False) -> dict[str, Any]:
+def trust_workspace(
+    workspace_root: str | Path,
+    *,
+    force: bool = False,
+    protected_non_git: bool = False,
+) -> dict[str, Any]:
     cfg = load_config()
     path = _resolved(workspace_root)
     if not path.exists() or not path.is_dir():
@@ -316,7 +337,12 @@ def trust_workspace(workspace_root: str | Path, *, force: bool = False) -> dict[
             },
         }
     git_root = _git_root(path)
-    if cfg.workspace.require_git_repository and git_root is None and not force:
+    if (
+        cfg.workspace.require_git_repository
+        and git_root is None
+        and not force
+        and not protected_non_git
+    ):
         return {
             "ok": False,
             "reason": "Workspace policy requires a Git repository. Use --force only for an intentional non-Git workspace.",
@@ -340,6 +366,7 @@ def trust_workspace(workspace_root: str | Path, *, force: bool = False) -> dict[
         "workspace_root": normalized,
         "git_root": str(git_root) if git_root else None,
         "intentional_non_git": git_root is None and normalized in cfg.workspace.trusted_non_git_roots,
+        "protected_non_git": bool(protected_non_git and git_root is None),
         "config_path": str(saved),
         "policy": asdict(cfg.workspace),
     }

@@ -7,7 +7,7 @@
       ],
       "env": {
         "BALDR_CLIENT_ID": "claude-desktop",
-        "BALDR_CLIENT_VERSION": "0.17.0"
+        "BALDR_CLIENT_VERSION": "0.18.0"
       }
     }
   }

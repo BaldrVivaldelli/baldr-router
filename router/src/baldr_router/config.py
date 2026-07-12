@@ -82,14 +82,61 @@ class WorkspaceConfig:
     allow_home_root: bool = False
     allow_runtime_roots: bool = True
     deny_sensitive_paths: bool = True
-    # auto: clean Git workspaces use an isolated worktree; dirty/non-Git
-    # workspaces use in-place checkpoints. Other values: worktree | in-place.
+    # auto: an exact Git root uses an isolated worktree; a non-Git directory
+    # uses a durable Baldr-managed shadow workspace. Other values are advanced
+    # compatibility modes: worktree | in-place.
     write_isolation: str = "auto"
     publish_worktree_changes: bool = True
     cleanup_successful_worktrees: bool = True
     retain_failed_worktrees: bool = True
-    # reject: fail on dirty auto-isolation; in-place: allow direct writes; explicit-only: require write_isolation=in-place.
+    # Compatibility policy for explicit worktree/in-place flows. Automatic
+    # protection snapshots a dirty Git root into a shadow instead of writing
+    # directly or requiring the user to stash existing work.
     dirty_workspace_policy: str = "reject"
+
+    # Durable shadow workspace policy. Manifests and content-addressed blobs are
+    # the portable source of truth; the private Git repository is auxiliary.
+    shadow_max_files: int = 100000
+    shadow_max_total_bytes: int = 5 * 1024 * 1024 * 1024
+    shadow_max_single_file_bytes: int = 512 * 1024 * 1024
+    shadow_max_depth: int = 64
+    shadow_max_symlinks: int = 10000
+    shadow_exclude_generated: bool = True
+    shadow_generated_directories: list[str] = field(
+        default_factory=lambda: [
+            "node_modules",
+            ".venv",
+            "venv",
+            "__pycache__",
+            ".pytest_cache",
+            ".mypy_cache",
+            ".ruff_cache",
+            ".tox",
+            ".gradle",
+            "target",
+            "dist",
+            "build",
+        ]
+    )
+    shadow_secret_patterns: list[str] = field(
+        default_factory=lambda: [
+            ".env",
+            ".env.*",
+            "*.pem",
+            "*.key",
+            "*.p12",
+            "*.pfx",
+            "credentials.json",
+            "secrets.toml",
+        ]
+    )
+    shadow_exclude_patterns: list[str] = field(default_factory=list)
+    shadow_include_patterns: list[str] = field(default_factory=list)
+    cleanup_successful_shadow_workspaces: bool = True
+    retain_failed_shadow_workspaces: bool = True
+    shadow_success_retention_hours: int = 0
+    shadow_failed_retention_days: int = 30
+    shadow_conflict_retention_days: int = 90
 
 
 @dataclass

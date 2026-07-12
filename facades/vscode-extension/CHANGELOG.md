@@ -1,5 +1,16 @@
 # Change Log
 
+## 0.18.0
+
+- Makes **Automatic protection** the recommended default: exact Git roots use the existing worktree flow, while non-Git folders and selected repository subdirectories use a durable BALDR-managed shadow workspace.
+- Runs providers only in the protected copy, with a private helper Git repository and content-addressed manifests as the portable recovery authority.
+- Adds hash preflight, durable per-operation publication cursors, idempotent retry, conflict evidence, and safe inspect/continue/apply/discard actions for shadow workspaces.
+- Excludes VCS metadata, configured secrets, and generated artifacts; adds visible file, byte, depth, symlink, and portable-path limits.
+- Uses shadows for dirty/unborn Git roots, blocks providers without an enforced workspace boundary, and revalidates every publication operation after durable intent.
+- Keeps inspect/continue/apply/discard available after failed phases or requested review changes, and never expands a direct-mode subfolder to its Git parent.
+- Preserves legacy worktree/direct/unprotected task semantics, adds configurable shadow cleanup and retention, and limits recovery choices to actions proven safe for the recorded state.
+- Clarifies the protection selector and recovery wording for non-technical users.
+
 ## 0.17.6
 
 - Fixes Windows Codex discovery and execution when npm exposes `codex.cmd`.

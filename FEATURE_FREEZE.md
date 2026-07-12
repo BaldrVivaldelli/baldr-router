@@ -1,6 +1,6 @@
-# Feature Freeze — línea de estabilización v0.17
+# Feature Freeze — línea de estabilización v0.18
 
-Baldr Router permanece bajo **congelación funcional**. v0.17 agrega una consola de VS Code y work items durables sin ampliar providers, roles, workflows ni las intenciones públicas `setup/status/run`; v0.16.1 conserva el gate de calificación real y v0.16 el hardening de consistencia y control operativo.
+Baldr Router permanece bajo **congelación funcional**. v0.18 agrega protección automática con worktrees y workspaces sombra durables sin ampliar providers, roles, workflows ni las intenciones públicas `setup/status/run`; v0.17 conserva la consola de VS Code y los work items durables.
 
 ## Superficie congelada
 

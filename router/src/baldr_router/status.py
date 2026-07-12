@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any
 
 from .codex import codex_found, codex_login_status, codex_version, npx_found
@@ -11,6 +12,7 @@ from .extensions import extension_status
 from .discovery.environment_probe import environment_probe
 from .discovery.workspace_profile import workspace_profile
 from .durability.recovery import recover_stale_runs
+from .durability.identity import workspace_identity
 from .durability.store import DurableStore
 from .execution_profiles import role_execution_plan
 from .evidence import latest_evidence
@@ -23,8 +25,18 @@ from .telemetry import runs_jsonl_path, telemetry_stats
 from .workspace_policy import inspect_workspace
 
 
-def _workspace_status(workspace_root: str) -> dict[str, Any]:
-    return inspect_workspace(workspace_root, access="read")
+def _workspace_status(workspace_root: str, store: DurableStore) -> dict[str, Any]:
+    identity = workspace_identity(Path(workspace_root))
+    row = store.connect().execute(
+        "SELECT safety_mode FROM workspace_preferences WHERE workspace_id = ?",
+        (identity["workspace_id"],),
+    ).fetchone()
+    safety_mode = str(row["safety_mode"] if row is not None else "automatic").lower()
+    return inspect_workspace(
+        workspace_root,
+        access="read",
+        protected_non_git=safety_mode in {"auto", "automatic"},
+    )
 
 
 def doctor(workspace_root: str | None = None) -> dict[str, Any]:
@@ -168,7 +180,7 @@ def doctor(workspace_root: str | None = None) -> dict[str, Any]:
         )
 
     if workspace_root:
-        workspace = _workspace_status(workspace_root)
+        workspace = _workspace_status(workspace_root, store)
         result["workspace"] = workspace
         if workspace.get("ok") and cfg.probe.enabled:
             result["workspace_profile"] = workspace_profile(workspace_root)
