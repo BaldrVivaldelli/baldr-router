@@ -14,7 +14,7 @@ from .process_control import managed_popen, terminate_process_tree, unregister_p
 from .provider_errors import provider_error
 from .redaction import redact_text, redact_value
 from .run import redact_command
-from .schemas import validate_final_report
+from .schemas import normalize_final_report, validate_final_report
 from .telemetry import append_run, utc_now_iso
 
 
@@ -31,11 +31,16 @@ class CodexAppServerSession:
     """
 
     def __init__(
-        self, *, env: Mapping[str, str] | None = None, timeout: int = 1800
+        self,
+        *,
+        env: Mapping[str, str] | None = None,
+        timeout: int = 1800,
+        codex_executable: str = "codex",
     ) -> None:
         self.timeout = timeout
+        self._command = [codex_executable, "app-server"]
         self.proc = managed_popen(
-            ["codex", "app-server"],
+            self._command,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -149,7 +154,9 @@ class CodexAppServerSession:
         # Some app-server builds acknowledge resume without echoing a thread.
         if isinstance(res, dict) and not res.get("error"):
             return thread_id
-        raise CodexAppServerError(f"thread/resume did not acknowledge the thread: {res}")
+        raise CodexAppServerError(
+            f"thread/resume did not acknowledge the thread: {res}"
+        )
 
     def run_turn(
         self,
@@ -235,6 +242,7 @@ class CodexAppServerSession:
         completed_ok = completed is not None
         final_text = "".join(agent_text_parts).strip()
         final_report = _try_parse_json(final_text)
+        final_report = normalize_final_report(final_report)
         valid_report, validation_errors = validate_final_report(
             final_report, kind=report_kind
         )
@@ -253,7 +261,9 @@ class CodexAppServerSession:
             "notifications_count": len(notifications),
             "notifications": notifications[-80:],
             "stderr": redact_text("".join(self._stderr[-100:])[-12000:]),
-            "command": redact_command(["codex", "app-server"]),
+            "command": redact_command(
+                getattr(self, "_command", ["codex", "app-server"])
+            ),
         }
         if not completed_ok:
             result.update(
@@ -323,13 +333,18 @@ def run_codex_app_server(
     env: Mapping[str, str] | None = None,
     telemetry_enabled: bool,
     report_kind: str,
+    codex_executable: str = "codex",
 ) -> dict[str, Any]:
     key = _session_key(cwd, session_scope, session_key)
     resumed_from_durable_state = False
     try:
         with _SESSIONS_LOCK:
             if key not in _SESSIONS:
-                session = CodexAppServerSession(env=env, timeout=timeout)
+                session = CodexAppServerSession(
+                    env=env,
+                    timeout=timeout,
+                    codex_executable=codex_executable,
+                )
                 if resume_thread_id:
                     try:
                         thread_id = session.resume_thread(resume_thread_id, model=model)

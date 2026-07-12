@@ -45,6 +45,12 @@ def _resolved(path: str | Path) -> Path:
     return normalize_path_for_runtime(path).expanduser().resolve()
 
 
+def _home_root() -> Path:
+    """Return the platform-defined user home used by workspace policy."""
+
+    return Path.home().resolve()
+
+
 def _is_relative_to(path: Path, parent: Path) -> bool:
     try:
         path.relative_to(parent)
@@ -106,7 +112,7 @@ def _trusted_non_git_roots(cfg: AppConfig) -> list[Path]:
 
 
 def _sensitive_roots() -> list[Path]:
-    home = Path.home().resolve()
+    home = _home_root()
     candidates = [
         home,
         home / ".ssh",
@@ -156,7 +162,7 @@ def _safe_temporary_roots() -> list[Path]:
 
 
 def _sensitive_match(path: Path) -> Path | None:
-    home = Path.home().resolve()
+    home = _home_root()
     safe_temporary_root = next(
         (
             root
@@ -212,7 +218,7 @@ def inspect_workspace(
     current = cfg or load_config()
     path = _resolved(workspace_root)
     roots = configured_trusted_roots(current)
-    home = Path.home().resolve()
+    home = _home_root()
 
     exists = path.exists()
     is_directory = path.is_dir()
@@ -292,7 +298,7 @@ def trust_workspace(workspace_root: str | Path, *, force: bool = False) -> dict[
             "reason": f"Workspace does not exist or is not a directory: {path}",
             "error": {"code": "workspace_not_found", "retryable": False},
         }
-    if path == Path.home().resolve() and not cfg.workspace.allow_home_root:
+    if path == _home_root() and not cfg.workspace.allow_home_root:
         return {
             "ok": False,
             "reason": "Refusing to trust the user home directory.",

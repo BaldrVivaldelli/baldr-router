@@ -15,7 +15,7 @@ from .process_control import managed_popen, terminate_process_tree, unregister_p
 from .provider_errors import provider_error
 from .redaction import redact_text, redact_value
 from .run import redact_command
-from .schemas import validate_final_report, write_schema
+from .schemas import normalize_final_report, validate_final_report, write_schema
 from .telemetry import append_run, utc_now_iso
 
 
@@ -231,6 +231,7 @@ def run_codex_exec_json(
             unregister_process(proc)
 
         final_json, final_text, parse_error = _parse_final_output(final_path)
+        final_json = normalize_final_report(final_json)
         valid_report, validation_errors = validate_final_report(final_json, kind=report_kind)
         duration_ms = int((time.time() - started) * 1000)
         stderr = _tail("".join(stderr_lines), 12000)

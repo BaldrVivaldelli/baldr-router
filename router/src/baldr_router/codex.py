@@ -72,15 +72,17 @@ def npx_found() -> str | None:
 
 
 def codex_login_status() -> dict[str, Any]:
-    if not codex_found():
+    executable = codex_found()
+    if not executable:
         return {"ok": False, "reason": "codex command not found"}
-    return run_command(["codex", "login", "status"], timeout=20)
+    return run_command([executable, "login", "status"], timeout=20)
 
 
 def codex_version() -> dict[str, Any]:
-    if not codex_found():
+    executable = codex_found()
+    if not executable:
         return {"ok": False, "reason": "codex command not found"}
-    return run_command(["codex", "--version"], timeout=20)
+    return run_command([executable, "--version"], timeout=20)
 
 
 def _codex_env(extra_env: dict[str, str] | None = None) -> dict[str, str]:
@@ -161,7 +163,8 @@ def codex_model_catalog(*, force: bool = False) -> dict[str, Any]:
         and now - _MODEL_CATALOG_CACHE[0] < _MODEL_CATALOG_CACHE_SECONDS
     ):
         return deepcopy(_MODEL_CATALOG_CACHE[1])
-    if not codex_found():
+    executable = codex_found()
+    if not executable:
         return provider_error(
             "codex_not_found",
             "Codex CLI was not found. Install Codex CLI before listing models.",
@@ -170,7 +173,9 @@ def codex_model_catalog(*, force: bool = False) -> dict[str, Any]:
 
     session: CodexAppServerSession | None = None
     try:
-        session = CodexAppServerSession(env=_codex_env(), timeout=60)
+        session = CodexAppServerSession(
+            env=_codex_env(), timeout=60, codex_executable=executable
+        )
         pages: list[dict[str, Any]] = []
         cursor = ""
         seen_cursors: set[str] = set()
@@ -241,7 +246,7 @@ def build_codex_exec_command(
     skip_git_repo_check: bool,
 ) -> list[str]:
     cmd = [
-        "codex",
+        codex_found() or "codex",
         "--ask-for-approval",
         approval_policy,
         "exec",
@@ -322,6 +327,7 @@ def _run_codex_prompt(
             env=env,
             telemetry_enabled=cfg.telemetry.enabled,
             report_kind=report_kind,
+            codex_executable=codex_found() or "codex",
         )
     elif selected_runner == "sdk":
         result = run_codex_sdk(

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 import random
 import shutil
+import stat
 import subprocess
 import threading
 from datetime import datetime, timedelta, timezone
@@ -25,6 +27,17 @@ from baldr_router.durability.store import (
     IdempotencyConflict,
     LeaseFenceError,
 )
+
+
+def _rmtree(path: Path) -> None:
+    def remove_windows_readonly(func, target: str, exc_info) -> None:
+        error = exc_info[1]
+        if os.name != "nt" or not isinstance(error, PermissionError):
+            raise error
+        os.chmod(target, stat.S_IWRITE)
+        func(target)
+
+    shutil.rmtree(path, onerror=remove_windows_readonly)
 
 
 def _init_repo(path: Path, marker: str = "fixture") -> None:
@@ -318,7 +331,7 @@ def test_resume_is_bound_to_original_path_and_repository_identity(
     )
     assert wrong_path["error"]["code"] == "resume_workspace_path_mismatch"
 
-    shutil.rmtree(repo)
+    _rmtree(repo)
     _init_repo(repo, "replacement")
     wrong_repo = DurableWorkflowEngine(store=store).run(
         workspace_root=repo,
@@ -521,7 +534,7 @@ def test_deleted_worktree_is_reconstructed_from_checkpoint(
     (execution.execution_root / "checkpointed.txt").write_text("checkpointed\n", encoding="utf-8")
     manager.checkpoint(execution, step_id="step", label="checkpoint", lease=lease)
     worktree = execution.execution_root
-    shutil.rmtree(worktree)
+    _rmtree(worktree)
     assert not worktree.exists()
 
     reconstructed = manager.restore_or_reconstruct(

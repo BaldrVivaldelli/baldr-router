@@ -83,12 +83,16 @@ def test_git_repository_is_required_by_default(tmp_path: Path, monkeypatch):
     assert str(workspace.resolve()) in load_config().workspace.trusted_non_git_roots
 
 
+@pytest.mark.parametrize("relative_path", [Path(".ssh"), Path(".ssh") / "project"])
 def test_sensitive_home_subtree_is_blocked_even_if_client_trusts_it(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, relative_path: Path
 ):
     home = tmp_path / "home"
-    secret_repo = home / ".ssh"
-    monkeypatch.setenv("HOME", str(home))
+    secret_repo = home / relative_path
+    # Path.home() deliberately follows the platform's home source: HOME on
+    # POSIX and USERPROFILE/HOMEDRIVE+HOMEPATH on Windows. Patch the policy's
+    # source instead of assuming that setting HOME changes it everywhere.
+    monkeypatch.setattr(workspace_policy, "_home_root", lambda: home.resolve())
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     _git_init(secret_repo)
     monkeypatch.setenv(RUNTIME_ROOTS_ENV, json.dumps([str(secret_repo)]))

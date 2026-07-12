@@ -7,6 +7,35 @@ from pathlib import Path
 from baldr_router import tasks
 
 
+def test_direct_task_structured_instruction_matches_full_report_contract() -> None:
+    instruction = tasks._structured_instruction("implemented")
+    declared_keys = {
+        line[2:].split(":", 1)[0]
+        for line in instruction.splitlines()
+        if line.startswith("- ")
+    }
+
+    assert declared_keys == {
+        "status",
+        "summary",
+        "files_modified",
+        "commands_run",
+        "tests_run",
+        "verification_needed",
+        "risks",
+        "follow_up",
+        "decisions",
+        "constraints",
+        "assumptions",
+        "alternatives_rejected",
+        "acceptance_criteria",
+        "blockers",
+        "review_decision",
+    }
+    assert "array of objects with string keys `key` and `value`" in instruction
+    assert "use not_applicable outside review" in instruction
+
+
 def test_delegate_task_is_client_agnostic(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     workspace = tmp_path / "repo"

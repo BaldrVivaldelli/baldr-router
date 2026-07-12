@@ -30,8 +30,8 @@ test('requires VS Code Workspace Trust before provider execution', () => {
   assert.equal(manifest.capabilities.untrustedWorkspaces.supported, false);
 });
 
-test('packages the v0.17.4 Baldr Console facade', () => {
-  assert.equal(manifest.version, '0.17.4');
+test('packages the v0.17.6 Baldr Console facade', () => {
+  assert.equal(manifest.version, '0.17.6');
   assert.match(contract.intents.setup.description, /lifecycle verification/);
 });
 

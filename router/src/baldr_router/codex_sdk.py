@@ -10,7 +10,7 @@ from typing import Any, Mapping
 
 from .provider_errors import provider_error
 from .redaction import redact_text, redact_value
-from .schemas import validate_final_report
+from .schemas import normalize_final_report, validate_final_report
 from .telemetry import append_run, utc_now_iso
 
 
@@ -125,6 +125,7 @@ def run_codex_sdk(
                     result = thread.run(prompt, sandbox=_sandbox_value(sandbox))
                 final_text = str(getattr(result, "final_response", "") or "")
                 final_report = _try_parse_json(final_text)
+                final_report = normalize_final_report(final_report)
                 valid_report, validation_errors = validate_final_report(
                     final_report, kind=report_kind
                 )

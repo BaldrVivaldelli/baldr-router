@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -87,6 +89,75 @@ def test_codex_model_catalog_normalizes_and_caches(monkeypatch) -> None:
     assert len(second["models"]) == 1
     assert FakeModelSession.created == 1
     assert FakeModelSession.closed == 1
+
+
+def test_codex_model_catalog_uses_the_resolved_executable(monkeypatch) -> None:
+    executable = r"C:\Users\runneradmin\AppData\Roaming\npm\codex.cmd"
+    captured: dict[str, Any] = {}
+
+    class CapturingSession:
+        def __init__(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+        def request(
+            self, method: str, params: dict[str, Any], timeout: int
+        ) -> dict[str, Any]:
+            assert method == "model/list"
+            assert params == {"limit": 100, "includeHidden": False}
+            assert timeout == 30
+            return {"data": [{"id": "gpt-test", "model": "gpt-test"}]}
+
+        def close(self) -> None:
+            pass
+
+    codex.reset_codex_model_catalog_cache()
+    monkeypatch.setattr(codex, "codex_found", lambda: executable)
+    monkeypatch.setattr(codex, "_codex_env", lambda extra_env=None: {})
+    monkeypatch.setattr(codex, "CodexAppServerSession", CapturingSession)
+
+    result = codex.codex_model_catalog(force=True)
+
+    assert result["ok"] is True
+    assert captured["codex_executable"] == executable
+
+
+def test_app_server_runner_uses_the_resolved_executable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    executable = r"C:\Users\runneradmin\AppData\Roaming\npm\codex.cmd"
+    captured: dict[str, Any] = {}
+    config = SimpleNamespace(
+        codex=SimpleNamespace(
+            runner="app-server",
+            model="",
+            reasoning_effort="",
+            session_scope="workspace",
+            timeout_seconds=60,
+        ),
+        telemetry=SimpleNamespace(enabled=False),
+    )
+
+    def fake_run_codex_app_server(**kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {"ok": True}
+
+    monkeypatch.setattr(codex, "load_config", lambda: config)
+    monkeypatch.setattr(codex, "codex_preflight", lambda: {"ok": True})
+    monkeypatch.setattr(codex, "_codex_env", lambda extra_env=None: {})
+    monkeypatch.setattr(codex, "codex_found", lambda: executable)
+    monkeypatch.setattr(codex, "run_codex_app_server", fake_run_codex_app_server)
+
+    result = codex._run_codex_prompt(
+        cwd=tmp_path,
+        prompt="inspect the workspace",
+        sandbox="read-only",
+        approval_policy="never",
+        report_kind="plan",
+        runner="app-server",
+    )
+
+    assert result["ok"] is True
+    assert captured["codex_executable"] == executable
 
 
 def test_codex_model_catalog_follows_pagination_and_deduplicates_by_model(

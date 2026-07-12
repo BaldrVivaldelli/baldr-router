@@ -98,7 +98,7 @@ def _has_blockers(result: dict[str, Any]) -> bool:
 def _structured_instruction(status_hint: str) -> str:
     return f"""
 Return a short JSON object only. Do not wrap it in Markdown.
-Required keys:
+Required keys (use empty arrays when a section does not apply):
 - status: one of planned, implemented, reviewed, approved, needs_changes, partial, blocked, no_changes_needed
 - summary: concise operational summary
 - files_modified: string array
@@ -107,14 +107,13 @@ Required keys:
 - verification_needed: string array
 - risks: string array
 - follow_up: string array
-Optional role-specific keys (include them when relevant):
-- decisions: object mapping stable decision keys to concise chosen values
+- decisions: array of objects with string keys `key` and `value`; use [] when none
 - constraints: string array
 - assumptions: string array
 - alternatives_rejected: string array
 - acceptance_criteria: string array
 - blockers: string array
-- review_decision: approved, changes_required, inconclusive, or not_applicable
+- review_decision: approved, changes_required, inconclusive, or not_applicable; use not_applicable outside review
 Prefer status `{status_hint}` when appropriate.
 """.strip()
 

@@ -1,5 +1,17 @@
 # Change Log
 
+## 0.17.6
+
+- Fixes Windows Codex discovery and execution when npm exposes `codex.cmd`.
+- Makes the cross-platform Codex failure tests independent of POSIX shebangs and executable bits.
+- Hardens Windows CI cleanup for read-only Git objects while preserving sensitive-home protections.
+
+## 0.17.5
+
+- Fixes the strict Codex response schema so durable tasks can start with current models.
+- Keeps architecture decisions compatible across the exec, app-server, and SDK runners.
+- Aligns direct tasks and reviews with the complete structured report contract.
+
 ## 0.17.4
 
 - Adds a guided Codex team selector with the models available in the signed-in account and only the supported analysis levels for each model.

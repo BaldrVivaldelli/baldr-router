@@ -28,8 +28,16 @@ def codex_final_report_schema(kind: str = "implementation") -> dict[str, Any]:
             "risks": {"type": "array", "items": {"type": "string"}},
             "follow_up": {"type": "array", "items": {"type": "string"}},
             "decisions": {
-                "type": "object",
-                "additionalProperties": {"type": "string"},
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "key": {"type": "string"},
+                        "value": {"type": "string"},
+                    },
+                    "required": ["key", "value"],
+                    "additionalProperties": False,
+                },
             },
             "constraints": {"type": "array", "items": {"type": "string"}},
             "assumptions": {"type": "array", "items": {"type": "string"}},
@@ -50,9 +58,15 @@ def codex_final_report_schema(kind: str = "implementation") -> dict[str, Any]:
             "verification_needed",
             "risks",
             "follow_up",
+            "decisions",
+            "constraints",
+            "assumptions",
+            "alternatives_rejected",
+            "acceptance_criteria",
+            "blockers",
+            "review_decision",
         ],
         "additionalProperties": False,
-        "x-baldr-router-kind": kind,
     }
 
 
@@ -63,6 +77,26 @@ def write_schema(path: Path, *, kind: str = "implementation") -> Path:
         encoding="utf-8",
     )
     return path
+
+
+def normalize_final_report(value: Any) -> Any:
+    """Convert the strict wire representation into Baldr's stable report shape."""
+
+    if not isinstance(value, dict) or not isinstance(value.get("decisions"), list):
+        return value
+    normalized: dict[str, str] = {}
+    for item in value["decisions"]:
+        if not isinstance(item, dict) or set(item) != {"key", "value"}:
+            return value
+        key = item.get("key")
+        decision = item.get("value")
+        if not isinstance(key, str) or not key.strip() or not isinstance(decision, str):
+            return value
+        clean_key = key.strip()
+        if clean_key in normalized:
+            return value
+        normalized[clean_key] = decision
+    return {**value, "decisions": normalized}
 
 
 def validate_final_report(value: Any, *, kind: str = "implementation") -> tuple[bool, list[str]]:
@@ -98,7 +132,7 @@ def validate_final_report(value: Any, *, kind: str = "implementation") -> tuple[
         if not isinstance(item, list) or not all(isinstance(entry, str) for entry in item):
             errors.append(f"{key} must be an array of strings")
     decisions = value.get("decisions")
-    if decisions is not None and (
+    if (
         not isinstance(decisions, dict)
         or not all(isinstance(key, str) and isinstance(entry, str) for key, entry in decisions.items())
     ):
@@ -111,13 +145,12 @@ def validate_final_report(value: Any, *, kind: str = "implementation") -> tuple[
         "blockers",
     ):
         item = value.get(key)
-        if item is not None and (
-            not isinstance(item, list)
-            or not all(isinstance(entry, str) for entry in item)
+        if not isinstance(item, list) or not all(
+            isinstance(entry, str) for entry in item
         ):
             errors.append(f"{key} must be an array of strings")
     review_decision = value.get("review_decision")
-    if review_decision is not None and review_decision not in {
+    if review_decision not in {
         "approved", "changes_required", "inconclusive", "not_applicable"
     }:
         errors.append(f"invalid review_decision: {review_decision!r}")
