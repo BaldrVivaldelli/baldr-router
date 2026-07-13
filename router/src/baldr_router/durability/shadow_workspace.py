@@ -74,6 +74,45 @@ def _safe_chmod(path: Path, mode: int) -> None:
             raise
 
 
+def _retry_owned_readonly_removal(
+    operation: Callable[[str], None],
+    target: str,
+    error_info: tuple[type[BaseException], BaseException, Any],
+) -> None:
+    """Retry deletion of a router-owned Windows read-only entry."""
+
+    error = error_info[1]
+    if not isinstance(error, PermissionError):
+        raise error
+    os.chmod(target, stat.S_IRWXU)
+    operation(target)
+
+
+def _remove_owned_tree(path: Path, *, ignore_errors: bool = False) -> None:
+    """Remove a validated private tree, including Windows read-only files."""
+
+    try:
+        shutil.rmtree(path, onerror=_retry_owned_readonly_removal)
+    except FileNotFoundError:
+        return
+    except OSError:
+        if not ignore_errors:
+            raise
+
+
+def _unlink_owned_file(path: Path, *, missing_ok: bool = False) -> None:
+    """Unlink a private regular file without chmod-following a link target."""
+
+    try:
+        path.unlink(missing_ok=missing_ok)
+    except PermissionError:
+        metadata = path.stat(follow_symlinks=False)
+        if stat.S_ISLNK(metadata.st_mode) or _is_windows_reparse(metadata):
+            raise
+        _safe_chmod(path, stat.S_IRWXU)
+        path.unlink(missing_ok=missing_ok)
+
+
 def _fsync_directory(path: Path) -> None:
     try:
         descriptor = os.open(path, os.O_RDONLY)
@@ -1117,7 +1156,7 @@ class _ShadowWorkspace:
                 os.replace(temporary, destination)
                 _fsync_directory(destination.parent)
             finally:
-                temporary.unlink(missing_ok=True)
+                _unlink_owned_file(temporary, missing_ok=True)
             return
         if entry.kind == "symlink":
             assert entry.target is not None
@@ -1136,7 +1175,7 @@ class _ShadowWorkspace:
                 os.replace(temporary, destination)
                 _fsync_directory(destination.parent)
             except (NotImplementedError, OSError) as exc:
-                temporary.unlink(missing_ok=True)
+                _unlink_owned_file(temporary, missing_ok=True)
                 raise ShadowPolicyError(
                     f"Symbolic link could not be created portably: {entry.path}",
                     code="shadow_symlink_unavailable",
@@ -1151,9 +1190,9 @@ class _ShadowWorkspace:
             if child.name == ".git":
                 continue
             if child.is_dir() and not child.is_symlink():
-                shutil.rmtree(child)
+                _remove_owned_tree(child)
             else:
-                child.unlink(missing_ok=True)
+                _unlink_owned_file(child, missing_ok=True)
 
     def _materialize_tree(self, manifest: ShadowManifest) -> None:
         self._clear_tree()
@@ -1183,9 +1222,9 @@ class _ShadowWorkspace:
             else:
                 path.unlink()
         elif stat.S_ISDIR(metadata.st_mode):
-            shutil.rmtree(path)
+            _remove_owned_tree(path)
         else:
-            path.unlink()
+            _unlink_owned_file(path)
 
     @property
     def _git_sandbox(self) -> Path:
@@ -1608,7 +1647,7 @@ class _ShadowWorkspace:
             # could be mistaken for a protected execution root when its
             # required private repository/checkpoint could not be recreated.
             if self.tree.exists() and not self.tree.is_symlink():
-                shutil.rmtree(self.tree)
+                _remove_owned_tree(self.tree)
             self._journal(
                 "restore_failed",
                 manifest=digest,
@@ -2371,7 +2410,7 @@ class _ShadowWorkspace:
             self._operation_complete(
                 state, operation, ordinal=ordinal, observer=observer
             )
-        shutil.rmtree(stage, ignore_errors=True)
+        _remove_owned_tree(stage, ignore_errors=True)
 
     def publish(self, *, observer: PublicationObserver | None = None) -> dict[str, Any]:
         state = self._read_state()
@@ -2712,7 +2751,7 @@ class _ShadowWorkspace:
         self._journal("discarded")
         if cleanup:
             self._validate_ownership()
-            shutil.rmtree(self.root)
+            _remove_owned_tree(self.root)
         return {"ok": True, "status": "discarded", "cleaned": cleanup}
 
     def cleanup(self, *, force: bool = False) -> dict[str, Any]:
@@ -2725,7 +2764,7 @@ class _ShadowWorkspace:
                 details={"status": status},
             )
         self._validate_ownership()
-        shutil.rmtree(self.root)
+        _remove_owned_tree(self.root)
         return {"ok": True, "status": "cleaned", "previous_status": status}
 
 

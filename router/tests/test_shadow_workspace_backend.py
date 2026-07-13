@@ -171,6 +171,28 @@ def test_materialized_files_fsync_with_a_write_capable_descriptor(
             materialized.chmod(0o600)
 
 
+def test_private_cleanup_retries_a_read_only_entry(tmp_path: Path) -> None:
+    private_file = tmp_path / "private-blob"
+    private_file.write_text("immutable", encoding="utf-8")
+    private_file.chmod(0o444)
+    removed: list[Path] = []
+
+    def remove_after_unlock(target: str) -> None:
+        path = Path(target)
+        assert path.stat().st_mode & stat.S_IWUSR
+        removed.append(path)
+
+    try:
+        shadow_workspace_module._retry_owned_readonly_removal(
+            remove_after_unlock,
+            str(private_file),
+            (PermissionError, PermissionError("read-only"), None),
+        )
+        assert removed == [private_file]
+    finally:
+        private_file.chmod(0o600)
+
+
 def test_prepare_fails_when_private_git_exists_but_has_no_usable_commit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
