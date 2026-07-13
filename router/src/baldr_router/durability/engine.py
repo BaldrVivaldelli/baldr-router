@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import inspect
 import json
 import os
 import socket
@@ -15,11 +16,16 @@ from baldr_router import __version__
 from baldr_router.config import AppConfig, RoleConfig, WorkflowConfig
 from baldr_router.context7 import prepare_context7_bundle
 from baldr_router.execution_profiles import role_execution_plan
+from baldr_router.phase_deliverables import materialize_phase_deliverable
 from baldr_router.process_control import terminate_processes_for_run
 from baldr_router.provider_registry import (
     provider_isolation_status,
     provider_runtime_identity,
     run_provider_role,
+)
+from baldr_router.provider_activity import (
+    emit_provider_activity,
+    generic_activity_for_role,
 )
 from baldr_router.redaction import redact_text
 from baldr_router.runtime_guard import child_provider_env, new_run_id
@@ -110,6 +116,15 @@ Return a short JSON object only. Do not wrap it in Markdown.
 Required keys (use empty arrays when a section does not apply):
 - status: one of planned, implemented, reviewed, approved, needs_changes, partial, blocked, no_changes_needed
 - summary: concise operational summary
+- interpretation: one sentence explaining what you understood the person needs
+- scope: string array describing what is and is not included
+- approach: string array describing the chosen approach as conclusions, not hidden reasoning
+- plan_steps: ordered string array of concrete planned steps
+- work_completed: string array of concrete work already completed
+- work_next: string array of concrete work still remaining
+- findings: string array of review findings; use [] when none
+- corrections: string array of corrections applied; use [] when none
+- verification_evidence: string array of observable checks and their outcomes; do not claim a pass without evidence
 - files_modified: string array
 - commands_run: string array
 - tests_run: string array
@@ -124,7 +139,26 @@ Required keys (use empty arrays when a section does not apply):
 - blockers: string array
 - review_decision: approved, changes_required, inconclusive, or not_applicable; use not_applicable outside review
 Prefer status `{status_hint}` when appropriate.
+Write `summary`, `interpretation`, and every user-facing list item in the same language as the user's task.
+Use concise, plain language that a non-technical reader can understand;
+keep necessary technical identifiers only in their
+dedicated fields. Report conclusions and observable evidence only. Never include hidden
+reasoning, private chain-of-thought, or an analysis transcript.
 """.strip()
+
+
+def _runner_accepts_activity_sink(runner: ProviderRunner) -> bool:
+    """Preserve compatibility with injected provider runners from older clients."""
+
+    try:
+        parameters = inspect.signature(runner).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.name == "activity_sink"
+        or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
 
 
 def architect_prompt(task: str, extra_context: str, context7_note: str) -> str:
@@ -1551,9 +1585,25 @@ class DurableWorkflowEngine:
                 heartbeat_seconds,
                 attempt_id=attempt_id,
             )
+
+            def activity_sink(category: str) -> None:
+                try:
+                    self.store.record_phase_activity(
+                        run_id=run_id,
+                        step_id=step_id,
+                        attempt_id=attempt_id,
+                        category=category,
+                        lease=lease,
+                    )
+                except Exception:
+                    # Activity is observational and must not change provider,
+                    # lease, cancellation, or recovery outcomes.
+                    return
+
+            emit_provider_activity(activity_sink, generic_activity_for_role(phase))
             with heartbeat:
                 try:
-                    result = self.provider_runner(
+                    provider_kwargs: dict[str, Any] = dict(
                         provider=str(profile["provider"]),
                         role_name=phase,
                         role=role,
@@ -1575,6 +1625,9 @@ class DurableWorkflowEngine:
                         durable_step_id=step_id,
                         durable_attempt_id=attempt_id,
                     )
+                    if _runner_accepts_activity_sink(self.provider_runner):
+                        provider_kwargs["activity_sink"] = activity_sink
+                    result = self.provider_runner(**provider_kwargs)
                 except (WorkflowCancelled, LeaseFenceError):
                     raise
                 except Exception as exc:
@@ -1687,6 +1740,12 @@ class DurableWorkflowEngine:
                 error_reason=output["reason"],
                 lease=lease,
             )
+            materialize_phase_deliverable(
+                self.store,
+                step_id=step_id,
+                phase_output=output,
+                lease=lease,
+            )
             return output
 
         output = reduce_phase(
@@ -1696,6 +1755,26 @@ class DurableWorkflowEngine:
             min_successes=required,
             min_approvals=int(plan.get("min_approvals") or 1),
         )
+        if not output.get("ok"):
+            artifact = self.store.store_artifact(
+                run_id=run_id, kind=f"{phase}-phase-result", value=output
+            )
+            reason = str(output.get("reason") or "The phase reported blockers.")
+            self.store.transition_step(
+                step_id,
+                "failed",
+                output_artifact_id=artifact,
+                error_code=str(output.get("error_code") or "phase_report_blocked"),
+                error_reason=reason,
+                lease=lease,
+            )
+            materialize_phase_deliverable(
+                self.store,
+                step_id=step_id,
+                phase_output=output,
+                lease=lease,
+            )
+            return output
         if post_success:
             checkpoint = post_success(step_id)
             output = {**output, "checkpoint": checkpoint}
@@ -1705,6 +1784,12 @@ class DurableWorkflowEngine:
         )
         self.store.transition_step(
             step_id, "succeeded", output_artifact_id=artifact, lease=lease
+        )
+        materialize_phase_deliverable(
+            self.store,
+            step_id=step_id,
+            phase_output=output,
+            lease=lease,
         )
         self._fault(
             f"step.{step_key}.succeeded",

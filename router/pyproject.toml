@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "baldr-router"
-version = "0.18.0"
+version = "0.19.0"
 description = "Client-agnostic MCP orchestration runtime with a frozen setup/status/run facade contract, provider adapters, roles, workflows, Context7 cache, telemetry, and structured reports."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -23,6 +23,10 @@ packages = ["src/baldr_router"]
 [tool.hatch.build.targets.wheel.force-include]
 "src/baldr_router/contracts/facade-v1.json" = "baldr_router/contracts/facade-v1.json"
 "src/baldr_router/contracts/facade-v1.schema.json" = "baldr_router/contracts/facade-v1.schema.json"
+"src/baldr_router/contracts/work-item-progress-v1.schema.json" = "baldr_router/contracts/work-item-progress-v1.schema.json"
+"src/baldr_router/contracts/phase-deliverable-v1.schema.json" = "baldr_router/contracts/phase-deliverable-v1.schema.json"
+"src/baldr_router/contracts/phase-deliverable-page-v1.schema.json" = "baldr_router/contracts/phase-deliverable-page-v1.schema.json"
+"src/baldr_router/contracts/phase-deliverable-index-page-v1.schema.json" = "baldr_router/contracts/phase-deliverable-index-page-v1.schema.json"
 "src/baldr_router/qualification/profiles-v1.json" = "baldr_router/qualification/profiles-v1.json"
 "src/baldr_router/qualification/canaries-v1.json" = "baldr_router/qualification/canaries-v1.json"
 

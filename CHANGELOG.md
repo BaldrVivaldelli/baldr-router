@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.19.0 — Narrative Progress UX
+
+- Replaced internal workflow-status rows with a durable narrative view that explains what Baldr is doing now, what each stage produced, what was verified, and whether the user must act.
+- Added a versioned, bounded `work-item-progress` projection for Planning, Execution, and Review, including grouped correction rounds, milestones, evidence levels, final results, and contextual recovery actions.
+- Added allowlisted live activity categories without exposing prompts, reasoning, provider output, commands, absolute paths, or secrets.
+- Added durable, redacted and paginated deliverables for every phase round and retry, with a bounded recent index for polling and on-demand access to the complete history.
+- Added progressive disclosure for technical metadata, accessible stage accordions, responsive narrow-panel behavior, persistent expansion state, and plain Spanish wording for non-technical users.
+- Added a compact workbench-only status path and adaptive visible-only polling to reduce process, diagnostic, and log noise while preserving durable restart recovery.
+- Added strict contract, privacy, retry, intervention, restart, legacy-compatibility, UI, packaging, and adversarial regression coverage.
+- Preserved the frozen providers, roles, workflow, MCP tools, prompts, and public `setup/status/run` facade contract.
+
 ## 0.18.0 — Automatic Workspace Protection
 
 - Made **Automatic protection** the recommended default: exact Git roots use managed worktrees, while non-Git folders and selected repository subdirectories use durable BALDR-managed shadow workspaces.

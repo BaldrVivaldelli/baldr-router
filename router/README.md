@@ -63,7 +63,7 @@ baldr-router facade run --workspace /path/to/repo --task "..."
 
 ## Baldr Probe, Verify y Lab
 
-La línea v0.16 agrega hardening sin ampliar la superficie MCP congelada:
+La línea v0.19 conserva este hardening y suma progreso narrativo sin ampliar la superficie MCP congelada:
 
 ```bash
 # Fingerprint de entorno redactado
@@ -100,4 +100,4 @@ uv run --extra dev ruff check src tests
 python -m compileall -q src
 ```
 
-La línea v0.16 está bajo feature freeze. Ver `../FEATURE_FREEZE.md`.
+La línea v0.19 está bajo feature freeze. Ver `../FEATURE_FREEZE.md`.

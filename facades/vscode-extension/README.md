@@ -31,6 +31,8 @@ There is no mandatory setup form. Type a task and press Enter; Baldr creates a d
 /cancel
 /resume
 /archive
+/restore
+/delete
 /setup
 /help
 ```
@@ -54,6 +56,8 @@ The extension never silently disables Git safety.
 ## Durable state
 
 Tasks are persisted by the core in SQLite, not in the webview. Closing VS Code or restarting Baldr does not erase the work-item list. The selected item displays architecture, implementation, review, durable cancellation, and reconciliation state.
+
+The history separates active, completed, and archived sessions. Archive is reversible; archived sessions can be restored or permanently deleted after a confirmation. Permanent deletion removes Baldr's durable session data and never modifies files in the workspace.
 
 The webview never opens SQLite directly. It only invokes the shared facade and renders the result.
 
@@ -100,7 +104,7 @@ The extension renders UI and native Quick Picks. Provider routing, profiles, wor
 ## Packaged runtime
 
 ```text
-resources/runtime/baldr_router-0.18.0-py3-none-any.whl
+resources/runtime/baldr_router-0.19.0-py3-none-any.whl
 runtime/runtime-bootstrap.mjs
 runtime/baldr-bootstrap.mjs
 ```

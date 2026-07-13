@@ -119,6 +119,7 @@ def cmd_facade(args: argparse.Namespace) -> int:
             work_item_id=getattr(args, "work_item_id", None),
             work_item_limit=getattr(args, "work_item_limit", 100),
             include_archived=getattr(args, "include_archived", False),
+            workbench_only=getattr(args, "workbench_only", False),
         )
     elif args.intent == "run":
         result = facade_run(
@@ -152,6 +153,13 @@ def cmd_facade(args: argparse.Namespace) -> int:
             item_config=_parse_json_object(
                 getattr(args, "item_config_json", None), "--item-config-json"
             ),
+            phase_stage=getattr(args, "phase_stage", None),
+            phase_round=getattr(args, "phase_round", None),
+            phase_run_ordinal=getattr(args, "phase_run_ordinal", None),
+            phase_cursor=getattr(args, "phase_cursor", None),
+            phase_page_size=getattr(args, "phase_page_size", 20),
+            deliverable_cursor=getattr(args, "deliverable_cursor", None),
+            deliverable_page_size=getattr(args, "deliverable_page_size", 20),
         )
     else:  # pragma: no cover - argparse enforces the choices
         raise AssertionError(f"Unhandled facade intent: {args.intent}")
@@ -600,6 +608,11 @@ def build_parser() -> argparse.ArgumentParser:
     f.add_argument("--work-item-id")
     f.add_argument("--work-item-limit", type=int, default=100)
     f.add_argument("--include-archived", action="store_true")
+    f.add_argument(
+        "--workbench-only",
+        action="store_true",
+        help="Return only the durable workbench state without health diagnostics",
+    )
     f.add_argument("--client", default="generic-mcp")
     f.set_defaults(func=cmd_facade)
 
@@ -611,11 +624,32 @@ def build_parser() -> argparse.ArgumentParser:
         choices=[
             "execute", "create", "draft", "create-item", "update", "update-item",
             "start", "start-item", "cancel", "cancel-item", "reconcile",
-            "reconcile-item", "archive", "archive-item",
+            "reconcile-item", "archive", "archive-item", "restore", "restore-item",
+            "delete", "delete-item",
+            "inspect-phase", "inspect-item-phase",
+            "list-deliverables", "list-item-deliverables",
         ],
         default="execute",
     )
     f.add_argument("--work-item-id")
+    f.add_argument(
+        "--phase-stage",
+        choices=["planning", "execution", "review"],
+        help="Stage to inspect for inspect-item-phase",
+    )
+    f.add_argument("--phase-round", type=int, help="Zero-based phase round to inspect")
+    f.add_argument(
+        "--phase-run-ordinal",
+        type=int,
+        help="Durable attempt number; omit to inspect the latest matching attempt",
+    )
+    f.add_argument("--phase-cursor", help="Opaque cursor returned by a prior phase page")
+    f.add_argument("--phase-page-size", type=int, default=20)
+    f.add_argument(
+        "--deliverable-cursor",
+        help="Opaque cursor returned by a deliverable index page",
+    )
+    f.add_argument("--deliverable-page-size", type=int, default=20)
     f.add_argument("--title")
     f.add_argument(
         "--workspace-mode",

@@ -14,7 +14,7 @@ VS Code / Kiro / Codex / Claude Desktop / otro cliente MCP
        -> structured output + telemetry + verification
 ```
 
-> **v0.18.0 — Protección automática del workspace.** La superficie de orquestación sigue congelada: las raíces Git limpias usan worktrees y los estados Git sucios/unborn o demás carpetas usan una copia sombra durable administrada por BALDR, con publicación verificada del diff al finalizar.
+> **v0.19.0 — Progreso narrativo.** La consola explica en lenguaje cotidiano qué entendió Baldr, qué está haciendo, qué produjo Planificación, Ejecución y Revisión, qué comprobó y cuándo necesita una decisión. La protección automática de v0.18 continúa siendo la opción recomendada.
 
 
 ## Real Environment Qualification
@@ -96,7 +96,7 @@ Instalación local:
 Extensions
   -> …
   -> Install from VSIX
-  -> baldr-router-vscode-0.18.0.vsix
+  -> baldr-router-vscode-0.19.0.vsix
 ```
 
 Superficie diaria:
@@ -105,10 +105,10 @@ Superficie diaria:
 Activity Bar:
   Baldr
     -> tasks durables
-    -> timeline
+    -> progreso narrativo durable
     -> composer
     -> + menu
-    -> /new /run /status /profile /git /context /roles /cancel /resume /archive /setup /help
+    -> /new /run /status /profile /git /context /roles /cancel /resume /archive /restore /delete /setup /help
 
 Command Palette:
   Baldr: Open

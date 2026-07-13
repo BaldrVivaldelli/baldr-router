@@ -8,6 +8,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACT_PATH = ROOT / "contracts" / "facade-v1.json"
 SCHEMA_PATH = ROOT / "contracts" / "facade-v1.schema.json"
+PROGRESS_SCHEMA_PATH = ROOT / "contracts" / "work-item-progress-v1.schema.json"
+DELIVERABLE_SCHEMA_PATH = ROOT / "contracts" / "phase-deliverable-v1.schema.json"
+DELIVERABLE_PAGE_SCHEMA_PATH = (
+    ROOT / "contracts" / "phase-deliverable-page-v1.schema.json"
+)
+DELIVERABLE_INDEX_PAGE_SCHEMA_PATH = (
+    ROOT / "contracts" / "phase-deliverable-index-page-v1.schema.json"
+)
 
 
 def rendered_json(path: Path) -> str:
@@ -90,13 +98,35 @@ def outputs() -> dict[Path, str]:
     contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
     contract_json = rendered_json(CONTRACT_PATH)
     schema_json = rendered_json(SCHEMA_PATH)
+    progress_schema_json = rendered_json(PROGRESS_SCHEMA_PATH)
+    deliverable_schema_json = rendered_json(DELIVERABLE_SCHEMA_PATH)
+    deliverable_page_schema_json = rendered_json(DELIVERABLE_PAGE_SCHEMA_PATH)
+    deliverable_index_page_schema_json = rendered_json(
+        DELIVERABLE_INDEX_PAGE_SCHEMA_PATH
+    )
     table = docs_table(contract)
 
     out: dict[Path, str] = {
         ROOT / "router/src/baldr_router/contracts/facade-v1.json": contract_json,
         ROOT / "router/src/baldr_router/contracts/facade-v1.schema.json": schema_json,
+        ROOT
+        / "router/src/baldr_router/contracts/work-item-progress-v1.schema.json": progress_schema_json,
+        ROOT
+        / "router/src/baldr_router/contracts/phase-deliverable-v1.schema.json": deliverable_schema_json,
+        ROOT
+        / "router/src/baldr_router/contracts/phase-deliverable-page-v1.schema.json": deliverable_page_schema_json,
+        ROOT
+        / "router/src/baldr_router/contracts/phase-deliverable-index-page-v1.schema.json": deliverable_index_page_schema_json,
         ROOT / "facades/vscode-extension/resources/facade-v1.json": contract_json,
         ROOT / "facades/vscode-extension/resources/facade-v1.schema.json": schema_json,
+        ROOT
+        / "facades/vscode-extension/resources/work-item-progress-v1.schema.json": progress_schema_json,
+        ROOT
+        / "facades/vscode-extension/resources/phase-deliverable-v1.schema.json": deliverable_schema_json,
+        ROOT
+        / "facades/vscode-extension/resources/phase-deliverable-page-v1.schema.json": deliverable_page_schema_json,
+        ROOT
+        / "facades/vscode-extension/resources/phase-deliverable-index-page-v1.schema.json": deliverable_index_page_schema_json,
         ROOT / "facades/vscode-extension/src/generated/intents.ts": generated_typescript(contract),
         ROOT / "facades/kiro/baldr-orchestrator/steering/facade-intents.md": (
             "# Shared facade intents\n\n"

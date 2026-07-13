@@ -11,6 +11,11 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .process_control import managed_popen, terminate_process_tree, unregister_process
+from .provider_activity import (
+    ProviderActivitySink,
+    codex_public_activity,
+    emit_provider_activity,
+)
 from .provider_errors import provider_error
 from .redaction import redact_text, redact_value
 from .run import redact_command
@@ -127,7 +132,7 @@ class CodexAppServerSession:
                 "clientInfo": {
                     "name": "baldr-router",
                     "title": "Baldr Router",
-                    "version": "0.18.0",
+                    "version": "0.19.0",
                 }
             },
             timeout=30,
@@ -168,10 +173,12 @@ class CodexAppServerSession:
         model: str,
         timeout: int,
         report_kind: str,
+        activity_sink: ProviderActivitySink | None = None,
     ) -> dict[str, Any]:
         started = time.time()
         started_at = utc_now_iso()
         run_id = f"codex-app-{uuid.uuid4().hex[:12]}"
+        emit_provider_activity(activity_sink, "working")
         params = {
             "threadId": thread_id,
             "input": [{"type": "text", "text": prompt}],
@@ -219,6 +226,9 @@ class CodexAppServerSession:
                     break
                 continue
             msg = redact_value(msg)
+            category = codex_public_activity(msg)
+            if category:
+                emit_provider_activity(activity_sink, category)
             notifications.append(msg)
             method = str(msg.get("method") or "")
             params = msg.get("params") if isinstance(msg.get("params"), dict) else {}
@@ -334,6 +344,7 @@ def run_codex_app_server(
     telemetry_enabled: bool,
     report_kind: str,
     codex_executable: str = "codex",
+    activity_sink: ProviderActivitySink | None = None,
 ) -> dict[str, Any]:
     key = _session_key(cwd, session_scope, session_key)
     resumed_from_durable_state = False
@@ -364,6 +375,7 @@ def run_codex_app_server(
                 model=model,
                 timeout=timeout,
                 report_kind=report_kind,
+                activity_sink=activity_sink,
             )
         if not result.get("ok"):
             with _SESSIONS_LOCK:

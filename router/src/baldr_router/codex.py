@@ -10,6 +10,7 @@ from typing import Any
 from .codex_app_server import CodexAppServerSession, run_codex_app_server
 from .codex_exec_json import run_codex_exec_json
 from .codex_sdk import run_codex_sdk
+from .provider_activity import ProviderActivitySink
 from .config import load_config
 from .provider_errors import provider_error
 from .redaction import redact_text
@@ -281,6 +282,7 @@ def _run_codex_prompt(
     session_key: str = "",
     resume_session_id: str | None = None,
     extra_env: dict[str, str] | None = None,
+    activity_sink: ProviderActivitySink | None = None,
 ) -> dict[str, Any]:
     cfg = load_config()
     selected_runner = runner or cfg.codex.runner
@@ -313,6 +315,7 @@ def _run_codex_prompt(
             telemetry_enabled=cfg.telemetry.enabled,
             keep_raw_events=cfg.telemetry.keep_raw_events,
             max_events_returned=cfg.telemetry.max_events_returned,
+            activity_sink=activity_sink,
         )
     elif selected_runner == "app-server":
         result = run_codex_app_server(
@@ -328,6 +331,7 @@ def _run_codex_prompt(
             telemetry_enabled=cfg.telemetry.enabled,
             report_kind=report_kind,
             codex_executable=codex_found() or "codex",
+            activity_sink=activity_sink,
         )
     elif selected_runner == "sdk":
         result = run_codex_sdk(
@@ -342,6 +346,7 @@ def _run_codex_prompt(
             env=env,
             telemetry_enabled=cfg.telemetry.enabled,
             report_kind=report_kind,
+            activity_sink=activity_sink,
         )
     else:
         return {
@@ -380,6 +385,7 @@ def run_codex_role_prompt(
     session_key: str = "",
     resume_session_id: str | None = None,
     extra_env: dict[str, str] | None = None,
+    activity_sink: ProviderActivitySink | None = None,
 ) -> dict[str, Any]:
     """Run one generic role step through the Codex provider."""
     cfg = load_config()
@@ -399,6 +405,7 @@ def run_codex_role_prompt(
         session_key=session_key,
         resume_session_id=resume_session_id,
         extra_env=extra_env,
+        activity_sink=activity_sink,
     )
     result["role"] = role
     result["workflow"] = workflow

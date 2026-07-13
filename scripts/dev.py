@@ -39,11 +39,20 @@ def test_all() -> None:
     # behavior reproducible.
     with tempfile.TemporaryDirectory(prefix="baldr-test-state-") as temp:
         root = Path(temp)
+        git_config = root / "gitconfig"
+        git_config.write_text(
+            "[commit]\n\tgpgSign = false\n[tag]\n\tgpgSign = false\n",
+            encoding="utf-8",
+        )
         test_env = {
             **os.environ,
             "XDG_CONFIG_HOME": str(root / "config"),
             "XDG_CACHE_HOME": str(root / "cache"),
             "XDG_STATE_HOME": str(root / "state"),
+            # Tests create disposable repositories and must not inherit a
+            # developer's signing keys, hooks, or global Git policy.
+            "GIT_CONFIG_GLOBAL": str(git_config),
+            "GIT_CONFIG_NOSYSTEM": "1",
         }
         _run(uv, "run", "--extra", "dev", "pytest", "-q", cwd=ROUTER, env=test_env)
         _run(uv, "run", "--extra", "dev", "pytest", "-q", cwd=ADAPTER, env=test_env)
@@ -56,6 +65,7 @@ def test_all() -> None:
 def lint_all() -> None:
     uv = _tool("uv")
     npm = _tool("npm")
+    _run(sys.executable, "scripts/check_release_consistency.py")
     _run(uv, "run", "--extra", "dev", "ruff", "check", "src", "tests", cwd=ROUTER)
     _run(uv, "run", "--extra", "dev", "ruff", "check", "src", "tests", cwd=ADAPTER)
     _run(sys.executable, "-m", "compileall", "-q", "router/src", "facades/kiro/adapter/src")

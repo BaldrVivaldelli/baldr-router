@@ -16,7 +16,7 @@ The native extension in `facades/vscode-extension/` provides **Instalación A UN
 Install the generated artifact:
 
 ```text
-dist/artifacts/baldr-router-vscode-0.18.0.vsix
+dist/artifacts/baldr-router-vscode-0.19.0.vsix
 ```
 
 Then use the dedicated view:

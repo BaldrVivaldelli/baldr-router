@@ -355,6 +355,50 @@ MIGRATIONS: tuple[Migration, ...] = (
             "CREATE INDEX IF NOT EXISTS idx_workspace_publications_status_updated ON workspace_publications(status, updated_at)",
         ),
     ),
+    Migration(
+        8,
+        "durable-redacted-phase-deliverables",
+        (
+            """
+            CREATE TABLE IF NOT EXISTS phase_deliverables (
+                id TEXT PRIMARY KEY,
+                work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE,
+                workspace_id TEXT NOT NULL,
+                source_run_id TEXT NOT NULL,
+                source_step_id TEXT NOT NULL,
+                source_step_key TEXT NOT NULL,
+                stage TEXT NOT NULL CHECK(stage IN ('planning','execution','review')),
+                round_number INTEGER NOT NULL CHECK(round_number >= 0),
+                run_ordinal INTEGER NOT NULL CHECK(run_ordinal >= 1),
+                item_revision INTEGER NOT NULL CHECK(item_revision >= 1),
+                digest TEXT,
+                redacted INTEGER NOT NULL DEFAULT 1 CHECK(redacted = 1),
+                availability TEXT NOT NULL
+                    CHECK(availability IN ('available','summary_only','unavailable')),
+                unavailable_reason TEXT,
+                document_json TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL CHECK(size_bytes >= 0),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(work_item_id, source_step_id)
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_phase_deliverables_item_order ON phase_deliverables(work_item_id, run_ordinal, round_number, stage)",
+            "CREATE INDEX IF NOT EXISTS idx_phase_deliverables_workspace_item ON phase_deliverables(workspace_id, work_item_id)",
+        ),
+    ),
+    Migration(
+        9,
+        "bounded-phase-deliverable-descriptors",
+        (
+            "ALTER TABLE phase_deliverables ADD COLUMN preview_status TEXT",
+            "ALTER TABLE phase_deliverables ADD COLUMN preview_summary TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE phase_deliverables ADD COLUMN preview_review_decision TEXT",
+            "ALTER TABLE phase_deliverables ADD COLUMN entry_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE phase_deliverables ADD COLUMN descriptor_ready INTEGER NOT NULL DEFAULT 0",
+            "CREATE INDEX IF NOT EXISTS idx_phase_deliverables_item_recent ON phase_deliverables(work_item_id, run_ordinal DESC, item_revision DESC, created_at DESC)",
+        ),
+    ),
 
 )
 

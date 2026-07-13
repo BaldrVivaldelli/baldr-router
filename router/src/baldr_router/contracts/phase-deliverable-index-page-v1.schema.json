@@ -1,0 +1,253 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://baldr.dev/contracts/phase-deliverable-index-page-v1.schema.json",
+  "title": "Baldr phase deliverable descriptor index page v1",
+  "type": "object",
+  "required": [
+    "ok",
+    "intent",
+    "operation",
+    "facade",
+    "contract",
+    "version",
+    "items",
+    "page",
+    "redaction"
+  ],
+  "properties": {
+    "ok": {
+      "const": true
+    },
+    "intent": {
+      "const": "run"
+    },
+    "operation": {
+      "const": "list-item-deliverables"
+    },
+    "facade": {
+      "$ref": "#/$defs/facade"
+    },
+    "contract": {
+      "const": "baldr-phase-deliverable-index-page"
+    },
+    "version": {
+      "const": 1
+    },
+    "items": {
+      "type": "array",
+      "maxItems": 50,
+      "items": {
+        "$ref": "#/$defs/descriptor"
+      }
+    },
+    "page": {
+      "type": "object",
+      "required": [
+        "offset",
+        "page_size",
+        "returned",
+        "total",
+        "has_more",
+        "next_cursor"
+      ],
+      "properties": {
+        "offset": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "page_size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50
+        },
+        "returned": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 50
+        },
+        "total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "has_more": {
+          "type": "boolean"
+        },
+        "next_cursor": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 1024
+        }
+      },
+      "additionalProperties": false
+    },
+    "redaction": {
+      "type": "object",
+      "required": [
+        "applied",
+        "source"
+      ],
+      "properties": {
+        "applied": {
+          "const": true
+        },
+        "source": {
+          "const": "materialized_phase_deliverables"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "facade": {
+      "type": "object",
+      "required": [
+        "intent",
+        "client",
+        "contract_version"
+      ],
+      "properties": {
+        "intent": {
+          "const": "run"
+        },
+        "client": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "contract_version": {
+          "const": "1.0.0"
+        }
+      },
+      "additionalProperties": false
+    },
+    "stage": {
+      "enum": [
+        "planning",
+        "execution",
+        "review"
+      ]
+    },
+    "nullableToken": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 96
+    },
+    "nullableTimestamp": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 64
+    },
+    "preview": {
+      "type": "object",
+      "required": [
+        "status",
+        "summary",
+        "review_decision"
+      ],
+      "properties": {
+        "status": {
+          "$ref": "#/$defs/nullableToken"
+        },
+        "summary": {
+          "type": "string",
+          "maxLength": 2400
+        },
+        "review_decision": {
+          "$ref": "#/$defs/nullableToken"
+        }
+      },
+      "additionalProperties": false
+    },
+    "descriptor": {
+      "type": "object",
+      "required": [
+        "stage",
+        "round",
+        "run_ordinal",
+        "item_revision",
+        "availability",
+        "reason",
+        "digest",
+        "redacted",
+        "created_at",
+        "preview",
+        "entry_count",
+        "action"
+      ],
+      "properties": {
+        "stage": {
+          "$ref": "#/$defs/stage"
+        },
+        "round": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "run_ordinal": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "item_revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "availability": {
+          "enum": [
+            "available",
+            "summary_only",
+            "unavailable"
+          ]
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 96
+        },
+        "digest": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "redacted": {
+          "const": true
+        },
+        "created_at": {
+          "$ref": "#/$defs/nullableTimestamp"
+        },
+        "preview": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/preview"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "entry_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100000
+        },
+        "action": {
+          "const": "inspect-item-phase"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

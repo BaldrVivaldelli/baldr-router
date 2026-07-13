@@ -1100,8 +1100,13 @@ class _ShadowWorkspace:
             temporary = destination.parent / f".baldr-stage-{uuid.uuid4().hex}"
             try:
                 shutil.copyfile(source, temporary)
-                _safe_chmod(temporary, entry.mode)
-                with temporary.open("rb") as stream:
+                # Windows implements fsync via the CRT commit operation, which
+                # rejects read-only descriptors with EBADF.  Open the private
+                # staging copy for update before restoring its final mode so
+                # read-only files also retain a write-capable durability
+                # barrier on every supported platform.
+                with temporary.open("r+b") as stream:
+                    _safe_chmod(temporary, entry.mode)
                     os.fsync(stream.fileno())
                 if operation_guard is not None:
                     # The staging copy can be large.  Check the guarded path and

@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 
-export const VERSION = '0.18.0';
+export const VERSION = '0.19.0';
 const MANIFEST_NAME = 'runtime.json';
 const DEFAULT_KEEP_VERSIONS = 2;
 

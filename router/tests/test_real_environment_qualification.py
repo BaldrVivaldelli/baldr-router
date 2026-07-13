@@ -27,6 +27,10 @@ def _git_repo(path: Path) -> Path:
         ["git", "-C", str(path), "config", "user.name", "Baldr Test"],
         check=True,
     )
+    subprocess.run(
+        ["git", "-C", str(path), "config", "commit.gpgsign", "false"],
+        check=True,
+    )
     (path / "README.md").write_text("# Qualification fixture\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(path), "add", "README.md"], check=True)
     subprocess.run(["git", "-C", str(path), "commit", "-qm", "fixture"], check=True)

@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from .config import RoleConfig
+from .provider_activity import ProviderActivitySink
 
 
 @dataclass(frozen=True)
@@ -46,6 +47,7 @@ class ProviderRunRequest:
     durable_run_id: str = ""
     durable_step_id: str = ""
     durable_attempt_id: str = ""
+    activity_sink: ProviderActivitySink | None = None
 
 
 @runtime_checkable

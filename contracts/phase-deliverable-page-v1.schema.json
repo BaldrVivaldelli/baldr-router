@@ -1,0 +1,195 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://baldr.dev/contracts/phase-deliverable-page-v1.schema.json",
+  "title": "Baldr bounded phase deliverable page v1",
+  "type": "object",
+  "required": [
+    "ok",
+    "intent",
+    "operation",
+    "facade",
+    "contract",
+    "version",
+    "deliverable",
+    "sections",
+    "page",
+    "redaction"
+  ],
+  "properties": {
+    "ok": { "const": true },
+    "intent": { "const": "run" },
+    "operation": { "const": "inspect-item-phase" },
+    "facade": { "$ref": "#/$defs/facade" },
+    "contract": { "const": "baldr-phase-deliverable-page" },
+    "version": { "const": 1 },
+    "deliverable": { "$ref": "#/$defs/descriptor" },
+    "sections": {
+      "type": "array",
+      "maxItems": 25,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/section" }
+    },
+    "page": {
+      "type": "object",
+      "required": [
+        "entries",
+        "offset",
+        "page_size",
+        "returned",
+        "total",
+        "has_more",
+        "next_cursor"
+      ],
+      "properties": {
+        "entries": {
+          "type": "array",
+          "maxItems": 50,
+          "items": { "$ref": "#/$defs/entry" }
+        },
+        "offset": { "type": "integer", "minimum": 0 },
+        "page_size": { "type": "integer", "minimum": 1, "maximum": 50 },
+        "returned": { "type": "integer", "minimum": 0, "maximum": 50 },
+        "total": { "type": "integer", "minimum": 0, "maximum": 100000 },
+        "has_more": { "type": "boolean" },
+        "next_cursor": {
+          "type": ["string", "null"],
+          "maxLength": 1024
+        }
+      },
+      "additionalProperties": false
+    },
+    "redaction": {
+      "type": "object",
+      "required": ["applied", "source", "raw_provider_output_included"],
+      "properties": {
+        "applied": { "const": true },
+        "source": { "const": "reduced_phase_report" },
+        "raw_provider_output_included": { "const": false }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "facade": {
+      "type": "object",
+      "required": ["intent", "client", "contract_version"],
+      "properties": {
+        "intent": { "const": "run" },
+        "client": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "contract_version": { "const": "1.0.0" }
+      },
+      "additionalProperties": false
+    },
+    "stage": { "enum": ["planning", "execution", "review"] },
+    "nullableToken": { "type": ["string", "null"], "maxLength": 96 },
+    "nullableTimestamp": { "type": ["string", "null"], "maxLength": 64 },
+    "preview": {
+      "type": "object",
+      "required": ["status", "summary", "review_decision"],
+      "properties": {
+        "status": { "$ref": "#/$defs/nullableToken" },
+        "summary": { "type": "string", "maxLength": 2400 },
+        "review_decision": { "$ref": "#/$defs/nullableToken" }
+      },
+      "additionalProperties": false
+    },
+    "descriptor": {
+      "type": "object",
+      "required": [
+        "stage",
+        "round",
+        "run_ordinal",
+        "item_revision",
+        "availability",
+        "reason",
+        "digest",
+        "redacted",
+        "created_at",
+        "preview",
+        "entry_count",
+        "action"
+      ],
+      "properties": {
+        "stage": { "$ref": "#/$defs/stage" },
+        "round": { "type": "integer", "minimum": 0 },
+        "run_ordinal": { "type": "integer", "minimum": 1 },
+        "item_revision": { "type": "integer", "minimum": 1 },
+        "availability": {
+          "enum": ["available", "summary_only", "unavailable"]
+        },
+        "reason": { "type": ["string", "null"], "maxLength": 96 },
+        "digest": {
+          "oneOf": [
+            { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+            { "type": "null" }
+          ]
+        },
+        "redacted": { "const": true },
+        "created_at": { "$ref": "#/$defs/nullableTimestamp" },
+        "preview": {
+          "oneOf": [
+            { "$ref": "#/$defs/preview" },
+            { "type": "null" }
+          ]
+        },
+        "entry_count": { "type": "integer", "minimum": 0, "maximum": 100000 },
+        "action": { "const": "inspect-item-phase" }
+      },
+      "additionalProperties": false
+    },
+    "section": {
+      "enum": [
+        "status",
+        "summary",
+        "interpretation",
+        "scope",
+        "approach",
+        "plan_steps",
+        "work_completed",
+        "work_next",
+        "findings",
+        "corrections",
+        "verification_evidence",
+        "decisions",
+        "acceptance_criteria",
+        "assumptions",
+        "files_modified",
+        "tests_run",
+        "verification_needed",
+        "risks",
+        "follow_up",
+        "blockers",
+        "review_decision",
+        "commands_run",
+        "constraints",
+        "alternatives_rejected"
+      ]
+    },
+    "decision": {
+      "type": "object",
+      "required": ["key", "value"],
+      "properties": {
+        "key": { "type": "string", "maxLength": 160 },
+        "value": { "type": "string", "maxLength": 700 }
+      },
+      "additionalProperties": false
+    },
+    "entry": {
+      "type": "object",
+      "required": ["section", "kind", "value", "technical"],
+      "properties": {
+        "section": { "$ref": "#/$defs/section" },
+        "kind": { "enum": ["value", "item"] },
+        "value": {
+          "oneOf": [
+            { "type": "string", "maxLength": 2400 },
+            { "$ref": "#/$defs/decision" }
+          ]
+        },
+        "technical": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

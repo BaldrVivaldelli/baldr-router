@@ -13,6 +13,7 @@ from typing import Any, Iterator
 
 from baldr_router import __version__
 from baldr_router.config import DurabilityConfig, load_config
+from baldr_router.provider_activity import PUBLIC_ACTIVITY_CATEGORIES
 from baldr_router.redaction import redact_value
 from baldr_router.telemetry import app_state_dir
 
@@ -94,7 +95,9 @@ class LeaseToken:
 class DurableStore:
     """Transactional SQLite state store for local durable orchestration."""
 
-    def __init__(self, path: Path | None = None, config: DurabilityConfig | None = None) -> None:
+    def __init__(
+        self, path: Path | None = None, config: DurabilityConfig | None = None
+    ) -> None:
         app_config = load_config()
         self.config = config or app_config.durability
         self.privacy = app_config.artifact_privacy
@@ -105,19 +108,19 @@ class DurableStore:
         before = applied_versions(connection)
         integrity = self._integrity_check_connection(connection, quick=True)
         if not integrity["ok"]:
-            raise RuntimeError(f"SQLite integrity check failed before migration: {integrity['errors']}")
+            raise RuntimeError(
+                f"SQLite integrity check failed before migration: {integrity['errors']}"
+            )
         latest = max((migration.version for migration in MIGRATIONS), default=0)
         current = max(before, default=0)
-        if (
-            before
-            and current < latest
-            and self.config.backup_before_migrate
-        ):
+        if before and current < latest and self.config.backup_before_migrate:
             self.backup_database(label=f"pre-migration-v{current}-to-v{latest}")
         apply_migrations(connection)
         post_integrity = self._integrity_check_connection(connection, quick=True)
         if not post_integrity["ok"]:
-            raise RuntimeError(f"SQLite integrity check failed after migration: {post_integrity['errors']}")
+            raise RuntimeError(
+                f"SQLite integrity check failed after migration: {post_integrity['errors']}"
+            )
         try:
             self.path.chmod(0o600)
         except OSError:
@@ -135,7 +138,9 @@ class DurableStore:
             )
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA foreign_keys = ON")
-            connection.execute(f"PRAGMA busy_timeout = {int(self.config.busy_timeout_ms)}")
+            connection.execute(
+                f"PRAGMA busy_timeout = {int(self.config.busy_timeout_ms)}"
+            )
             mode = str(self.config.journal_mode or "WAL").upper()
             if mode not in {"DELETE", "TRUNCATE", "PERSIST", "MEMORY", "WAL", "OFF"}:
                 mode = "WAL"
@@ -165,13 +170,47 @@ class DurableStore:
         else:
             connection.commit()
 
+    @contextlib.contextmanager
+    def _activity_transaction(self) -> Iterator[sqlite3.Connection]:
+        """Open a short-lived write transaction for best-effort activity.
+
+        Provider activity is observational. It must never inherit the durable
+        store's normal multi-second busy timeout and stall the provider while a
+        more important state transition owns SQLite's write lock.
+        """
+
+        busy_timeout_ms = 25
+        connection = sqlite3.connect(
+            self.path,
+            timeout=busy_timeout_ms / 1000,
+            isolation_level=None,
+            check_same_thread=False,
+        )
+        connection.row_factory = sqlite3.Row
+        try:
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute(f"PRAGMA busy_timeout = {busy_timeout_ms}")
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                yield connection
+            except Exception:
+                connection.rollback()
+                raise
+            else:
+                connection.commit()
+        finally:
+            connection.close()
+
     def _integrity_check_connection(
         self, connection: sqlite3.Connection, *, quick: bool = True
     ) -> dict[str, Any]:
         pragma = "quick_check" if quick else "integrity_check"
         rows = connection.execute(f"PRAGMA {pragma}").fetchall()
         values = [str(row[0]) for row in rows]
-        foreign = [tuple(row) for row in connection.execute("PRAGMA foreign_key_check").fetchall()]
+        foreign = [
+            tuple(row)
+            for row in connection.execute("PRAGMA foreign_key_check").fetchall()
+        ]
         errors = [value for value in values if value.lower() != "ok"]
         if foreign:
             errors.extend(f"foreign_key:{row}" for row in foreign)
@@ -186,7 +225,9 @@ class DurableStore:
         backup_root.mkdir(parents=True, exist_ok=True)
         stamp = utc_now().strftime("%Y%m%dT%H%M%SZ")
         safe_label = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in label)
-        target = backup_root / f"baldr-{safe_label}-{stamp}-{uuid.uuid4().hex[:8]}.sqlite3"
+        target = (
+            backup_root / f"baldr-{safe_label}-{stamp}-{uuid.uuid4().hex[:8]}.sqlite3"
+        )
         source = self.connect()
         destination = sqlite3.connect(target)
         try:
@@ -201,9 +242,13 @@ class DurableStore:
         return {"ok": True, "path": str(target), "size_bytes": target.stat().st_size}
 
     def schema_status(self) -> dict[str, Any]:
-        rows = self.connect().execute(
-            "SELECT version, name, checksum, applied_at FROM schema_migrations ORDER BY version"
-        ).fetchall()
+        rows = (
+            self.connect()
+            .execute(
+                "SELECT version, name, checksum, applied_at FROM schema_migrations ORDER BY version"
+            )
+            .fetchall()
+        )
         return {
             "ok": True,
             "path": str(self.path),
@@ -251,12 +296,20 @@ class DurableStore:
             self._assert_fence(connection, lease.run_id, lease)
 
     def is_cancel_requested(self, run_id: str) -> bool:
-        row = self.connect().execute(
-            "SELECT cancel_requested_at, status FROM workflow_runs WHERE id = ?", (run_id,)
-        ).fetchone()
-        return bool(row and row["cancel_requested_at"] and row["status"] not in (
-            "approved", "needs_changes", "blocked", "failed", "cancelled"
-        ))
+        row = (
+            self.connect()
+            .execute(
+                "SELECT cancel_requested_at, status FROM workflow_runs WHERE id = ?",
+                (run_id,),
+            )
+            .fetchone()
+        )
+        return bool(
+            row
+            and row["cancel_requested_at"]
+            and row["status"]
+            not in ("approved", "needs_changes", "blocked", "failed", "cancelled")
+        )
 
     def _event(
         self,
@@ -273,8 +326,173 @@ class DurableStore:
             INSERT INTO workflow_events(run_id, step_id, attempt_id, event_type, payload_json, created_at)
             VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (run_id, step_id, attempt_id, event_type, _json(redact_value(payload or {})), utc_now_iso()),
+            (
+                run_id,
+                step_id,
+                attempt_id,
+                event_type,
+                _json(redact_value(payload or {})),
+                utc_now_iso(),
+            ),
         )
+
+    def record_phase_activity(
+        self,
+        *,
+        run_id: str,
+        step_id: str,
+        attempt_id: str,
+        category: str,
+        lease: LeaseToken,
+        max_events: int = 48,
+        min_interval_seconds: float = 0.25,
+        dedupe_seconds: float = 5.0,
+    ) -> dict[str, Any]:
+        """Persist one bounded, payload-free provider activity observation.
+
+        The attempt relationship and lease fence are checked in the same write
+        transaction. Only a fixed public category and the phase already stored
+        in SQLite are journaled, so provider text can never enter this event.
+        """
+
+        normalized = str(category or "").strip().lower()
+        if normalized not in PUBLIC_ACTIVITY_CATEGORIES:
+            return {"recorded": False, "reason": "category-not-allowlisted"}
+
+        event_limit = max(1, min(int(max_events), 256))
+        min_interval = max(0.0, min(float(min_interval_seconds), 60.0))
+        dedupe_interval = max(0.0, min(float(dedupe_seconds), 3600.0))
+        moment = utc_now()
+        try:
+            with self._activity_transaction() as connection:
+                self._assert_fence(connection, run_id, lease)
+                ownership = connection.execute(
+                    """
+                    SELECT s.phase, s.status AS step_status,
+                           p.status AS participant_status,
+                           a.status AS attempt_status,
+                           a.lease_owner AS attempt_lease_owner,
+                           a.lease_epoch AS attempt_lease_epoch,
+                           a.lease_expires_at AS attempt_lease_expires_at,
+                           r.status AS run_status
+                    FROM step_attempts a
+                    JOIN step_participants p ON p.id = a.participant_id
+                    JOIN workflow_steps s ON s.id = p.step_id
+                    JOIN workflow_runs r ON r.id = s.run_id
+                    WHERE a.id = ? AND p.step_id = ? AND s.run_id = ?
+                    """,
+                    (attempt_id, step_id, run_id),
+                ).fetchone()
+                if ownership is None:
+                    return {"recorded": False, "reason": "attempt-not-active"}
+
+                attempt_owner = str(ownership["attempt_lease_owner"] or "")
+                attempt_epoch = int(ownership["attempt_lease_epoch"] or 0)
+                attempt_expiry = ownership["attempt_lease_expires_at"]
+                try:
+                    attempt_lease_valid = bool(
+                        attempt_expiry
+                        and datetime.fromisoformat(str(attempt_expiry)) > moment
+                    )
+                except (TypeError, ValueError):
+                    attempt_lease_valid = False
+                if (
+                    attempt_owner != lease.owner
+                    or attempt_epoch != lease.epoch
+                    or not attempt_lease_valid
+                ):
+                    raise LeaseFenceError(
+                        "Activity rejected stale attempt lease "
+                        f"owner={lease.owner!r} epoch={lease.epoch} for attempt {attempt_id}."
+                    )
+
+                if str(ownership["run_status"] or "") != "running":
+                    return {"recorded": False, "reason": "run-not-running"}
+                if str(ownership["step_status"] or "") != "running":
+                    return {"recorded": False, "reason": "step-not-running"}
+                if str(ownership["attempt_status"] or "") != "running":
+                    return {"recorded": False, "reason": "attempt-not-running"}
+                if str(ownership["participant_status"] or "") != "running":
+                    return {"recorded": False, "reason": "participant-not-running"}
+
+                count = int(
+                    connection.execute(
+                        """
+                    SELECT COUNT(*) FROM workflow_events
+                    WHERE run_id = ? AND step_id = ? AND attempt_id = ?
+                      AND event_type = 'phase.activity'
+                    """,
+                        (run_id, step_id, attempt_id),
+                    ).fetchone()[0]
+                )
+                if count >= event_limit:
+                    return {"recorded": False, "reason": "event-limit-reached"}
+
+                previous = connection.execute(
+                    """
+                    SELECT sequence, payload_json, created_at FROM workflow_events
+                    WHERE run_id = ? AND step_id = ? AND attempt_id = ?
+                      AND event_type = 'phase.activity'
+                    ORDER BY sequence DESC LIMIT 1
+                    """,
+                    (run_id, step_id, attempt_id),
+                ).fetchone()
+                if previous is not None:
+                    try:
+                        elapsed = max(
+                            0.0,
+                            (
+                                moment
+                                - datetime.fromisoformat(str(previous["created_at"]))
+                            ).total_seconds(),
+                        )
+                    except (TypeError, ValueError):
+                        elapsed = max(min_interval, dedupe_interval)
+                    previous_payload = _parse_json(str(previous["payload_json"]), {})
+                    previous_category = str(
+                        (previous_payload or {}).get("category") or ""
+                    )
+                    if previous_category == normalized and elapsed < dedupe_interval:
+                        return {"recorded": False, "reason": "duplicate"}
+                    if elapsed < min_interval:
+                        return {"recorded": False, "reason": "throttled"}
+
+                phase = str(ownership["phase"] or "")
+                self._event(
+                    connection,
+                    run_id=run_id,
+                    step_id=step_id,
+                    attempt_id=attempt_id,
+                    event_type="phase.activity",
+                    payload={
+                        "phase": phase,
+                        "category": normalized,
+                        "observed": True,
+                    },
+                )
+                sequence = int(
+                    connection.execute("SELECT last_insert_rowid()").fetchone()[0]
+                )
+                return {
+                    "recorded": True,
+                    "sequence": sequence,
+                    "phase": phase,
+                    "category": normalized,
+                    "observed": True,
+                }
+        except sqlite3.Error as exc:
+            error_code = int(getattr(exc, "sqlite_errorcode", 0) or 0) & 0xFF
+            message = str(exc).lower()
+            is_busy = error_code in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED} or any(
+                marker in message
+                for marker in ("database is locked", "database is busy")
+            )
+            return {
+                "recorded": False,
+                "reason": "database-busy"
+                if is_busy
+                else "activity-storage-unavailable",
+            }
 
     def _prepare_artifact(
         self,
@@ -286,7 +504,9 @@ class DurableStore:
     ) -> tuple[bytes, str, str | None, str | None]:
         normalized = redact_value(value) if redact else value
         if media_type == "application/json":
-            data = json.dumps(normalized, ensure_ascii=False, sort_keys=True, indent=2).encode("utf-8")
+            data = json.dumps(
+                normalized, ensure_ascii=False, sort_keys=True, indent=2
+            ).encode("utf-8")
         elif isinstance(normalized, bytes):
             data = normalized
         else:
@@ -294,7 +514,9 @@ class DurableStore:
         digest = hashlib.sha256(data).hexdigest()
         inline_text: str | None = None
         storage_path: str | None = None
-        if not force_external and len(data) <= int(self.config.artifact_inline_limit_bytes):
+        if not force_external and len(data) <= int(
+            self.config.artifact_inline_limit_bytes
+        ):
             inline_text = data.decode("utf-8", errors="replace")
         else:
             target = artifacts_root() / digest[:2] / digest
@@ -380,9 +602,11 @@ class DurableStore:
     def load_artifact(self, artifact_id: str | None) -> Any:
         if not artifact_id:
             return None
-        row = self.connect().execute(
-            "SELECT * FROM artifacts WHERE id = ?", (artifact_id,)
-        ).fetchone()
+        row = (
+            self.connect()
+            .execute("SELECT * FROM artifacts WHERE id = ?", (artifact_id,))
+            .fetchone()
+        )
         if row is None:
             return None
         raw: bytes
@@ -407,11 +631,85 @@ class DurableStore:
             return raw
         return raw.decode("utf-8", errors="replace")
 
-    def get_run_by_idempotency_key(self, idempotency_key: str) -> dict[str, Any] | None:
+    def load_public_text_artifact(
+        self, artifact_id: str | None, *, max_bytes: int = 65_536
+    ) -> str:
+        """Best-effort bounded text read for a responsive public workbench."""
+
+        raw = self._load_public_artifact_bytes(
+            artifact_id, media_type="text/plain", max_bytes=max_bytes
+        )
+        return raw.decode("utf-8", errors="replace") if raw is not None else ""
+
+    def _load_public_artifact_bytes(
+        self,
+        artifact_id: str | None,
+        *,
+        media_type: str,
+        max_bytes: int,
+    ) -> bytes | None:
+        """Read at most ``max_bytes`` even when artifact metadata is damaged."""
+
+        if not artifact_id:
+            return None
         row = self.connect().execute(
-            "SELECT * FROM workflow_runs WHERE idempotency_key = ?", (idempotency_key,)
+            """
+            SELECT sha256, size_bytes, media_type, storage_path,
+                   substr(inline_text, 1, ?) AS inline_text
+            FROM artifacts WHERE id = ?
+            """,
+            (max_bytes + 1, artifact_id),
         ).fetchone()
+        if row is None or str(row["media_type"]) != media_type:
+            return None
+        recorded_size = int(row["size_bytes"] or 0)
+        if recorded_size < 0 or recorded_size > max_bytes:
+            return None
+        try:
+            if row["inline_text"] is not None:
+                raw = str(row["inline_text"]).encode("utf-8")
+            elif row["storage_path"]:
+                with Path(str(row["storage_path"])).open("rb") as artifact_file:
+                    raw = artifact_file.read(max_bytes + 1)
+            else:
+                return None
+        except OSError:
+            return None
+        if len(raw) > max_bytes or len(raw) != recorded_size:
+            return None
+        if self.config.verify_artifact_hashes:
+            digest = hashlib.sha256(raw).hexdigest()
+            if digest != str(row["sha256"]):
+                return None
+        return raw
+
+    def get_run_by_idempotency_key(self, idempotency_key: str) -> dict[str, Any] | None:
+        row = (
+            self.connect()
+            .execute(
+                "SELECT * FROM workflow_runs WHERE idempotency_key = ?",
+                (idempotency_key,),
+            )
+            .fetchone()
+        )
         return self._run_row(row) if row is not None else None
+
+    def get_run_by_idempotency_key_public(
+        self, idempotency_key: str
+    ) -> dict[str, Any] | None:
+        row = (
+            self.connect()
+            .execute(
+                """
+                SELECT id, status, current_step_id, error_code, created_at,
+                       updated_at, completed_at, recovery_count, workflow_name
+                FROM workflow_runs WHERE idempotency_key = ?
+                """,
+                (idempotency_key,),
+            )
+            .fetchone()
+        )
+        return dict(row) if row is not None else None
 
     def _check_idempotency(
         self,
@@ -422,7 +720,9 @@ class DurableStore:
     ) -> dict[str, Any]:
         expected = existing["request_fingerprint"]
         if request_fingerprint and expected and str(expected) != request_fingerprint:
-            raise IdempotencyConflict(idempotency_key, str(expected), request_fingerprint)
+            raise IdempotencyConflict(
+                idempotency_key, str(expected), request_fingerprint
+            )
         return self._run_row(existing)
 
     def create_run(
@@ -593,24 +893,51 @@ class DurableStore:
             return self._run_row(row), True
 
     def get_run(self, run_id: str) -> dict[str, Any] | None:
-        row = self.connect().execute(
-            "SELECT * FROM workflow_runs WHERE id = ?", (run_id,)
-        ).fetchone()
+        row = (
+            self.connect()
+            .execute("SELECT * FROM workflow_runs WHERE id = ?", (run_id,))
+            .fetchone()
+        )
         return self._run_row(row) if row is not None else None
 
+    def get_run_public(self, run_id: str) -> dict[str, Any] | None:
+        """Load only run fields needed to synchronize the public workbench."""
+
+        row = (
+            self.connect()
+            .execute(
+                """
+                SELECT id, status, current_step_id, error_code, created_at,
+                       updated_at, completed_at, recovery_count, workflow_name
+                FROM workflow_runs WHERE id = ?
+                """,
+                (run_id,),
+            )
+            .fetchone()
+        )
+        return dict(row) if row is not None else None
+
     def get_run_by_resume_token(self, resume_token: str) -> dict[str, Any] | None:
-        row = self.connect().execute(
-            "SELECT * FROM workflow_runs WHERE resume_token = ?", (resume_token,)
-        ).fetchone()
+        row = (
+            self.connect()
+            .execute(
+                "SELECT * FROM workflow_runs WHERE resume_token = ?", (resume_token,)
+            )
+            .fetchone()
+        )
         return self._run_row(row) if row is not None else None
 
     def _run_row(self, row: sqlite3.Row) -> dict[str, Any]:
         value = dict(row)
-        value["config_snapshot"] = _parse_json(value.pop("config_snapshot_json", None), {})
+        value["config_snapshot"] = _parse_json(
+            value.pop("config_snapshot_json", None), {}
+        )
         value["repository_identity"] = _parse_json(
             value.pop("repository_identity_json", None), {}
         )
-        value["reconciliation"] = _parse_json(value.pop("reconciliation_json", None), {})
+        value["reconciliation"] = _parse_json(
+            value.pop("reconciliation_json", None), {}
+        )
         return value
 
     def transition_run(
@@ -637,7 +964,13 @@ class DurableStore:
             current = str(row["status"])
             assert_transition("run", current, target)
             now = utc_now_iso()
-            terminal = target in {"approved", "needs_changes", "blocked", "failed", "cancelled"}
+            terminal = target in {
+                "approved",
+                "needs_changes",
+                "blocked",
+                "failed",
+                "cancelled",
+            }
             connection.execute(
                 """
                 UPDATE workflow_runs
@@ -688,7 +1021,13 @@ class DurableStore:
             if row is None:
                 raise KeyError(run_id)
             current = str(row["status"])
-            if current in {"approved", "needs_changes", "blocked", "failed", "cancelled"}:
+            if current in {
+                "approved",
+                "needs_changes",
+                "blocked",
+                "failed",
+                "cancelled",
+            }:
                 return self._run_row(row)
             now = utc_now_iso()
             target = "cancelled" if current == "pending" else "cancelling"
@@ -785,7 +1124,9 @@ class DurableStore:
             assert updated is not None
             return self._run_row(updated)
 
-    def acquire_lease(self, run_id: str, owner: str, ttl_seconds: int) -> LeaseToken | None:
+    def acquire_lease(
+        self, run_id: str, owner: str, ttl_seconds: int
+    ) -> LeaseToken | None:
         now = utc_now()
         expires = (now + timedelta(seconds=max(1, ttl_seconds))).isoformat()
         with self.transaction(immediate=True) as connection:
@@ -800,14 +1141,20 @@ class DurableStore:
             expiry_valid = False
             if row["lease_expires_at"]:
                 try:
-                    expiry_valid = datetime.fromisoformat(str(row["lease_expires_at"])) > now
+                    expiry_valid = (
+                        datetime.fromisoformat(str(row["lease_expires_at"])) > now
+                    )
                 except Exception:
                     expiry_valid = False
             if current_owner and current_owner != owner and expiry_valid:
                 return None
             # Re-entering an unexpired lease owned by the same process keeps its
             # fencing epoch. Any takeover/expired reacquisition increments it.
-            epoch = current_epoch if current_owner == owner and expiry_valid else current_epoch + 1
+            epoch = (
+                current_epoch
+                if current_owner == owner and expiry_valid
+                else current_epoch + 1
+            )
             connection.execute(
                 """
                 UPDATE workflow_runs
@@ -853,7 +1200,11 @@ class DurableStore:
         owner: str | None = None,
         epoch: int | None = None,
     ) -> bool:
-        lease = run_id if isinstance(run_id, LeaseToken) else LeaseToken(str(run_id), str(owner or ""), int(epoch or 0))
+        lease = (
+            run_id
+            if isinstance(run_id, LeaseToken)
+            else LeaseToken(str(run_id), str(owner or ""), int(epoch or 0))
+        )
         with self.transaction(immediate=True) as connection:
             updated = connection.execute(
                 """
@@ -943,10 +1294,14 @@ class DurableStore:
             return dict(row)
 
     def get_step(self, run_id: str, step_key: str) -> dict[str, Any] | None:
-        row = self.connect().execute(
-            "SELECT * FROM workflow_steps WHERE run_id = ? AND step_key = ?",
-            (run_id, step_key),
-        ).fetchone()
+        row = (
+            self.connect()
+            .execute(
+                "SELECT * FROM workflow_steps WHERE run_id = ? AND step_key = ?",
+                (run_id, step_key),
+            )
+            .fetchone()
+        )
         return dict(row) if row is not None else None
 
     def transition_step(
@@ -970,8 +1325,16 @@ class DurableStore:
             current = str(row["status"])
             assert_transition("step", current, target)
             now = utc_now_iso()
-            started = now if target in {"dispatching", "running"} and not row["started_at"] else row["started_at"]
-            completed = now if target in {"succeeded", "failed", "skipped", "cancelled"} else row["completed_at"]
+            started = (
+                now
+                if target in {"dispatching", "running"} and not row["started_at"]
+                else row["started_at"]
+            )
+            completed = (
+                now
+                if target in {"succeeded", "failed", "skipped", "cancelled"}
+                else row["completed_at"]
+            )
             connection.execute(
                 """
                 UPDATE workflow_steps
@@ -980,7 +1343,15 @@ class DurableStore:
                     error_code = ?, error_reason = ?
                 WHERE id = ?
                 """,
-                (target, started, completed, output_artifact_id, error_code, error_reason, step_id),
+                (
+                    target,
+                    started,
+                    completed,
+                    output_artifact_id,
+                    error_code,
+                    error_reason,
+                    step_id,
+                ),
             )
             connection.execute(
                 "UPDATE workflow_runs SET current_step_id = ?, updated_at = ? WHERE id = ?",
@@ -1014,7 +1385,9 @@ class DurableStore:
                 raise KeyError(step_id)
             self._assert_fence(connection, str(row["run_id"]), lease)
             if str(row["status"]) not in {"unknown", "interrupted", "failed"}:
-                raise RuntimeError(f"Step {step_id} cannot be reset from {row['status']!r}.")
+                raise RuntimeError(
+                    f"Step {step_id} cannot be reset from {row['status']!r}."
+                )
             now = utc_now_iso()
             connection.execute(
                 """
@@ -1063,7 +1436,9 @@ class DurableStore:
                 raise KeyError(step_id)
             self._assert_fence(connection, str(row["run_id"]), lease)
             if str(row["status"]) not in {"unknown", "interrupted"}:
-                raise RuntimeError(f"Step {step_id} cannot be accepted from {row['status']!r}.")
+                raise RuntimeError(
+                    f"Step {step_id} cannot be accepted from {row['status']!r}."
+                )
             now = utc_now_iso()
             connection.execute(
                 """
@@ -1151,7 +1526,10 @@ class DurableStore:
                 run_id=str(step["run_id"]),
                 step_id=step_id,
                 event_type="participant.created",
-                payload={"participant_id": participant_id, "profile": profile.get("name")},
+                payload={
+                    "participant_id": participant_id,
+                    "profile": profile.get("name"),
+                },
             )
             row = connection.execute(
                 "SELECT * FROM step_participants WHERE id = ?", (participant_id,)
@@ -1191,14 +1569,25 @@ class DurableStore:
                     error_code = ?, error_reason = ?, updated_at = ?
                 WHERE id = ?
                 """,
-                (target, result_artifact_id, error_code, error_reason, now, participant_id),
+                (
+                    target,
+                    result_artifact_id,
+                    error_code,
+                    error_reason,
+                    now,
+                    participant_id,
+                ),
             )
             self._event(
                 connection,
                 run_id=str(row["run_id"]),
                 step_id=str(row["step_id"]),
                 event_type=f"participant.{target}",
-                payload={"participant_id": participant_id, "from": current, "to": target},
+                payload={
+                    "participant_id": participant_id,
+                    "from": current,
+                    "to": target,
+                },
             )
             updated = connection.execute(
                 "SELECT * FROM step_participants WHERE id = ?", (participant_id,)
@@ -1237,7 +1626,9 @@ class DurableStore:
             if existing is not None:
                 existing_fp = str(existing["dispatch_fingerprint"] or "")
                 if existing_fp and existing_fp != dispatch_fingerprint:
-                    raise IdempotencyConflict(idempotency_key, existing_fp, dispatch_fingerprint)
+                    raise IdempotencyConflict(
+                        idempotency_key, existing_fp, dispatch_fingerprint
+                    )
                 return dict(existing), False
             count = connection.execute(
                 "SELECT COUNT(*) FROM step_attempts WHERE participant_id = ?",
@@ -1319,7 +1710,11 @@ class DurableStore:
             current = str(row["status"])
             assert_transition("attempt", current, target)
             now = utc_now_iso()
-            completed = now if target in {"succeeded", "failed", "cancelled"} else row["completed_at"]
+            completed = (
+                now
+                if target in {"succeeded", "failed", "cancelled"}
+                else row["completed_at"]
+            )
             connection.execute(
                 """
                 UPDATE step_attempts
@@ -1346,7 +1741,11 @@ class DurableStore:
                 step_id=str(row["step_id"]),
                 attempt_id=attempt_id,
                 event_type=f"attempt.{target}",
-                payload={"from": current, "to": target, "provider_run_id": provider_run_id},
+                payload={
+                    "from": current,
+                    "to": target,
+                    "provider_run_id": provider_run_id,
+                },
             )
             updated = connection.execute(
                 "SELECT * FROM step_attempts WHERE id = ?", (attempt_id,)
@@ -1413,7 +1812,9 @@ class DurableStore:
             assert updated is not None
             return dict(updated)
 
-    def heartbeat_attempt(self, attempt_id: str, lease: LeaseToken, lease_seconds: int) -> bool:
+    def heartbeat_attempt(
+        self, attempt_id: str, lease: LeaseToken, lease_seconds: int
+    ) -> bool:
         now = utc_now()
         with self.transaction(immediate=True) as connection:
             updated = connection.execute(
@@ -1434,15 +1835,21 @@ class DurableStore:
             return updated.rowcount == 1
 
     def get_attempt(self, attempt_id: str) -> dict[str, Any] | None:
-        row = self.connect().execute(
-            "SELECT * FROM step_attempts WHERE id = ?", (attempt_id,)
-        ).fetchone()
+        row = (
+            self.connect()
+            .execute("SELECT * FROM step_attempts WHERE id = ?", (attempt_id,))
+            .fetchone()
+        )
         return dict(row) if row is not None else None
 
     def get_session(self, session_key: str) -> dict[str, Any] | None:
-        row = self.connect().execute(
-            "SELECT * FROM provider_sessions WHERE session_key = ?", (session_key,)
-        ).fetchone()
+        row = (
+            self.connect()
+            .execute(
+                "SELECT * FROM provider_sessions WHERE session_key = ?", (session_key,)
+            )
+            .fetchone()
+        )
         if row is None:
             return None
         value = dict(row)
@@ -1475,7 +1882,11 @@ class DurableStore:
             updated = session.get("last_used_at") or session.get("updated_at")
             if updated:
                 try:
-                    if datetime.fromisoformat(str(updated)) + timedelta(hours=ttl_hours) <= utc_now():
+                    if (
+                        datetime.fromisoformat(str(updated))
+                        + timedelta(hours=ttl_hours)
+                        <= utc_now()
+                    ):
                         reason = "expired"
                 except Exception:
                     reason = "invalid-last-used"
@@ -1524,7 +1935,11 @@ class DurableStore:
         run_id: str | None = None,
     ) -> None:
         now = utc_now()
-        expires = (now + timedelta(hours=max(1, ttl_hours))).isoformat() if ttl_hours > 0 else None
+        expires = (
+            (now + timedelta(hours=max(1, ttl_hours))).isoformat()
+            if ttl_hours > 0
+            else None
+        )
         with self.transaction(immediate=True) as connection:
             if lease is not None:
                 self._assert_fence(connection, run_id or lease.run_id, lease)
@@ -1633,15 +2048,19 @@ class DurableStore:
         return checkpoint_id
 
     def latest_checkpoint(self, run_id: str) -> dict[str, Any] | None:
-        row = self.connect().execute(
-            """
+        row = (
+            self.connect()
+            .execute(
+                """
             SELECT * FROM workspace_checkpoints
             WHERE run_id=?
             ORDER BY created_at DESC, id DESC
             LIMIT 1
             """,
-            (run_id,),
-        ).fetchone()
+                (run_id,),
+            )
+            .fetchone()
+        )
         if row is None:
             return None
         value = dict(row)
@@ -1649,14 +2068,18 @@ class DurableStore:
         return value
 
     def list_checkpoints(self, run_id: str) -> list[dict[str, Any]]:
-        rows = self.connect().execute(
-            """
+        rows = (
+            self.connect()
+            .execute(
+                """
             SELECT * FROM workspace_checkpoints
             WHERE run_id = ?
             ORDER BY created_at, id
             """,
-            (run_id,),
-        ).fetchall()
+                (run_id,),
+            )
+            .fetchall()
+        )
         checkpoints: list[dict[str, Any]] = []
         for row in rows:
             value = dict(row)
@@ -1684,7 +2107,13 @@ class DurableStore:
             current.update(metadata or {})
             connection.execute(
                 "UPDATE workspace_checkpoints SET status=?, metadata_json=?, verified_at=?, updated_at=? WHERE id=?",
-                (status, _json(redact_value(current)), utc_now_iso(), utc_now_iso(), checkpoint_id),
+                (
+                    status,
+                    _json(redact_value(current)),
+                    utc_now_iso(),
+                    utc_now_iso(),
+                    checkpoint_id,
+                ),
             )
 
     @staticmethod
@@ -1742,7 +2171,9 @@ class DurableStore:
         if not insert_status:
             raise ValueError("Publication status must not be empty.")
         if insert_status in {"published", "discarded"} and inflight_ordinal is not None:
-            raise ValueError("A terminal publication cannot have an inflight operation.")
+            raise ValueError(
+                "A terminal publication cannot have an inflight operation."
+            )
         metadata = dict(record.get("metadata") or {})
         now = utc_now_iso()
 
@@ -1795,23 +2226,30 @@ class DurableStore:
                     )
                 current_status = str(existing["status"])
                 target_status = (
-                    str(requested_status) if requested_status is not None else current_status
+                    str(requested_status)
+                    if requested_status is not None
+                    else current_status
                 )
                 self._assert_publication_status_change(current_status, target_status)
                 current_metadata = _parse_json(existing["metadata_json"], {})
                 current_metadata.update(metadata)
                 target_ordinal = max(int(existing["next_ordinal"]), next_ordinal)
                 target_inflight = existing["inflight_ordinal"]
-                if target_inflight is not None and target_ordinal > int(target_inflight):
-                    target_inflight = None
-                if (
-                    current_status in {"published", "discarded"}
-                    and target_ordinal != int(existing["next_ordinal"])
+                if target_inflight is not None and target_ordinal > int(
+                    target_inflight
                 ):
+                    target_inflight = None
+                if current_status in {
+                    "published",
+                    "discarded",
+                } and target_ordinal != int(existing["next_ordinal"]):
                     raise PublicationStateConflict(
                         f"Terminal publication {existing['id']!r} cannot advance."
                     )
-                if target_status in {"published", "discarded"} and target_inflight is not None:
+                if (
+                    target_status in {"published", "discarded"}
+                    and target_inflight is not None
+                ):
                     raise PublicationStateConflict(
                         f"Publication {existing['id']!r} has an inflight operation."
                     )
@@ -1957,10 +2395,14 @@ class DurableStore:
     upsert_publication = upsert_workspace_publication
 
     def get_workspace_publication(self, publication_id: str) -> dict[str, Any] | None:
-        row = self.connect().execute(
-            "SELECT * FROM workspace_publications WHERE id = ?",
-            (publication_id,),
-        ).fetchone()
+        row = (
+            self.connect()
+            .execute(
+                "SELECT * FROM workspace_publications WHERE id = ?",
+                (publication_id,),
+            )
+            .fetchone()
+        )
         return self._publication_row(row) if row is not None else None
 
     get_publication = get_workspace_publication
@@ -1972,25 +2414,33 @@ class DurableStore:
         checkpoint_id: str | None = None,
     ) -> dict[str, Any] | None:
         if checkpoint_id is None:
-            row = self.connect().execute(
-                """
+            row = (
+                self.connect()
+                .execute(
+                    """
                 SELECT * FROM workspace_publications
                 WHERE run_id = ?
                 ORDER BY created_at DESC, id DESC
                 LIMIT 1
                 """,
-                (run_id,),
-            ).fetchone()
+                    (run_id,),
+                )
+                .fetchone()
+            )
         else:
-            row = self.connect().execute(
-                """
+            row = (
+                self.connect()
+                .execute(
+                    """
                 SELECT * FROM workspace_publications
                 WHERE run_id = ? AND checkpoint_id = ?
                 ORDER BY created_at DESC, id DESC
                 LIMIT 1
                 """,
-                (run_id, checkpoint_id),
-            ).fetchone()
+                    (run_id, checkpoint_id),
+                )
+                .fetchone()
+            )
         return self._publication_row(row) if row is not None else None
 
     latest_publication = latest_workspace_publication
@@ -2004,23 +2454,31 @@ class DurableStore:
         if statuses:
             selected = sorted(str(status) for status in statuses)
             placeholders = ",".join("?" for _ in selected)
-            rows = self.connect().execute(
-                f"""
+            rows = (
+                self.connect()
+                .execute(
+                    f"""
                 SELECT * FROM workspace_publications
                 WHERE run_id = ? AND status IN ({placeholders})
                 ORDER BY created_at, id
                 """,
-                (run_id, *selected),
-            ).fetchall()
+                    (run_id, *selected),
+                )
+                .fetchall()
+            )
         else:
-            rows = self.connect().execute(
-                """
+            rows = (
+                self.connect()
+                .execute(
+                    """
                 SELECT * FROM workspace_publications
                 WHERE run_id = ?
                 ORDER BY created_at, id
                 """,
-                (run_id,),
-            ).fetchall()
+                    (run_id,),
+                )
+                .fetchall()
+            )
         return [self._publication_row(row) for row in rows]
 
     def set_workspace_publication_inflight(
@@ -2038,7 +2496,9 @@ class DurableStore:
         ordinal = int(ordinal)
         if ordinal < 0:
             raise ValueError("Publication inflight ordinal must be non-negative.")
-        expected = ordinal if expected_next_ordinal is None else int(expected_next_ordinal)
+        expected = (
+            ordinal if expected_next_ordinal is None else int(expected_next_ordinal)
+        )
         if expected < 0:
             raise ValueError("Publication expected_next_ordinal must be non-negative.")
         if expected != ordinal:
@@ -2279,7 +2739,10 @@ class DurableStore:
                 raise PublicationStateConflict(
                     f"Terminal publication {publication_id!r} cannot advance."
                 )
-            if target_status in {"published", "discarded"} and target_inflight is not None:
+            if (
+                target_status in {"published", "discarded"}
+                and target_inflight is not None
+            ):
                 raise PublicationStateConflict(
                     f"Publication {publication_id!r} has an inflight operation."
                 )
@@ -2291,7 +2754,9 @@ class DurableStore:
                 if conflict_artifact_id is not None
                 else row["conflict_artifact_id"]
             )
-            target_error_code = error_code if error_code is not None else row["error_code"]
+            target_error_code = (
+                error_code if error_code is not None else row["error_code"]
+            )
             now = utc_now_iso()
             completed_at = row["completed_at"]
             if target_status in {"published", "discarded"} and not completed_at:
@@ -2370,27 +2835,35 @@ class DurableStore:
     mark_publication_status = mark_workspace_publication_status
 
     def list_nonterminal_runs(self) -> list[dict[str, Any]]:
-        rows = self.connect().execute(
-            """
+        rows = (
+            self.connect()
+            .execute(
+                """
             SELECT * FROM workflow_runs
             WHERE status NOT IN ('approved', 'needs_changes', 'blocked', 'failed', 'cancelled')
             ORDER BY created_at
             """
-        ).fetchall()
+            )
+            .fetchall()
+        )
         return [self._run_row(row) for row in rows]
 
     def stale_runs(self, now: datetime | None = None) -> list[dict[str, Any]]:
         moment = now or utc_now()
-        rows = self.connect().execute(
-            """
+        rows = (
+            self.connect()
+            .execute(
+                """
             SELECT * FROM workflow_runs
             WHERE status IN ('running', 'recovering', 'finalizing', 'cancelling')
               AND lease_expires_at IS NOT NULL
               AND lease_expires_at < ?
             ORDER BY created_at
             """,
-            (moment.isoformat(),),
-        ).fetchall()
+                (moment.isoformat(),),
+            )
+            .fetchall()
+        )
         return [self._run_row(row) for row in rows]
 
     def mark_recovery_count(self, run_id: str) -> None:
@@ -2400,29 +2873,42 @@ class DurableStore:
                 (utc_now_iso(), run_id),
             )
 
-    def snapshot_run(self, run_id: str, *, include_events: bool = True) -> dict[str, Any]:
+    def snapshot_run(
+        self, run_id: str, *, include_events: bool = True
+    ) -> dict[str, Any]:
         run = self.get_run(run_id)
         if run is None:
             raise KeyError(run_id)
         connection = self.connect()
-        steps = [dict(row) for row in connection.execute(
-            "SELECT * FROM workflow_steps WHERE run_id = ? ORDER BY sequence_number, round_number, created_at",
-            (run_id,),
-        ).fetchall()]
+        steps = [
+            dict(row)
+            for row in connection.execute(
+                "SELECT * FROM workflow_steps WHERE run_id = ? ORDER BY sequence_number, round_number, created_at",
+                (run_id,),
+            ).fetchall()
+        ]
         for step in steps:
             step["resolution_config"] = _parse_json(
                 step.pop("resolution_config_json", None), {}
             )
-            participants = [dict(row) for row in connection.execute(
-                "SELECT * FROM step_participants WHERE step_id = ? ORDER BY ordinal",
-                (step["id"],),
-            ).fetchall()]
+            participants = [
+                dict(row)
+                for row in connection.execute(
+                    "SELECT * FROM step_participants WHERE step_id = ? ORDER BY ordinal",
+                    (step["id"],),
+                ).fetchall()
+            ]
             for participant in participants:
-                participant["attempts"] = [dict(row) for row in connection.execute(
-                    "SELECT * FROM step_attempts WHERE participant_id = ? ORDER BY attempt_number",
-                    (participant["id"],),
-                ).fetchall()]
-                participant["result"] = self.load_artifact(participant.get("result_artifact_id"))
+                participant["attempts"] = [
+                    dict(row)
+                    for row in connection.execute(
+                        "SELECT * FROM step_attempts WHERE participant_id = ? ORDER BY attempt_number",
+                        (participant["id"],),
+                    ).fetchall()
+                ]
+                participant["result"] = self.load_artifact(
+                    participant.get("result_artifact_id")
+                )
             step["participants"] = participants
             step["output"] = self.load_artifact(step.get("output_artifact_id"))
         checkpoints = self.list_checkpoints(run_id)
@@ -2460,6 +2946,160 @@ class DurableStore:
             "schema": self.schema_status(),
         }
 
+    def _load_public_json_artifact(
+        self, artifact_id: str | None, *, max_bytes: int = 262_144
+    ) -> dict[str, Any] | None:
+        """Best-effort bounded JSON read for the non-technical progress view."""
+
+        raw = self._load_public_artifact_bytes(
+            artifact_id, media_type="application/json", max_bytes=max_bytes
+        )
+        if raw is None:
+            return None
+        try:
+            value = json.loads(raw.decode("utf-8", errors="replace"))
+        except (UnicodeError, json.JSONDecodeError):
+            return None
+        return dict(value) if isinstance(value, dict) else None
+
+    def snapshot_run_public(
+        self,
+        run_id: str,
+        *,
+        step_limit: int = 64,
+        event_limit: int = 200,
+    ) -> dict[str, Any]:
+        """Return the bounded snapshot consumed by the public progress projector.
+
+        This intentionally skips prompts, sessions, attempt rows, workspace paths,
+        configuration, and unbounded artifact/event hydration.
+        """
+
+        connection = self.connect()
+        run_row = connection.execute(
+            """
+            SELECT id, workflow_name, status, current_step_id, final_artifact_id,
+                   error_code, created_at, updated_at, completed_at, recovery_count
+            FROM workflow_runs WHERE id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+        if run_row is None:
+            raise KeyError(run_id)
+        run = dict(run_row)
+        run["final"] = self._load_public_json_artifact(
+            run.pop("final_artifact_id", None)
+        )
+
+        selected_step_limit = max(3, min(int(step_limit), 128))
+        step_rows = connection.execute(
+            """
+            SELECT id, step_key, phase, sequence_number, round_number, status,
+                   output_artifact_id, error_code, created_at, started_at, completed_at
+            FROM workflow_steps
+            WHERE run_id = ?
+            ORDER BY sequence_number DESC, round_number DESC, created_at DESC
+            LIMIT ?
+            """,
+            (run_id, selected_step_limit),
+        ).fetchall()
+        steps = [dict(row) for row in reversed(step_rows)]
+        for step in steps:
+            participant_rows = connection.execute(
+                """
+                SELECT profile_name, provider, model, agent, status, attempt_count,
+                       result_artifact_id, error_code
+                FROM step_participants
+                WHERE step_id = ?
+                ORDER BY ordinal DESC
+                LIMIT 24
+                """,
+                (step["id"],),
+            ).fetchall()
+            participants = [dict(row) for row in reversed(participant_rows)]
+            output = self._load_public_json_artifact(
+                step.pop("output_artifact_id", None)
+            )
+            # Reduced phase output is authoritative.  A single bounded fallback
+            # keeps older snapshots useful without hydrating every participant.
+            if output is None and participants:
+                participants[-1]["result"] = self._load_public_json_artifact(
+                    participants[-1].pop("result_artifact_id", None)
+                )
+            for participant in participants:
+                participant.pop("result_artifact_id", None)
+            step["participants"] = participants
+            step["output"] = output
+
+        checkpoint_count = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM workspace_checkpoints WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()[0]
+        )
+        checkpoint_rows = connection.execute(
+            """
+            SELECT step_id, status, verified_at, updated_at
+            FROM workspace_checkpoints WHERE run_id = ?
+            ORDER BY created_at DESC LIMIT 40
+            """,
+            (run_id,),
+        ).fetchall()
+        checkpoints = [dict(row) for row in reversed(checkpoint_rows)]
+
+        publication_count = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM workspace_publications WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()[0]
+        )
+        publication_rows = connection.execute(
+            """
+            SELECT status, updated_at, completed_at
+            FROM workspace_publications WHERE run_id = ?
+            ORDER BY created_at DESC LIMIT 40
+            """,
+            (run_id,),
+        ).fetchall()
+        publications = [dict(row) for row in reversed(publication_rows)]
+
+        event_count = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM workflow_events WHERE run_id = ?", (run_id,)
+            ).fetchone()[0]
+        )
+        selected_event_limit = max(20, min(int(event_limit), 500))
+        event_rows = connection.execute(
+            """
+            SELECT sequence, step_id, event_type,
+                   substr(payload_json, 1, 2048) AS payload_json, created_at
+            FROM workflow_events WHERE run_id = ?
+            ORDER BY sequence DESC LIMIT ?
+            """,
+            (run_id, selected_event_limit),
+        ).fetchall()
+        events: list[dict[str, Any]] = []
+        for row in reversed(event_rows):
+            event = dict(row)
+            raw_payload = event.pop("payload_json", None)
+            event["payload"] = (
+                _parse_json(raw_payload, {})
+                if event.get("event_type") == "phase.activity"
+                else {}
+            )
+            events.append(event)
+
+        return {
+            "run": run,
+            "steps": steps,
+            "checkpoints": checkpoints,
+            "publications": publications,
+            "events": events,
+            "event_count": event_count,
+            "checkpoint_count": checkpoint_count,
+            "publication_count": publication_count,
+        }
+
     def wal_checkpoint(self, mode: str | None = None) -> dict[str, Any]:
         selected = (mode or self.config.wal_checkpoint_mode or "PASSIVE").upper()
         if selected not in {"PASSIVE", "FULL", "RESTART", "TRUNCATE"}:
@@ -2489,8 +3129,10 @@ class DurableStore:
         )
 
         moment = now or utc_now()
-        rows = self.connect().execute(
-            """
+        rows = (
+            self.connect()
+            .execute(
+                """
             SELECT r.id AS run_id, r.status AS run_status, r.completed_at,
                    r.config_snapshot_json,
                    c.id AS checkpoint_id, c.original_root, c.execution_root,
@@ -2506,7 +3148,9 @@ class DurableStore:
               AND r.completed_at IS NOT NULL
             ORDER BY r.completed_at, r.id
             """
-        ).fetchall()
+            )
+            .fetchall()
+        )
         cleaned: list[str] = []
         retained: list[dict[str, Any]] = []
         missing: list[str] = []
@@ -2632,9 +3276,7 @@ class DurableStore:
                         )
                         continue
             except ShadowWorkspaceError as exc:
-                retained.append(
-                    {"run_id": run_id, "reason": exc.code}
-                )
+                retained.append({"run_id": run_id, "reason": exc.code})
                 continue
             self.mark_checkpoint_status(
                 str(row["checkpoint_id"]),
@@ -2656,7 +3298,9 @@ class DurableStore:
 
     def garbage_collect(self, *, now: datetime | None = None) -> dict[str, Any]:
         moment = now or utc_now()
-        cutoff = (moment - timedelta(days=max(1, int(self.config.retain_terminal_days)))).isoformat()
+        cutoff = (
+            moment - timedelta(days=max(1, int(self.config.retain_terminal_days)))
+        ).isoformat()
         removed_paths: list[str] = []
         removed_runs = 0
         removed_artifacts = 0
@@ -2724,9 +3368,11 @@ class DurableStore:
                 continue
         referenced = {
             str(row[0])
-            for row in self.connect().execute(
+            for row in self.connect()
+            .execute(
                 "SELECT storage_path FROM artifacts WHERE storage_path IS NOT NULL"
-            ).fetchall()
+            )
+            .fetchall()
         }
         root = artifacts_root()
         if root.exists():

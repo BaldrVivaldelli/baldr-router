@@ -127,6 +127,50 @@ def test_prepare_creates_durable_content_addressed_copy_and_private_git(tmp_path
     assert manager.inspect(execution)["tree_matches_checkpoint"] is True
 
 
+def test_materialized_files_fsync_with_a_write_capable_descriptor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    source_file = source / "file.txt"
+    source_file.write_text("durable", encoding="utf-8")
+    source_file.chmod(0o444)
+    real_fsync = os.fsync
+    committed_files = 0
+
+    def windows_compatible_fsync(descriptor: int) -> None:
+        nonlocal committed_files
+        try:
+            os.write(descriptor, b"")
+        except OSError as exc:
+            raise OSError(9, "Bad file descriptor") from exc
+        committed_files += 1
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(shadow_workspace_module.os, "fsync", windows_compatible_fsync)
+
+    materialized = (
+        tmp_path
+        / "state"
+        / "shadow-workspaces"
+        / "write-capable-fsync"
+        / "tree"
+        / "file.txt"
+    )
+    try:
+        execution = _manager(tmp_path).prepare(
+            run_id="write-capable-fsync", workspace_root=source
+        )
+
+        assert execution.execution_root / "file.txt" == materialized
+        assert materialized.read_text(encoding="utf-8") == "durable"
+        assert committed_files > 0
+    finally:
+        source_file.chmod(0o600)
+        if materialized.exists():
+            materialized.chmod(0o600)
+
+
 def test_prepare_fails_when_private_git_exists_but_has_no_usable_commit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

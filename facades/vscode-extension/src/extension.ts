@@ -112,7 +112,12 @@ function createChatHandler(
       stream.markdown(`Created durable item **${String(item.title ?? 'Baldr task')}**. Execution continues in the Baldr Console.`);
       stream.button({ command: 'baldr.open', title: 'Open Baldr Console' });
       void runtime.startWorkItem(workspaceRoot, itemId).then((result) => {
-        output.info(`Chat-created work item completed: ${JSON.stringify(record(result.work_item))}`);
+        const completed = record(result.work_item);
+        output.info(`Chat-created work item completed: ${JSON.stringify({
+          id: String(completed.id ?? itemId),
+          status: String(completed.status ?? 'unknown'),
+          error_code: completed.error_code ? String(completed.error_code) : undefined,
+        })}`);
       }).catch((error) => {
         output.error(error instanceof Error ? error : new Error(String(error)));
       }).finally(() => void consoleProvider.refresh(false));

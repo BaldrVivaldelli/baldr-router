@@ -8,7 +8,7 @@
       ],
       "env": {
         "BALDR_CLIENT_ID": "vscode-generic-mcp",
-        "BALDR_CLIENT_VERSION": "0.18.0"
+        "BALDR_CLIENT_VERSION": "0.19.0"
       }
     }
   }

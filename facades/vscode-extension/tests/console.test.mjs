@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const source = fs.readFileSync(path.join(root, 'src', 'console.ts'), 'utf8');
 const runtimeSource = fs.readFileSync(path.join(root, 'src', 'runtime.ts'), 'utf8');
+const presentationSource = fs.readFileSync(path.join(root, 'src', 'workItemPresentation.ts'), 'utf8');
 
 function section(contents, start, end) {
   const startIndex = contents.indexOf(start);
@@ -16,6 +17,15 @@ function section(contents, start, end) {
   return contents.slice(startIndex, endIndex);
 }
 
+test('embedded console script remains valid JavaScript', () => {
+  const marker = '<script nonce="${nonce}">';
+  const startIndex = source.indexOf(marker);
+  const endIndex = source.indexOf('</script>', startIndex + marker.length);
+  assert.notEqual(startIndex, -1);
+  assert.notEqual(endIndex, -1);
+  assert.doesNotThrow(() => new Function(source.slice(startIndex + marker.length, endIndex)));
+});
+
 test('console keeps the frozen setup/status/run facade contract', () => {
   assert.match(source, /runFacade\('run'/);
   assert.match(source, /consoleStatus/);
@@ -23,8 +33,8 @@ test('console keeps the frozen setup/status/run facade contract', () => {
   assert.doesNotMatch(source, /sqlite3|better-sqlite3/);
 });
 
-test('console exposes tasks, composer, inline plus menu, chips, and slash commands', () => {
-  for (const marker of ['Tus tareas', 'Escribí qué necesitás…', '¿Qué querés hacer?', 'Ver todos (', 'data-chip="git"', 'data-chip="preset"', 'data-chip="context"', 'id="plusMenu"', "type:'plusAction'", 'Archivos y carpetas', "case 'setup'", "case 'cancel'", "case 'resume'", "case 'archive'"]) {
+test('console exposes session history, composer, inline plus menu, chips, and slash commands', () => {
+  for (const marker of ['Tus sesiones', 'Escribí qué necesitás…', '¿Qué querés hacer?', 'Activas', 'Finalizadas', 'Archivadas', 'id="historySearch"', 'data-chip="git"', 'data-chip="preset"', 'data-chip="context"', 'id="plusMenu"', "type:'plusAction'", 'Archivos y carpetas', "case 'setup'", "case 'cancel'", "case 'resume'", "case 'archive'", "case 'restore'", "case 'delete'"]) {
     assert.ok(source.includes(marker), `missing console marker: ${marker}`);
   }
 });
@@ -48,7 +58,7 @@ test('composer uses stable SVG icons, focus states, and a disabled empty submit'
 });
 
 test('primary and secondary UI use plain Spanish wording', () => {
-  for (const wording of ['Todavía no hay tareas', 'Baldr lo organiza y te muestra el avance.', 'Protección de cambios', 'Nivel de detalle', 'Equipo de Baldr', 'Ayuda adicional', 'Protección automática', 'Trabajar directamente', 'Sin protección']) {
+  for (const wording of ['Todavía no hay sesiones', 'Baldr lo organiza y te muestra el avance.', 'Protección de cambios', 'Nivel de detalle', 'Equipo de Baldr', 'Ayuda adicional', 'Protección automática', 'Trabajar directamente', 'Sin protección']) {
     assert.ok(source.includes(wording), `missing plain-language wording: ${wording}`);
   }
   for (const stale of ['No items yet', 'Git worktree', 'Context7 Auto', 'Baldr execution preset', 'durable draft', 'Con Git y respaldo', 'Con Git, en esta carpeta']) {
@@ -72,6 +82,214 @@ test('attachments render inside the composer and can be removed', () => {
   assert.match(source, /data-remove-pending/);
   assert.match(source, /case 'removePending'/);
   assert.match(source, /removePendingAttachment/);
+});
+
+test('work items narrate current activity, canonical stages, outcome, and attention', () => {
+  for (const marker of [
+    'card-eyebrow">Ahora',
+    'Etapas y entregas',
+    'Necesita tu atención',
+    'Detalles técnicos de la sesión',
+  ]) {
+    assert.ok(source.includes(marker), `missing narrative progress marker: ${marker}`);
+  }
+  for (const wording of ['Entender y organizar', 'Hacer el trabajo', 'Comprobar el resultado', 'Trabajo listo']) {
+    assert.ok(presentationSource.includes(wording), `missing stage wording: ${wording}`);
+  }
+  assert.match(source, /buildWorkItemPresentation\(selected\)/);
+  assert.doesNotMatch(section(source, 'function stageHtml(', 'function stageStripHtml('), /participant|model|provider/);
+});
+
+test('session detail leads with status and actions, then progressively reveals secondary content', () => {
+  for (const marker of ['task-summary', 'task-meta-time', 'formatSessionWhen', 'Pedido original', 'Ver resultado completo']) {
+    assert.ok(source.includes(marker), `missing P1 hierarchy marker: ${marker}`);
+  }
+  const render = section(source, 'function renderContent()', 'function shortModelLabel(');
+  const now = render.indexOf('nowCardHtml');
+  const actions = render.indexOf("'<div class=\"actions\">'");
+  const request = render.indexOf('sessionRequestHtml');
+  const progress = render.indexOf('sessionProgressHtml');
+  const technical = render.indexOf('globalTechnicalHtml');
+  assert.ok(now >= 0 && actions > now && request > actions && progress > request && technical > progress);
+});
+
+test('P2 preserves workspace, supports keyboard history, and constrains comfortable reading width', () => {
+  for (const marker of [
+    'id="historyToggle"',
+    'id="historyPanel"',
+    'id="historyStatus"',
+    'data-clear-history',
+    'data-start-request',
+    'function moveHistoryFocus',
+    'function focusHistorySearch',
+    'historyExpanded',
+    'draftText',
+  ]) {
+    assert.ok(source.includes(marker), `missing P2 continuity marker: ${marker}`);
+  }
+  assert.match(source, /--baldr-content-width:\s*720px/);
+  assert.match(source, /\.content-background\s*\{[^}]*max-width:\s*var\(--baldr-content-width\)/);
+  assert.match(source, /\.input-shell\s*\{[^}]*max-width:\s*var\(--baldr-content-width\)/);
+  assert.match(source, /\(event\.ctrlKey\|\|event\.metaKey\).*key\)\.toLowerCase\(\)===['"]f['"]/);
+});
+
+test('phase deliverables are fetched only after explicit open or pagination actions', () => {
+  const hostHandler = section(source, '  private async inspectDeliverable(', '  private async createDraft(');
+  assert.match(hostHandler, /this\.runtime\.inspectWorkItemPhase\(/);
+  assert.match(hostHandler, /stage as 'planning' \| 'execution' \| 'review'/);
+  assert.match(hostHandler, /\{ runOrdinal, cursor: cursor \|\| undefined, pageSize: 30 \}/);
+  assert.match(hostHandler, /append: Boolean\(cursor\)/);
+
+  const openHandler = section(source, 'function openDeliverable(', 'function closeDeliverable(');
+  const moreHandler = section(source, 'function loadMoreDeliverable(', 'function applyDeliverableResult(');
+  assert.match(openHandler, /requestDeliverable\(descriptor(?:,''|,\s*['"]{2})?\)/);
+  assert.match(moreHandler, /requestDeliverable\((?:deliverableView\.descriptor|descriptor),\s*cursor\)/);
+  assert.equal((source.match(/type:'inspectDeliverable'/g) || []).length, 1);
+
+  const render = section(source, 'function renderContent()', 'function shortModelLabel(');
+  assert.doesNotMatch(render, /requestDeliverable\(/);
+  assert.match(render, /\[data-deliverable-stage\]/);
+  assert.match(render, /\[data-deliverable-more\]/);
+});
+
+test('phase deliverable failures expose fixed safe copy and never raw runtime errors', () => {
+  const hostHandler = section(source, '  private async inspectDeliverable(', '  private async createDraft(');
+  assert.match(hostHandler, /catch \{/);
+  assert.match(hostHandler, /Baldr could not load the requested public phase deliverable/);
+  assert.match(hostHandler, /No pudimos abrir la entrega\. Probá nuevamente\./);
+  assert.doesNotMatch(hostHandler, /catch \(error\)|String\(error\)|error\.message/);
+  assert.match(source, /msg\.type==='deliverableError'/);
+  assert.match(source, /function applyDeliverableError\(/);
+});
+
+test('deliverable requests and results are correlated and the modal makes background controls inert', () => {
+  const hostHandler = section(source, '  private async inspectDeliverable(', '  private async loadDeliverableIndex(');
+  assert.match(hostHandler, /const responseContext = \{ itemId, descriptorDigest, requestId \}/);
+  assert.match(hostHandler, /descriptorDigest !== returnedDigest/);
+  assert.match(hostHandler, /\.\.\.responseContext/);
+  assert.match(source, /Number\(message\?\.requestId\)===deliverableView\.requestId/);
+  assert.match(source, /String\(message\?\.itemId\|\|''\)===deliverableView\.itemId/);
+  assert.match(source, /String\(message\?\.descriptorDigest\|\|''\)===deliverableView\.descriptorDigest/);
+  assert.match(source, /incomingItemId!==deliverableView\.itemId/);
+  assert.match(source, /node\.inert=open/);
+  assert.match(source, /node\.setAttribute\('aria-hidden','true'\)/);
+  assert.match(source, /currentDeliverableBody\.scrollTop/);
+  assert.match(source, /nextDeliverableBody\.scrollTop=deliverableScrollTop/);
+});
+
+test('older deliverable descriptors are loaded only on demand and correlated per page', () => {
+  const hostHandler = section(source, '  private async loadDeliverableIndex(', '  private async createDraft(');
+  assert.match(hostHandler, /this\.runtime\.listWorkItemDeliverables\(/);
+  assert.match(hostHandler, /baldr-phase-deliverable-index-page/);
+  assert.match(hostHandler, /buildPhaseDeliverablePresentations\(result\.items\)/);
+  assert.match(source, /Ver entregas anteriores/);
+  assert.match(source, /index\.truncated!==true/);
+  assert.match(source, /type:'loadDeliverableIndex'/);
+  assert.match(source, /Number\(message\?\.requestId\)===deliverableIndexView\.requestId/);
+  assert.match(source, /String\(message\?\.cursor\|\|''\)===deliverableIndexView\.requestCursor/);
+  assert.match(source, /new Map\(\)/);
+});
+
+test('failed task retry is offered only with explicit durable retryability evidence', () => {
+  const primary = section(source, 'function attentionPrimaryAction(', 'function attentionHtml(');
+  const actions = section(source, 'function actionButtons(', 'function renderContent(');
+  assert.match(primary, /attention\.retryable===true/);
+  assert.match(actions, /!attention\|\|attention\.retryable===true/);
+  assert.match(actions, /attention\?'Volver a intentar':'Empezar'/);
+});
+
+test('stage disclosure is accessible and survives polling refreshes', () => {
+  assert.match(source, /id="liveStatus"[^>]*aria-live="polite"/);
+  assert.match(source, /class="stage-toggle"[^>]*aria-expanded/);
+  assert.match(source, /vscode\.getState\(\)/);
+  assert.match(source, /vscode\.setState\(\{expandedByItem,activeStageByItem,openDisclosuresByItem,historyFilter,historySearch,historyExpanded,draftText\}\)/);
+  assert.match(source, /data-stage-status/);
+  assert.match(source, /data-disclosure/);
+  assert.match(source, /data-focus-key/);
+  assert.match(source, /presentation\?\.revision/);
+  assert.match(source, /if\(contentKey===lastContentKey\)return/);
+  assert.match(source, /focus\(\{preventScroll:true\}\)/);
+  assert.match(source, /aria-current="true"/);
+  assert.match(source, /class="attention-card" role="alert"/);
+  assert.match(source, /aria-busy/);
+  assert.match(source, /state\.operationLabel/);
+  assert.match(source, /role="status" aria-live="polite"/);
+});
+
+test('attention states retain readable foregrounds instead of relying on themed warning backgrounds', () => {
+  assert.match(source, /--baldr-surface:/);
+  assert.match(source, /\.attention-card, \.result-card\.warning \{[^}]*border-left-width:\s*4px/);
+  assert.match(source, /\.report-section\.warning, \.report-section\.danger \{ color: var\(--vscode-foreground\); \}/);
+  assert.doesNotMatch(source, /\.attention-card \{[^}]*inputValidation-warningBackground/);
+  assert.doesNotMatch(source, /\.result-card\.warning \{[^}]*inputValidation-warningBackground/);
+});
+
+test('session history exposes archived work and lifecycle actions without hiding permanent deletion', () => {
+  const consoleStatus = section(runtimeSource, '  async consoleStatus(', '  async setWorkspacePreferences(');
+  assert.match(consoleStatus, /workbenchStatus\(workspaceRoot, workItemId, token, true\)/);
+  assert.match(source, /function isHistoryItem\(item\)/);
+  assert.match(source, /data-history-filter="archived"/);
+  assert.match(source, /data-history-action=/);
+  assert.match(source, /Eliminar permanentemente/);
+  assert.match(source, /this\.runtime\.restoreWorkItem/);
+  assert.match(source, /this\.runtime\.deleteWorkItem/);
+  assert.match(source, /\{ modal: true \}/);
+});
+
+test('visible running tasks use adaptive single-flight polling', () => {
+  assert.match(source, /POLL_FAST_MS\s*=\s*2_500/);
+  assert.match(source, /POLL_STABLE_MS\s*=\s*5_000/);
+  assert.match(source, /POLL_IDLE_MS\s*=\s*10_000/);
+  assert.match(source, /if \(!this\.view\?\.visible \|\| !this\.shouldPoll\(\)\) return/);
+  assert.match(source, /const changed = before !== this\.pollingRevision\(\)/);
+  assert.match(source, /summary\.last_event_at/);
+  assert.match(source, /selectedProgress\.overall_state/);
+  assert.match(source, /this\.refreshPromise = this\.drainRefreshes\(\)/);
+  assert.match(source, /while \(this\.refreshCompleted < this\.refreshRequested\)/);
+  assert.doesNotMatch(source, /if \(this\.refreshing\) return/);
+  assert.doesNotMatch(source, /setInterval\(/);
+});
+
+test('polling rerenders keep list and attachment focus while operations disable mutations', () => {
+  assert.match(source, /lastTasksKey/);
+  assert.match(source, /lastPendingKey/);
+  assert.match(source, /els\.tasks\.scrollTop=previousScroll/);
+  assert.match(source, /focusTarget\?\.focus\(\{preventScroll:true\}\)/);
+  assert.match(source, /const disabled=state\.busy\?' disabled':''/);
+  assert.match(source, /control\.disabled=blocked/);
+  assert.match(source, /\['submit', 'plusAction', 'chip', 'itemAction'\]/);
+});
+
+test('a stale selected id falls back to the newest item in the current workspace', () => {
+  assert.match(source, /if \(!record\(workbench\.selected\)\.id\)/);
+  assert.match(source, /items\.find\(\(item\) => text\(item\.status\) !== 'archived'\) \?\? items\[0\]/);
+  assert.match(source, /selectedStatus = await this\.runtime\.consoleStatus/);
+});
+
+test('refresh failures render a retryable non-technical callout and clear on success', () => {
+  assert.match(source, /class="refresh-error" role="alert"/);
+  assert.match(source, /No pudimos actualizar esta vista/);
+  assert.match(source, /Tu sesión sigue guardada\. Probá nuevamente\./);
+  assert.match(source, /data-refresh-action/);
+  assert.match(source, /post\(\{type:'refresh'\}\)/);
+  assert.match(source, /function updateState\(next\)\{const incoming=\{\.\.\.\(next\|\|\{\}\),error:''\}/);
+  assert.match(source, /refreshErrorHtml\(Boolean\(presentation\?\.attention\)\)/);
+});
+
+test('narrative rendering escapes provider-controlled report and technical text', () => {
+  const stageRenderer = section(source, 'function stageHtml(', 'function stageStripHtml(');
+  const sectionRenderer = section(source, 'function sectionsHtml(', 'function technicalRowsHtml(');
+  const technicalRenderer = section(source, 'function technicalRowsHtml(', 'function historyHtml(');
+  assert.match(stageRenderer, /escapeHtml\(stage\.summary\)/);
+  assert.match(sectionRenderer, /escapeHtml\(item\)/);
+  assert.match(technicalRenderer, /escapeHtml\(row\.value\)/);
+});
+
+test('narrative cards remain single-column at a 240px sidebar width', () => {
+  assert.match(source, /@media \(max-width: 300px\)/);
+  assert.match(source, /\.stage-card\s*\{[^}]*min-width:\s*0/);
+  assert.match(source, /\.stage-body\s*\{[^}]*overflow-wrap:\s*anywhere/);
+  assert.match(source, /\.stage-toggle\s*\{[^}]*grid-template-columns:\s*20px minmax\(0, 1fr\) auto/);
 });
 
 

@@ -60,6 +60,7 @@ def test_app_server_normalizes_wire_decisions_before_validation(tmp_path: Path) 
 
     session.request = MethodType(fake_request, session)
 
+    activity: list[str] = []
     result = session.run_turn(
         thread_id="thread-test",
         prompt="test",
@@ -68,10 +69,14 @@ def test_app_server_normalizes_wire_decisions_before_validation(tmp_path: Path) 
         model="",
         timeout=1,
         report_kind="implementation",
+        activity_sink=activity.append,
     )
 
     assert result["ok"] is True
     assert result["final_report"]["decisions"] == {"database": "postgresql"}
+    assert activity
+    assert set(activity) == {"working"}
+    assert "verifying" not in activity
 
 
 def test_sdk_normalizes_wire_decisions_before_validation(
@@ -91,6 +96,7 @@ def test_sdk_normalizes_wire_decisions_before_validation(
     monkeypatch.setattr(codex_sdk, "_ensure_codex", lambda: FakeCodex())
     monkeypatch.setattr(codex_sdk, "_sandbox_value", lambda value: value)
 
+    activity: list[str] = []
     result = codex_sdk.run_codex_sdk(
         prompt="test",
         cwd=tmp_path,
@@ -101,7 +107,10 @@ def test_sdk_normalizes_wire_decisions_before_validation(
         session_key="normalization-test",
         telemetry_enabled=False,
         report_kind="implementation",
+        activity_sink=activity.append,
     )
 
     assert result["ok"] is True
     assert result["final_report"]["decisions"] == {"database": "postgresql"}
+    assert activity == ["working"]
+    assert "verifying" not in activity

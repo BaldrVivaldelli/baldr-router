@@ -5,6 +5,19 @@ from pathlib import Path
 from typing import Any
 
 
+_LEGACY_OPTIONAL_NARRATIVE_FIELDS = {
+    "interpretation",
+    "scope",
+    "approach",
+    "plan_steps",
+    "work_completed",
+    "work_next",
+    "findings",
+    "corrections",
+    "verification_evidence",
+}
+
+
 def codex_final_report_schema(kind: str = "implementation") -> dict[str, Any]:
     status_values = [
         "planned",
@@ -21,6 +34,18 @@ def codex_final_report_schema(kind: str = "implementation") -> dict[str, Any]:
         "properties": {
             "status": {"type": "string", "enum": status_values},
             "summary": {"type": "string"},
+            "interpretation": {"type": "string"},
+            "scope": {"type": "array", "items": {"type": "string"}},
+            "approach": {"type": "array", "items": {"type": "string"}},
+            "plan_steps": {"type": "array", "items": {"type": "string"}},
+            "work_completed": {"type": "array", "items": {"type": "string"}},
+            "work_next": {"type": "array", "items": {"type": "string"}},
+            "findings": {"type": "array", "items": {"type": "string"}},
+            "corrections": {"type": "array", "items": {"type": "string"}},
+            "verification_evidence": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
             "files_modified": {"type": "array", "items": {"type": "string"}},
             "commands_run": {"type": "array", "items": {"type": "string"}},
             "tests_run": {"type": "array", "items": {"type": "string"}},
@@ -52,6 +77,15 @@ def codex_final_report_schema(kind: str = "implementation") -> dict[str, Any]:
         "required": [
             "status",
             "summary",
+            "interpretation",
+            "scope",
+            "approach",
+            "plan_steps",
+            "work_completed",
+            "work_next",
+            "findings",
+            "corrections",
+            "verification_evidence",
             "files_modified",
             "commands_run",
             "tests_run",
@@ -107,7 +141,7 @@ def validate_final_report(value: Any, *, kind: str = "implementation") -> tuple[
         return False, ["final report must be a JSON object"]
     required = schema["required"]
     for key in required:
-        if key not in value:
+        if key not in value and key not in _LEGACY_OPTIONAL_NARRATIVE_FIELDS:
             errors.append(f"missing required key: {key}")
     allowed = set(schema["properties"])
     extras = sorted(set(value) - allowed)
@@ -120,7 +154,21 @@ def validate_final_report(value: Any, *, kind: str = "implementation") -> tuple[
         errors.append(f"invalid status: {status!r}")
     if not isinstance(value.get("summary"), str):
         errors.append("summary must be a string")
+    # These narrative fields were added after the stable report contract was
+    # already durable. Providers using the current output schema always return
+    # them, while persisted/embedded legacy reports remain valid when they are
+    # absent. If present, their shape is still strict.
+    if "interpretation" in value and not isinstance(value.get("interpretation"), str):
+        errors.append("interpretation must be a string")
     for key in (
+        "scope",
+        "approach",
+        "plan_steps",
+        "work_completed",
+        "work_next",
+        "findings",
+        "corrections",
+        "verification_evidence",
         "files_modified",
         "commands_run",
         "tests_run",
@@ -128,6 +176,8 @@ def validate_final_report(value: Any, *, kind: str = "implementation") -> tuple[
         "risks",
         "follow_up",
     ):
+        if key not in value and key in _LEGACY_OPTIONAL_NARRATIVE_FIELDS:
+            continue
         item = value.get(key)
         if not isinstance(item, list) or not all(isinstance(entry, str) for entry in item):
             errors.append(f"{key} must be an array of strings")

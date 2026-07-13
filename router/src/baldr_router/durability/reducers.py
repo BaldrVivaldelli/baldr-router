@@ -39,6 +39,14 @@ def _field(reports: list[dict[str, Any]], name: str) -> list[str]:
     )
 
 
+def _first_text(reports: list[dict[str, Any]], name: str) -> str:
+    for report in reports:
+        value = report.get(name)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
 def _merge_decisions(reports: list[dict[str, Any]]) -> tuple[dict[str, str], list[dict[str, Any]]]:
     values: dict[str, list[str]] = {}
     for report in reports:
@@ -90,6 +98,15 @@ def _base_report(
     return {
         "status": status,
         "summary": summary,
+        "interpretation": _first_text(reports, "interpretation"),
+        "scope": _field(reports, "scope"),
+        "approach": _field(reports, "approach"),
+        "plan_steps": _field(reports, "plan_steps"),
+        "work_completed": _field(reports, "work_completed"),
+        "work_next": _field(reports, "work_next"),
+        "findings": _field(reports, "findings"),
+        "corrections": _field(reports, "corrections"),
+        "verification_evidence": _field(reports, "verification_evidence"),
         "files_modified": _field(reports, "files_modified"),
         "commands_run": _field(reports, "commands_run"),
         "tests_run": _field(reports, "tests_run"),
@@ -144,7 +161,11 @@ def reduce_phase(
     normalized_policy = (policy or "").strip().lower()
     if phase == "architect":
         normalized_policy = normalized_policy or "primary-with-advisors"
-        if decision_conflicts:
+        if any(blocking):
+            result_status = "blocked"
+            ok = False
+            conflicts.append("architecture-blocked")
+        elif decision_conflicts:
             result_status = "blocked"
             ok = False
             conflicts.append("architecture-decision-conflict")
@@ -190,8 +211,12 @@ def reduce_phase(
         summary = "\n\n".join(summary for summary in summaries if summary)
     else:
         normalized_policy = normalized_policy or "first-success"
-        result_status = statuses[0] or "implemented"
-        ok = len(participants) >= max(1, min_successes)
+        if any(blocking):
+            result_status = "blocked"
+            ok = False
+        else:
+            result_status = statuses[0] or "implemented"
+            ok = len(participants) >= max(1, min_successes)
         summary = summaries[0] if summaries else ""
 
     final_report = _base_report(reports, status=result_status, summary=summary)
@@ -203,7 +228,13 @@ def reduce_phase(
     return {
         "ok": ok,
         "status": result_status,
-        "error_code": "architecture_conflict" if phase == "architect" and decision_conflicts else None,
+        "error_code": (
+            "architecture_conflict"
+            if phase == "architect" and decision_conflicts
+            else "phase_report_blocked"
+            if not ok and any(blocking)
+            else None
+        ),
         "participants": participants,
         "final_report": final_report,
         "resolution": {

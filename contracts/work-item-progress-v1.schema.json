@@ -1,0 +1,416 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://baldr.dev/contracts/work-item-progress-v1.schema.json",
+  "title": "Baldr public work-item progress v1",
+  "type": "object",
+  "required": [
+    "contract",
+    "version",
+    "revision",
+    "overall_state",
+    "activity",
+    "active_stage",
+    "last_event_at",
+    "stages",
+    "deliverables",
+    "deliverable_index",
+    "final_report",
+    "attention",
+    "milestones",
+    "technical"
+  ],
+  "properties": {
+    "contract": { "const": "baldr-work-item-progress" },
+    "version": { "const": 1 },
+    "revision": { "type": "integer", "minimum": 0 },
+    "overall_state": {
+      "enum": ["pending", "running", "attention", "complete", "cancelled", "archived"]
+    },
+    "activity": { "$ref": "#/$defs/activity" },
+    "active_stage": {
+      "oneOf": [
+        { "$ref": "#/$defs/stageId" },
+        { "type": "null" }
+      ]
+    },
+    "last_event_at": { "$ref": "#/$defs/nullableTimestamp" },
+    "stages": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": { "$ref": "#/$defs/stage" }
+    },
+    "deliverables": {
+      "type": "array",
+      "maxItems": 256,
+      "items": { "$ref": "#/$defs/deliverableDescriptor" }
+    },
+    "deliverable_index": { "$ref": "#/$defs/deliverableIndex" },
+    "final_report": {
+      "oneOf": [
+        { "$ref": "#/$defs/report" },
+        { "type": "null" }
+      ]
+    },
+    "attention": {
+      "oneOf": [
+        { "$ref": "#/$defs/attention" },
+        { "type": "null" }
+      ]
+    },
+    "milestones": {
+      "type": "array",
+      "maxItems": 40,
+      "items": { "$ref": "#/$defs/milestone" }
+    },
+    "technical": { "$ref": "#/$defs/globalTechnical" }
+  },
+  "$defs": {
+    "stageId": { "enum": ["planning", "execution", "review"] },
+    "stageState": {
+      "enum": ["pending", "running", "complete", "attention", "cancelled", "skipped"]
+    },
+    "deliverablePreview": {
+      "type": "object",
+      "required": ["status", "summary", "review_decision"],
+      "properties": {
+        "status": { "$ref": "#/$defs/tokenOrNull" },
+        "summary": { "type": "string", "maxLength": 2400 },
+        "review_decision": { "$ref": "#/$defs/tokenOrNull" }
+      },
+      "additionalProperties": false
+    },
+    "deliverableDescriptor": {
+      "type": "object",
+      "required": [
+        "stage",
+        "round",
+        "run_ordinal",
+        "item_revision",
+        "availability",
+        "reason",
+        "digest",
+        "redacted",
+        "created_at",
+        "preview",
+        "entry_count",
+        "action"
+      ],
+      "properties": {
+        "stage": { "$ref": "#/$defs/stageId" },
+        "round": { "type": "integer", "minimum": 0 },
+        "run_ordinal": { "type": "integer", "minimum": 1 },
+        "item_revision": { "type": "integer", "minimum": 1 },
+        "availability": {
+          "enum": ["available", "summary_only", "unavailable"]
+        },
+        "reason": { "type": ["string", "null"], "maxLength": 96 },
+        "digest": {
+          "oneOf": [
+            { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+            { "type": "null" }
+          ]
+        },
+        "redacted": { "const": true },
+        "created_at": { "$ref": "#/$defs/nullableTimestamp" },
+        "preview": {
+          "oneOf": [
+            { "$ref": "#/$defs/deliverablePreview" },
+            { "type": "null" }
+          ]
+        },
+        "entry_count": { "type": "integer", "minimum": 0 },
+        "action": { "const": "inspect-item-phase" }
+      },
+      "additionalProperties": false
+    },
+    "deliverableIndex": {
+      "type": "object",
+      "required": ["total", "returned", "truncated", "next_cursor", "action"],
+      "properties": {
+        "total": { "type": "integer", "minimum": 0 },
+        "returned": { "type": "integer", "minimum": 0, "maximum": 256 },
+        "truncated": { "type": "boolean" },
+        "next_cursor": { "type": ["string", "null"], "maxLength": 1024 },
+        "action": { "const": "list-item-deliverables" }
+      },
+      "additionalProperties": false
+    },
+    "evidence": { "enum": ["reported", "observed", "verified"] },
+    "nullableTimestamp": {
+      "type": ["string", "null"],
+      "maxLength": 64
+    },
+    "tokenOrNull": {
+      "type": ["string", "null"],
+      "maxLength": 96
+    },
+    "identifierOrNull": {
+      "type": ["string", "null"],
+      "maxLength": 128
+    },
+    "stringList": {
+      "type": "array",
+      "maxItems": 100,
+      "items": { "type": "string", "maxLength": 700 }
+    },
+    "decision": {
+      "type": "object",
+      "required": ["key", "value"],
+      "properties": {
+        "key": { "type": "string", "maxLength": 160 },
+        "value": { "type": "string", "maxLength": 700 }
+      },
+      "additionalProperties": false
+    },
+    "report": {
+      "type": "object",
+      "required": [
+        "evidence",
+        "status",
+        "summary",
+        "decisions",
+        "acceptance_criteria",
+        "assumptions",
+        "files_modified",
+        "tests_run",
+        "verification_needed",
+        "risks",
+        "follow_up",
+        "blockers",
+        "review_decision"
+      ],
+      "properties": {
+        "evidence": { "$ref": "#/$defs/evidence" },
+        "status": { "$ref": "#/$defs/tokenOrNull" },
+        "summary": { "type": "string", "maxLength": 2400 },
+        "interpretation": { "type": "string", "maxLength": 2400 },
+        "scope": { "$ref": "#/$defs/stringList" },
+        "approach": { "$ref": "#/$defs/stringList" },
+        "plan_steps": { "$ref": "#/$defs/stringList" },
+        "work_completed": { "$ref": "#/$defs/stringList" },
+        "work_next": { "$ref": "#/$defs/stringList" },
+        "findings": { "$ref": "#/$defs/stringList" },
+        "corrections": { "$ref": "#/$defs/stringList" },
+        "verification_evidence": { "$ref": "#/$defs/stringList" },
+        "decisions": {
+          "type": "array",
+          "maxItems": 24,
+          "items": { "$ref": "#/$defs/decision" }
+        },
+        "acceptance_criteria": { "$ref": "#/$defs/stringList" },
+        "assumptions": { "$ref": "#/$defs/stringList" },
+        "files_modified": { "$ref": "#/$defs/stringList" },
+        "tests_run": { "$ref": "#/$defs/stringList" },
+        "verification_needed": { "$ref": "#/$defs/stringList" },
+        "risks": { "$ref": "#/$defs/stringList" },
+        "follow_up": { "$ref": "#/$defs/stringList" },
+        "blockers": { "$ref": "#/$defs/stringList" },
+        "review_decision": { "$ref": "#/$defs/tokenOrNull" }
+      },
+      "additionalProperties": false
+    },
+    "participant": {
+      "type": "object",
+      "required": ["profile", "provider", "model_or_agent", "state", "attempt_count"],
+      "properties": {
+        "profile": { "type": ["string", "null"], "maxLength": 160 },
+        "provider": { "type": ["string", "null"], "maxLength": 160 },
+        "model_or_agent": { "type": ["string", "null"], "maxLength": 240 },
+        "state": { "type": ["string", "null"], "maxLength": 96 },
+        "attempt_count": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "stageTechnical": {
+      "type": "object",
+      "required": [
+        "step_count",
+        "participant_count",
+        "attempt_count",
+        "error_codes",
+        "commands_run",
+        "constraints",
+        "alternatives_rejected",
+        "participants"
+      ],
+      "properties": {
+        "step_count": { "type": "integer", "minimum": 0 },
+        "participant_count": { "type": "integer", "minimum": 0 },
+        "attempt_count": { "type": "integer", "minimum": 0 },
+        "error_codes": { "$ref": "#/$defs/stringList" },
+        "commands_run": { "$ref": "#/$defs/stringList" },
+        "constraints": { "$ref": "#/$defs/stringList" },
+        "alternatives_rejected": { "$ref": "#/$defs/stringList" },
+        "participants": {
+          "type": "array",
+          "maxItems": 24,
+          "items": { "$ref": "#/$defs/participant" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "history": {
+      "type": "object",
+      "required": [
+        "round",
+        "state",
+        "outcome",
+        "started_at",
+        "completed_at",
+        "report",
+        "technical"
+      ],
+      "properties": {
+        "round": { "type": "integer", "minimum": 0 },
+        "state": { "$ref": "#/$defs/stageState" },
+        "outcome": { "$ref": "#/$defs/tokenOrNull" },
+        "started_at": { "$ref": "#/$defs/nullableTimestamp" },
+        "completed_at": { "$ref": "#/$defs/nullableTimestamp" },
+        "report": {
+          "oneOf": [
+            { "$ref": "#/$defs/report" },
+            { "type": "null" }
+          ]
+        },
+        "technical": { "$ref": "#/$defs/stageTechnical" }
+      },
+      "additionalProperties": false
+    },
+    "stage": {
+      "type": "object",
+      "required": [
+        "id",
+        "state",
+        "outcome",
+        "round_count",
+        "started_at",
+        "completed_at",
+        "report",
+        "evidence",
+        "history",
+        "technical"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/stageId" },
+        "state": { "$ref": "#/$defs/stageState" },
+        "outcome": { "$ref": "#/$defs/tokenOrNull" },
+        "round_count": { "type": "integer", "minimum": 0 },
+        "started_at": { "$ref": "#/$defs/nullableTimestamp" },
+        "completed_at": { "$ref": "#/$defs/nullableTimestamp" },
+        "report": {
+          "oneOf": [
+            { "$ref": "#/$defs/report" },
+            { "type": "null" }
+          ]
+        },
+        "evidence": { "$ref": "#/$defs/evidence" },
+        "history": {
+          "type": "array",
+          "maxItems": 12,
+          "items": { "$ref": "#/$defs/history" }
+        },
+        "technical": { "$ref": "#/$defs/stageTechnical" }
+      },
+      "additionalProperties": false
+    },
+    "activity": {
+      "type": "object",
+      "required": ["kind", "message", "since", "evidence"],
+      "properties": {
+        "kind": { "type": "string", "maxLength": 96 },
+        "message": { "type": "string", "maxLength": 240 },
+        "since": { "$ref": "#/$defs/nullableTimestamp" },
+        "state": { "type": "string", "maxLength": 96 },
+        "stage": {
+          "oneOf": [
+            { "$ref": "#/$defs/stageId" },
+            { "type": "null" }
+          ]
+        },
+        "evidence": { "$ref": "#/$defs/evidence" }
+      },
+      "additionalProperties": false
+    },
+    "attentionAction": {
+      "type": "object",
+      "required": ["id", "label", "description"],
+      "properties": {
+        "id": { "type": "string", "maxLength": 96 },
+        "label": { "type": "string", "maxLength": 160 },
+        "description": { "type": "string", "maxLength": 320 }
+      },
+      "additionalProperties": false
+    },
+    "attention": {
+      "type": "object",
+      "required": ["required", "kind", "stage", "summary", "blockers", "actions", "retryable"],
+      "properties": {
+        "required": { "const": true },
+        "kind": { "type": "string", "maxLength": 96 },
+        "stage": {
+          "oneOf": [
+            { "$ref": "#/$defs/stageId" },
+            { "type": "null" }
+          ]
+        },
+        "summary": { "type": "string", "maxLength": 1000 },
+        "blockers": { "$ref": "#/$defs/stringList" },
+        "actions": {
+          "type": "array",
+          "maxItems": 12,
+          "items": { "$ref": "#/$defs/attentionAction" }
+        },
+        "retryable": { "type": ["boolean", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "milestone": {
+      "type": "object",
+      "required": ["kind", "stage", "state", "message", "at", "evidence"],
+      "properties": {
+        "kind": { "type": "string", "maxLength": 96 },
+        "stage": {
+          "oneOf": [
+            { "$ref": "#/$defs/stageId" },
+            { "type": "null" }
+          ]
+        },
+        "state": { "type": "string", "maxLength": 96 },
+        "message": { "type": "string", "maxLength": 240 },
+        "at": { "type": "string", "maxLength": 64 },
+        "evidence": { "$ref": "#/$defs/evidence" }
+      },
+      "additionalProperties": false
+    },
+    "globalTechnical": {
+      "type": "object",
+      "required": [
+        "run_id",
+        "workflow_name",
+        "item_state",
+        "run_state",
+        "recovery_count",
+        "event_count",
+        "checkpoint_count",
+        "publication_count",
+        "unknown_step_count",
+        "error_codes"
+      ],
+      "properties": {
+        "run_id": { "$ref": "#/$defs/identifierOrNull" },
+        "workflow_name": { "$ref": "#/$defs/tokenOrNull" },
+        "item_state": { "type": "string", "maxLength": 96 },
+        "run_state": { "$ref": "#/$defs/tokenOrNull" },
+        "recovery_count": { "type": "integer", "minimum": 0 },
+        "event_count": { "type": "integer", "minimum": 0 },
+        "checkpoint_count": { "type": "integer", "minimum": 0 },
+        "publication_count": { "type": "integer", "minimum": 0 },
+        "unknown_step_count": { "type": "integer", "minimum": 0 },
+        "error_codes": { "$ref": "#/$defs/stringList" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

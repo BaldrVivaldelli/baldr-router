@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .provider_errors import provider_error
+from .provider_activity import ProviderActivitySink, emit_provider_activity
 from .redaction import redact_text, redact_value
 from .schemas import normalize_final_report, validate_final_report
 from .telemetry import append_run, utc_now_iso
@@ -79,6 +80,7 @@ def run_codex_sdk(
     env: Mapping[str, str] | None = None,
     telemetry_enabled: bool,
     report_kind: str,
+    activity_sink: ProviderActivitySink | None = None,
 ) -> dict[str, Any]:
     # The SDK controls local Codex/app-server. Import lazily so the base router does not require it.
     run_id = f"codex-sdk-{uuid.uuid4().hex[:12]}"
@@ -86,6 +88,7 @@ def run_codex_sdk(
     import time
 
     started = time.time()
+    emit_provider_activity(activity_sink, "working")
     try:
         with _SDK_LOCK:
             old_env: dict[str, str | None] = {}

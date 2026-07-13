@@ -18,6 +18,15 @@ def test_direct_task_structured_instruction_matches_full_report_contract() -> No
     assert declared_keys == {
         "status",
         "summary",
+        "interpretation",
+        "scope",
+        "approach",
+        "plan_steps",
+        "work_completed",
+        "work_next",
+        "findings",
+        "corrections",
+        "verification_evidence",
         "files_modified",
         "commands_run",
         "tests_run",
@@ -34,6 +43,8 @@ def test_direct_task_structured_instruction_matches_full_report_contract() -> No
     }
     assert "array of objects with string keys `key` and `value`" in instruction
     assert "use not_applicable outside review" in instruction
+    assert "same language as the user's task" in instruction
+    assert "private chain-of-thought" in instruction
 
 
 def test_delegate_task_is_client_agnostic(tmp_path: Path, monkeypatch):

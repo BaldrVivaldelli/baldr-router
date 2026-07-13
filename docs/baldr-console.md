@@ -1,4 +1,4 @@
-# Baldr Console y protección automática — v0.18
+# Baldr Console y progreso narrativo — v0.19
 
 Baldr Console es la interfaz principal de Baldr Router en VS Code. Vive en una sección propia de la Activity Bar y evita usar Copilot Chat como panel operativo.
 
@@ -6,7 +6,7 @@ Baldr Console es la interfaz principal de Baldr Router en VS Code. Vive en una s
 Activity Bar
   -> Baldr
        -> lista de tasks durables
-       -> detalle y timeline del item seleccionado
+       -> progreso narrativo del item seleccionado
        -> composer fijo
        -> menú +
        -> chips de protección, nivel de detalle, equipo y ayuda adicional
@@ -64,6 +64,8 @@ Al escribir `/` aparece autocomplete dentro del composer:
 /cancel
 /resume
 /archive
+/restore
+/delete
 /setup
 /help
 ```
@@ -114,26 +116,72 @@ review:          1..L
 
 La creación de un perfil reutilizable se hace paso a paso mediante Quick Picks e inputs pequeños: nombre, provider, modelo o agente y effort. No existe una página de formulario separada.
 
-## Timeline y acciones
+## Progreso narrativo
 
-Cada item muestra:
+La vista principal evita estados internos y responde cuatro preguntas: qué está haciendo Baldr, qué ya terminó, cuál fue el resultado y si la persona necesita actuar.
 
 ```text
-Architecture
-Implementation
-Review
-Fix rounds, si corresponden
+Ahora
+  Organizando el trabajo | Haciendo los cambios | Comprobando el resultado
+
+Planificación
+  resumen, decisiones, supuestos, riesgos y criterios
+
+Ejecución
+  resumen, archivos informados, comprobaciones y pendientes
+
+Revisión
+  conclusión, hallazgos, correcciones y nueva revisión
+
+Resultado
+  cambios, comprobaciones, pendientes y próximos pasos
 ```
 
-Las acciones disponibles dependen del estado durable:
+Las tres etapas son acordeones canónicos. Las rondas de corrección permanecen dentro de Ejecución y Revisión en lugar de duplicar tarjetas. La etapa activa se abre automáticamente; la selección de paneles, el foco y el scroll sobreviven a las actualizaciones. Las duraciones reflejan timestamps observados y nunca se muestran porcentajes o estimaciones inventadas.
+
+Los reportes de agentes se proyectan mediante el contrato público `baldr-work-item-progress` v1. La proyección usa una allowlist, límites y redacción: no cruza prompts, razonamiento, stdout/stderr, sesiones, roots privados ni eventos crudos. Proveedor, modelo, intentos, comandos sanitizados y códigos quedan cerrados bajo **Detalles técnicos**; los logs son el nivel final de diagnóstico.
+
+Cuando el runner ofrece actividad en vivo, Baldr conserva sólo categorías seguras (`working`, `analyzing`, `researching`, `changing`, `verifying`) y timestamps. `working` es el estado honesto para el inicio de un rol o un comando genérico; completar un turno o recibir la respuesta del SDK no se presenta como verificación. El contenido del razonamiento, comandos y archivos nunca forma parte de esas observaciones. Al recargar VS Code, la historia se reconstruye desde SQLite y artefactos durables.
+
+Cada reporte puede incluir qué entendió Baldr, alcance, enfoque, pasos,
+trabajo completado/siguiente, hallazgos, correcciones y evidencia de
+verificación. Esas secciones se muestran sólo después de quedar guardadas en
+un reporte estructurado; mientras una ronda está activa no se reutiliza el
+resumen de la ronda anterior como si fuera un avance nuevo.
+
+Cada etapa terminada conserva además una **Entrega**. El resumen queda visible
+en la tarjeta y **Ver entrega completa** abre un visor protegido y paginado. El
+visor no muestra logs ni salida cruda: presenta únicamente interpretación,
+alcance, plan, trabajo, hallazgos, correcciones y evidencia ya reducidos por el
+core. Las tareas históricas indican con honestidad si sólo existe un resumen o
+si el detalle ya no está disponible.
+
+Los 256 descriptores más recientes viajan en el status liviano. Cuando hay más,
+aparece **Ver entregas anteriores** y la consola pagina el índice bajo demanda;
+por eso ningún intento desaparece y el polling no hidrata documentos grandes.
+El visor bloquea el fondo mientras está abierto, admite teclado y `Escape`,
+preserva foco/scroll, y descarta respuestas tardías pertenecientes a otra tarea
+o entrega.
+
+La consola consulta `facade status --workbench-only`: evita repetir doctor, login, qualification y probes en cada actualización. El polling usa backoff de 2,5 a 10 segundos cuando no cambia la revisión, se detiene con la vista oculta y no reconstruye el contenido sin cambios.
+
+La especificación completa está en [narrative-progress.md](narrative-progress.md). Los contratos canónicos están en `contracts/work-item-progress-v1.schema.json`, `contracts/phase-deliverable-page-v1.schema.json` y `contracts/phase-deliverable-index-page-v1.schema.json`.
+
+## Acciones
+
+Las acciones dependen del estado durable:
 
 ```text
 Run
 Cancel
 Archive
+Restore
+Delete permanently
 Resolve
 Open logs
 ```
+
+El historial permite filtrar sesiones activas, finalizadas y archivadas, y buscarlas por título. Archivar es reversible; una sesión archivada se puede restaurar o eliminar permanentemente tras confirmación. El borrado elimina el historial durable y las entregas de Baldr, sin modificar archivos del workspace.
 
 Cuando una escritura queda incierta o la publicación encuentra un conflicto, **Revisar opciones** ofrece únicamente las acciones que el core demostró seguras para ese estado. En un workspace sombra pueden aparecer:
 
@@ -155,6 +203,7 @@ workspace_preferences
 work_items
 work_item_runs
 work_item_events
+phase_deliverables
 ```
 
 El texto completo de la task y el contexto privado se guardan como artifacts privados; la fila materializada conserva metadata, estado, referencias y configuración. La extensión nunca accede directamente a la base.

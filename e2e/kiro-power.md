@@ -1,6 +1,6 @@
 # E2E: Kiro Power and optional adapter
 
-1. Install the v0.16 core and `baldr-kiro-adapter` in the same Python environment.
+1. Install the v0.19 core and `baldr-kiro-adapter` in the same Python environment.
 2. Install `facades/kiro/baldr-orchestrator/` as the Power.
 3. Restart/reconnect Kiro's MCP server if the host process had an old PATH.
 4. Ask for the shared setup intent. Verify `router_extension_status` reports adapter `kiro`.

@@ -8,6 +8,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const manifest = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
 const contract = JSON.parse(fs.readFileSync(path.join(root, 'resources', 'facade-v1.json'), 'utf8'));
 const runtimeSource = fs.readFileSync(path.join(root, 'src', 'runtime.ts'), 'utf8');
+const extensionSource = fs.readFileSync(path.join(root, 'src', 'extension.ts'), 'utf8');
 
 test('exposes one command palette command', () => {
   assert.deepEqual(manifest.contributes.commands.map((item) => item.command), ['baldr.open']);
@@ -31,8 +32,8 @@ test('requires VS Code Workspace Trust before provider execution', () => {
   assert.equal(manifest.capabilities.untrustedWorkspaces.supported, false);
 });
 
-test('packages the v0.18.0 Baldr Console facade', () => {
-  assert.equal(manifest.version, '0.18.0');
+test('packages the v0.19.0 Baldr Console facade', () => {
+  assert.equal(manifest.version, '0.19.0');
   const extensionVersion = runtimeSource.match(/export const EXTENSION_VERSION = '([^']+)'/)?.[1];
   assert.equal(extensionVersion, manifest.version);
   assert.match(contract.intents.setup.description, /lifecycle verification/);
@@ -58,4 +59,10 @@ test('ships the form-free Baldr Console and Activity Bar icon', () => {
   assert.match(source, /class=\"composer\"/);
   assert.match(source, /class=\"task-list\"/);
   assert.ok(fs.existsSync(path.join(root, 'media', 'baldr.svg')));
+});
+
+test('chat completion logs only bounded work-item identity and status', () => {
+  assert.doesNotMatch(extensionSource, /JSON\.stringify\(record\(result\.work_item\)\)/);
+  assert.match(extensionSource, /error_code: completed\.error_code/);
+  assert.doesNotMatch(extensionSource, /completed\.task|completed\.extra_context|completed\.workflow/);
 });

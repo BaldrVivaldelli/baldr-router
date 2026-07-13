@@ -150,3 +150,27 @@ def test_structured_report_accepts_architecture_decisions() -> None:
     ok, errors = validate_final_report(value, kind="architecture")
     assert ok is True
     assert errors == []
+
+
+def test_narrative_fields_are_strict_when_present_and_legacy_reports_remain_valid() -> None:
+    legacy = _report_with_decisions({"database": "postgresql"})
+    assert validate_final_report(legacy, kind="architecture") == (True, [])
+
+    current = {
+        **legacy,
+        "interpretation": "La persona necesita entender el progreso.",
+        "scope": ["La consola"],
+        "approach": ["Mostrar resultados por etapa"],
+        "plan_steps": ["Definir el contrato", "Presentar la información"],
+        "work_completed": [],
+        "work_next": ["Validar la experiencia"],
+        "findings": [],
+        "corrections": [],
+        "verification_evidence": ["La prueba de presentación pasó"],
+    }
+    assert validate_final_report(current, kind="architecture") == (True, [])
+
+    invalid = {**current, "findings": "ninguno"}
+    ok, errors = validate_final_report(invalid, kind="review")
+    assert ok is False
+    assert "findings must be an array of strings" in errors

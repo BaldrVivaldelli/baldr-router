@@ -6,7 +6,7 @@ privileged developer tooling.
 
 ## Supported line
 
-Security and consistency fixes are accepted for the current `0.16.x` release
+Security and consistency fixes are accepted for the current `0.19.x` release
 candidate line.
 
 ## Reporting

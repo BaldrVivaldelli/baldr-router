@@ -36,7 +36,16 @@
         "vscode.mcp_visible",
         "vscode.workspace_trust",
         "wsl.auto_bridge_selected",
-        "vscode.cancel_from_ui"
+        "vscode.cancel_from_ui",
+        "vscode.narrative_progress_visible",
+        "vscode.stage_summaries_understandable",
+        "vscode.correction_rounds_grouped",
+        "vscode.progress_survives_reload",
+        "vscode.attention_action_clear",
+        "vscode.progress_private",
+        "vscode.progress_accessible",
+        "vscode.polling_quiet",
+        "vscode.legacy_item_compatible"
       ]
     },
     "vscode-remote-wsl": {
@@ -52,7 +61,16 @@
         "vscode.mcp_visible",
         "vscode.workspace_trust",
         "wsl.direct_runtime_selected",
-        "vscode.cancel_from_ui"
+        "vscode.cancel_from_ui",
+        "vscode.narrative_progress_visible",
+        "vscode.stage_summaries_understandable",
+        "vscode.correction_rounds_grouped",
+        "vscode.progress_survives_reload",
+        "vscode.attention_action_clear",
+        "vscode.progress_private",
+        "vscode.progress_accessible",
+        "vscode.polling_quiet",
+        "vscode.legacy_item_compatible"
       ]
     },
     "vscode-linux-native": {
@@ -68,7 +86,16 @@
         "vscode.mcp_visible",
         "vscode.workspace_trust",
         "vscode.direct_runtime_selected",
-        "vscode.cancel_from_ui"
+        "vscode.cancel_from_ui",
+        "vscode.narrative_progress_visible",
+        "vscode.stage_summaries_understandable",
+        "vscode.correction_rounds_grouped",
+        "vscode.progress_survives_reload",
+        "vscode.attention_action_clear",
+        "vscode.progress_private",
+        "vscode.progress_accessible",
+        "vscode.polling_quiet",
+        "vscode.legacy_item_compatible"
       ]
     },
     "vscode-windows-native": {
@@ -84,7 +111,16 @@
         "vscode.mcp_visible",
         "vscode.workspace_trust",
         "vscode.direct_runtime_selected",
-        "vscode.cancel_from_ui"
+        "vscode.cancel_from_ui",
+        "vscode.narrative_progress_visible",
+        "vscode.stage_summaries_understandable",
+        "vscode.correction_rounds_grouped",
+        "vscode.progress_survives_reload",
+        "vscode.attention_action_clear",
+        "vscode.progress_private",
+        "vscode.progress_accessible",
+        "vscode.polling_quiet",
+        "vscode.legacy_item_compatible"
       ]
     },
     "vscode-macos-native": {
@@ -100,7 +136,16 @@
         "vscode.mcp_visible",
         "vscode.workspace_trust",
         "vscode.direct_runtime_selected",
-        "vscode.cancel_from_ui"
+        "vscode.cancel_from_ui",
+        "vscode.narrative_progress_visible",
+        "vscode.stage_summaries_understandable",
+        "vscode.correction_rounds_grouped",
+        "vscode.progress_survives_reload",
+        "vscode.attention_action_clear",
+        "vscode.progress_private",
+        "vscode.progress_accessible",
+        "vscode.polling_quiet",
+        "vscode.legacy_item_compatible"
       ]
     },
     "kiro-windows-wsl": {

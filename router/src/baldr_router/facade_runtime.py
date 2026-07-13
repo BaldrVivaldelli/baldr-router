@@ -7,6 +7,13 @@ from .context7_setup import context7_onboarding_plan
 from .discovery.workspace_profile import workspace_profile
 from .evidence import latest_evidence
 from .facade_contract import facade_contract_status, get_facade_intent
+from .phase_deliverables import (
+    DELIVERABLE_INDEX_PAGE_CONTRACT,
+    DELIVERABLE_INDEX_PAGE_VERSION,
+    DELIVERABLE_PAGE_CONTRACT,
+    DELIVERABLE_PAGE_VERSION,
+    PhaseDeliverableError,
+)
 from .qualification import latest_qualification
 from .status import doctor
 from .telemetry import recent_runs
@@ -203,8 +210,31 @@ def status_facade(
     work_item_id: str | None = None,
     work_item_limit: int = 100,
     include_archived: bool = False,
+    workbench_only: bool = False,
 ) -> dict[str, Any]:
     """Return one compact client-neutral status document and console state."""
+
+    service = WorkItemService()
+    workbench = service.summary(
+        workspace_root,
+        limit=work_item_limit,
+        selected_item_id=work_item_id,
+        include_archived=include_archived,
+        include_internal=not workbench_only,
+    )
+    if workbench_only:
+        # The console refreshes while work is active. That hot path must not
+        # rerun provider discovery, login checks, qualification, probes, or
+        # lifecycle verification on every poll. The full status intent remains
+        # the default for existing clients and explicit diagnostics.
+        return {
+            "ok": True,
+            "intent": "status",
+            "view": "workbench",
+            "contract_version": facade_contract_status()["version"],
+            "summary": {"work_item_counts": workbench.get("counts", {})},
+            "workbench": workbench,
+        }
 
     health = doctor(workspace_root)
     context7 = health.get("context7", {})
@@ -218,14 +248,6 @@ def status_facade(
 
     qualification = latest_qualification()
     qualification_result = qualification.get("qualification") or {}
-    service = WorkItemService()
-    workbench = service.summary(
-        workspace_root,
-        limit=work_item_limit,
-        selected_item_id=work_item_id,
-        include_archived=include_archived,
-    )
-
     return {
         "ok": bool(health.get("ok")),
         "intent": "status",
@@ -307,6 +329,13 @@ def run_facade(
     allow_non_git: bool = False,
     attachments: list[dict[str, Any]] | None = None,
     item_config: dict[str, Any] | None = None,
+    phase_stage: str | None = None,
+    phase_round: int | None = None,
+    phase_run_ordinal: int | None = None,
+    phase_cursor: str | None = None,
+    phase_page_size: int = 20,
+    deliverable_cursor: str | None = None,
+    deliverable_page_size: int = 20,
 ) -> dict[str, Any]:
     """Execute or manage a durable item through the frozen ``run`` intention."""
 
@@ -325,6 +354,14 @@ def run_facade(
         "reconcile-item": "reconcile-item",
         "archive": "archive-item",
         "archive-item": "archive-item",
+        "restore": "restore-item",
+        "restore-item": "restore-item",
+        "delete": "delete-item",
+        "delete-item": "delete-item",
+        "inspect-phase": "inspect-item-phase",
+        "inspect-item-phase": "inspect-item-phase",
+        "list-deliverables": "list-item-deliverables",
+        "list-item-deliverables": "list-item-deliverables",
         "execute": "execute",
     }
     action = aliases.get(action, action)
@@ -392,6 +429,69 @@ def run_facade(
                 "intent": "run",
                 "operation": action,
                 "work_item": service.archive(work_item_id),
+            }
+
+        if action == "restore-item":
+            if not work_item_id:
+                raise ValueError("work_item_id is required for restore-item.")
+            return {
+                "ok": True,
+                "intent": "run",
+                "operation": action,
+                "work_item": service.restore(work_item_id),
+            }
+
+        if action == "delete-item":
+            if not work_item_id:
+                raise ValueError("work_item_id is required for delete-item.")
+            return {
+                "ok": True,
+                "intent": "run",
+                "operation": action,
+                "deleted_work_item": service.delete(work_item_id),
+            }
+
+        if action == "inspect-item-phase":
+            if not work_item_id or phase_stage is None or phase_round is None:
+                raise ValueError(
+                    "work_item_id, phase_stage, and phase_round are required for inspect-item-phase."
+                )
+            page = service.inspect_phase(
+                work_item_id,
+                workspace_root=workspace_root,
+                stage=phase_stage,
+                round_number=phase_round,
+                run_ordinal=phase_run_ordinal,
+                cursor=phase_cursor,
+                page_size=phase_page_size,
+            )
+            return {
+                "ok": True,
+                "intent": "run",
+                "operation": action,
+                "contract": DELIVERABLE_PAGE_CONTRACT,
+                "version": DELIVERABLE_PAGE_VERSION,
+                **page,
+            }
+
+        if action == "list-item-deliverables":
+            if not work_item_id:
+                raise ValueError(
+                    "work_item_id is required for list-item-deliverables."
+                )
+            page = service.list_deliverables(
+                work_item_id,
+                workspace_root=workspace_root,
+                cursor=deliverable_cursor,
+                page_size=deliverable_page_size,
+            )
+            return {
+                "ok": True,
+                "intent": "run",
+                "operation": action,
+                "contract": DELIVERABLE_INDEX_PAGE_CONTRACT,
+                "version": DELIVERABLE_INDEX_PAGE_VERSION,
+                **page,
             }
 
         if action == "cancel-item" or (cancel and work_item_id):
@@ -495,6 +595,14 @@ def run_facade(
             except KeyError:
                 pass
         return result
+    except PhaseDeliverableError as exc:
+        return {
+            "ok": False,
+            "intent": "run",
+            "operation": action,
+            "error": {"code": exc.code, "message": str(exc)},
+            "reason": str(exc),
+        }
     except (KeyError, ValueError) as exc:
         return {
             "ok": False,
@@ -535,6 +643,13 @@ def execute_facade_intent(
     allow_non_git: bool = False,
     attachments: list[dict[str, Any]] | None = None,
     item_config: dict[str, Any] | None = None,
+    phase_stage: str | None = None,
+    phase_round: int | None = None,
+    phase_run_ordinal: int | None = None,
+    phase_cursor: str | None = None,
+    phase_page_size: int = 20,
+    deliverable_cursor: str | None = None,
+    deliverable_page_size: int = 20,
 ) -> dict[str, Any]:
     intent = get_facade_intent(intent_id)
     if intent.id == "setup":
@@ -571,5 +686,12 @@ def execute_facade_intent(
             allow_non_git=allow_non_git,
             attachments=attachments,
             item_config=item_config,
+            phase_stage=phase_stage,
+            phase_round=phase_round,
+            phase_run_ordinal=phase_run_ordinal,
+            phase_cursor=phase_cursor,
+            phase_page_size=phase_page_size,
+            deliverable_cursor=deliverable_cursor,
+            deliverable_page_size=deliverable_page_size,
         )
     raise AssertionError(f"Unhandled facade intent: {intent.id}")

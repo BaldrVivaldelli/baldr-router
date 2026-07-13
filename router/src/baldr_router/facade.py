@@ -96,6 +96,7 @@ def facade_status_report(
     work_item_id: str | None = None,
     work_item_limit: int = 100,
     include_archived: bool = False,
+    workbench_only: bool = False,
 ) -> dict[str, Any]:
     result = status_facade(
         workspace_root,
@@ -103,6 +104,7 @@ def facade_status_report(
         work_item_id=work_item_id,
         work_item_limit=work_item_limit,
         include_archived=include_archived,
+        workbench_only=workbench_only,
     )
     result["client"] = client
     result.setdefault(
@@ -143,6 +145,13 @@ def facade_run(
     allow_non_git: bool = False,
     attachments: list[dict[str, Any]] | None = None,
     item_config: dict[str, Any] | None = None,
+    phase_stage: str | None = None,
+    phase_round: int | None = None,
+    phase_run_ordinal: int | None = None,
+    phase_cursor: str | None = None,
+    phase_page_size: int = 20,
+    deliverable_cursor: str | None = None,
+    deliverable_page_size: int = 20,
 ) -> dict[str, Any]:
     result = run_facade(
         workspace_root=workspace_root,
@@ -171,6 +180,13 @@ def facade_run(
         allow_non_git=allow_non_git,
         attachments=attachments,
         item_config=item_config,
+        phase_stage=phase_stage,
+        phase_round=phase_round,
+        phase_run_ordinal=phase_run_ordinal,
+        phase_cursor=phase_cursor,
+        phase_page_size=phase_page_size,
+        deliverable_cursor=deliverable_cursor,
+        deliverable_page_size=deliverable_page_size,
     )
     metadata = result.setdefault("facade", {})
     metadata.update(

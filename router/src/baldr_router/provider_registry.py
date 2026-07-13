@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +9,11 @@ from .codex import codex_found, codex_login_status, codex_version, run_codex_rol
 from .config import RoleConfig, load_config
 from .kiro_cli import kiro_cli_status, run_kiro_role_prompt
 from .provider_api import ProviderAdapter, ProviderCapabilities, ProviderRunRequest
+from .provider_activity import (
+    ProviderActivitySink,
+    emit_provider_activity,
+    generic_activity_for_role,
+)
 from .runtime_guard import provider_recursion_block_reason
 
 
@@ -58,6 +64,7 @@ class CodexProvider:
             session_key=request.session_key,
             resume_session_id=request.resume_session_id,
             extra_env=request.extra_env,
+            activity_sink=request.activity_sink,
         )
 
 
@@ -200,7 +207,16 @@ class ProviderRegistry:
                 "capabilities": capabilities.to_dict(),
             }
 
-        result = adapter.run(request)
+        emit_provider_activity(request.activity_sink, generic_activity_for_role(request.role_name))
+        safe_request = request
+        if request.activity_sink is not None:
+            original_sink = request.activity_sink
+
+            def safe_sink(category: str) -> None:
+                emit_provider_activity(original_sink, category)
+
+            safe_request = replace(request, activity_sink=safe_sink)
+        result = adapter.run(safe_request)
         result.setdefault("provider", adapter.name)
         result.setdefault("role", request.role_name)
         result.setdefault("workflow", request.workflow)
@@ -319,6 +335,7 @@ def run_provider_role(
     durable_run_id: str = "",
     durable_step_id: str = "",
     durable_attempt_id: str = "",
+    activity_sink: ProviderActivitySink | None = None,
 ) -> dict[str, Any]:
     request = ProviderRunRequest(
         role_name=role_name,
@@ -340,6 +357,7 @@ def run_provider_role(
         durable_run_id=durable_run_id,
         durable_step_id=durable_step_id,
         durable_attempt_id=durable_attempt_id,
+        activity_sink=activity_sink,
     )
     return get_provider_registry().run(provider=provider, request=request)
 

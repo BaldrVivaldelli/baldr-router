@@ -108,6 +108,63 @@ def test_work_item_schema_and_private_task_artifact(tmp_path: Path, monkeypatch:
     assert (artifact["inline_text"] is not None) ^ (artifact["storage_path"] is not None)
 
 
+def test_archived_work_items_can_be_restored_or_deleted_with_their_private_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _isolated_runtime(tmp_path, monkeypatch)
+    repo = _git_repo(tmp_path / "repo")
+    monkeypatch.setenv(RUNTIME_ROOTS_ENV, json.dumps([str(repo)]))
+    service = WorkItemService()
+    item = service.create(
+        workspace_root=repo,
+        task="Remove the deprecated dashboard",
+        extra_context="This history must be removable.",
+    )
+    task_artifact_id = item["task_artifact_id"]
+    context_artifact_id = item["extra_context_artifact_id"]
+
+    archived = service.archive(item["id"])
+    assert archived["status"] == "archived"
+    assert archived["allowed_actions"] == ["restore", "delete"]
+    assert service.list(workspace_root=repo) == []
+    archived_rows = service.list(workspace_root=repo, include_archived=True)
+    assert [row["id"] for row in archived_rows] == [item["id"]]
+    assert archived_rows[0]["allowed_actions"] == ["restore", "delete"]
+    public_history = facade_status_report(
+        str(repo),
+        client="vscode-extension",
+        include_archived=True,
+        workbench_only=True,
+    )
+    assert public_history["workbench"]["items"][0]["allowed_actions"] == ["restore", "delete"]
+
+    restored = service.restore(item["id"])
+    assert restored["status"] == "draft"
+    assert restored["allowed_actions"] == ["start", "archive"]
+
+    service.archive(item["id"])
+    deleted = service.delete(item["id"])
+    assert deleted == {"id": item["id"], "deleted": True}
+    with pytest.raises(KeyError):
+        service.get(item["id"])
+    assert service.store.connect().execute(
+        "SELECT 1 FROM artifacts WHERE id IN (?, ?)",
+        (task_artifact_id, context_artifact_id),
+    ).fetchall() == []
+
+
+def test_permanent_deletion_requires_an_archived_work_item(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _isolated_runtime(tmp_path, monkeypatch)
+    repo = _git_repo(tmp_path / "repo")
+    monkeypatch.setenv(RUNTIME_ROOTS_ENV, json.dumps([str(repo)]))
+    item = WorkItemService().create(workspace_root=repo, task="Keep this draft")
+
+    with pytest.raises(ValueError, match="archived"):
+        WorkItemService().delete(item["id"])
+
+
 def test_non_git_mode_requires_explicit_consent_and_is_remembered(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -202,6 +259,38 @@ def test_frozen_run_intent_manages_durable_items_and_dry_run(
     assert planned["facade"]["intent"] == "run"
 
 
+def test_frozen_run_intent_restores_and_deletes_archived_items(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _isolated_runtime(tmp_path, monkeypatch)
+    repo = _git_repo(tmp_path / "repo")
+    monkeypatch.setenv(RUNTIME_ROOTS_ENV, json.dumps([str(repo)]))
+    created = facade_run(
+        str(repo),
+        "Retire temporary diagnostics",
+        client="vscode-extension",
+        work_item_action="create-item",
+    )
+    item_id = created["work_item"]["id"]
+
+    archived = facade_run(
+        str(repo), "", client="vscode-extension", work_item_action="archive-item", work_item_id=item_id
+    )
+    assert archived["work_item"]["status"] == "archived"
+    restored = facade_run(
+        str(repo), "", client="vscode-extension", work_item_action="restore", work_item_id=item_id
+    )
+    assert restored["operation"] == "restore-item"
+    assert restored["work_item"]["status"] == "draft"
+    facade_run(
+        str(repo), "", client="vscode-extension", work_item_action="archive", work_item_id=item_id
+    )
+    deleted = facade_run(
+        str(repo), "", client="vscode-extension", work_item_action="delete-item", work_item_id=item_id
+    )
+    assert deleted["deleted_work_item"] == {"id": item_id, "deleted": True}
+
+
 def test_console_options_are_aliases_over_setup_status_run():
     options = workbench_options()
     commands = {entry["id"] for entry in options["slash_commands"]}
@@ -216,6 +305,8 @@ def test_console_options_are_aliases_over_setup_status_run():
         "cancel",
         "resume",
         "archive",
+        "restore",
+        "delete",
         "setup",
         "help",
     }

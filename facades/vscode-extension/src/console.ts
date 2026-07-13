@@ -9,9 +9,15 @@ import {
   record,
   text,
 } from './runtime.js';
+import {
+  buildPhaseDeliverablePresentations,
+  buildWorkItemPresentation,
+} from './workItemPresentation.js';
 
 const VIEW_TYPE = 'baldr.console';
-const REFRESH_INTERVAL_MS = 2_500;
+const POLL_FAST_MS = 2_500;
+const POLL_STABLE_MS = 5_000;
+const POLL_IDLE_MS = 10_000;
 const MAX_SELECTION_CHARS = 20_000;
 
 type WorkItem = JsonRecord & {
@@ -28,6 +34,12 @@ interface ConsoleMessage {
   itemId?: string;
   action?: string;
   index?: number;
+  stage?: string;
+  round?: number;
+  runOrdinal?: number;
+  cursor?: string;
+  descriptorDigest?: string;
+  requestId?: number;
 }
 
 interface PendingContext {
@@ -169,7 +181,11 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
   private view: vscode.WebviewView | undefined;
   private selectedItemId: string | undefined;
   private refreshTimer: NodeJS.Timeout | undefined;
-  private refreshing = false;
+  private pollDelayMs = POLL_FAST_MS;
+  private refreshPromise: Promise<void> | undefined;
+  private refreshRequested = 0;
+  private refreshCompleted = 0;
+  private interactiveRefreshRequested = false;
   private operationCount = 0;
   private lastStatus: JsonRecord = {};
   private pending: PendingContext = { attachments: [], extraContext: '', selectionContexts: {} };
@@ -188,7 +204,7 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
   }
 
   dispose(): void {
-    if (this.refreshTimer) clearInterval(this.refreshTimer);
+    this.stopPolling();
     for (const disposable of this.disposables) disposable.dispose();
   }
 
@@ -209,31 +225,123 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
       view.webview.onDidReceiveMessage((message: ConsoleMessage) => void this.handleMessage(message)),
       view.onDidChangeVisibility(() => {
         if (view.visible) void this.refresh();
+        else this.stopPolling();
       }),
       view.onDidDispose(() => {
+        this.stopPolling();
         this.view = undefined;
       }),
     );
-    this.refreshTimer ??= setInterval(() => {
-      if (this.view?.visible && this.shouldPoll()) void this.refresh(true);
-    }, REFRESH_INTERVAL_MS);
   }
 
   private shouldPoll(): boolean {
     if (this.operationCount > 0) return true;
     const workbench = record(this.lastStatus.workbench);
-    return asItems(workbench.items).some((item) => ['running', 'cancelling'].includes(text(item.status)));
+    const selected = record(workbench.selected);
+    const selectedProgress = record(selected.progress);
+    return ['running', 'cancelling'].includes(text(selected.status))
+      || ['running', 'finalizing'].includes(text(selectedProgress.overall_state))
+      || asItems(workbench.items).some((item) => ['running', 'cancelling'].includes(text(item.status)));
+  }
+
+  private pollingRevision(): string {
+    const workbench = record(this.lastStatus.workbench);
+    const selected = record(workbench.selected);
+    const progress = record(selected.progress);
+    const selectedRevision = text(progress.revision, '')
+      || `${text(selected.id, '')}:${text(selected.updated_at, '')}:${text(selected.status, '')}`;
+    const listRevision = asItems(workbench.items)
+      .map((item) => {
+        const summary = record(item.progress_summary);
+        return `${text(item.id, '')}:${text(item.status, '')}:${text(item.updated_at, '')}:${text(summary.last_event_at, '')}:${text(summary.activity, '')}`;
+      })
+      .join('|');
+    return `${selectedRevision}|${listRevision}`;
+  }
+
+  private stopPolling(): void {
+    if (this.refreshTimer) clearTimeout(this.refreshTimer);
+    this.refreshTimer = undefined;
+  }
+
+  private schedulePolling(delay = this.pollDelayMs): void {
+    this.stopPolling();
+    if (!this.view?.visible || !this.shouldPoll()) return;
+    this.refreshTimer = setTimeout(() => void this.pollOnce(), delay);
+  }
+
+  private resetPolling(): void {
+    this.pollDelayMs = POLL_FAST_MS;
+    this.schedulePolling();
+  }
+
+  private async pollOnce(): Promise<void> {
+    this.refreshTimer = undefined;
+    if (!this.view?.visible || !this.shouldPoll()) return;
+    const before = this.pollingRevision();
+    await this.refresh(true);
+    if (!this.view?.visible || !this.shouldPoll()) return;
+    const changed = before !== this.pollingRevision();
+    this.pollDelayMs = changed
+      ? POLL_FAST_MS
+      : this.pollDelayMs <= POLL_FAST_MS
+        ? POLL_STABLE_MS
+        : POLL_IDLE_MS;
+    this.schedulePolling();
   }
 
   private async post(message: JsonRecord): Promise<void> {
     if (this.view) await this.view.webview.postMessage(message);
   }
 
+  private statusForView(status: JsonRecord): JsonRecord {
+    const workbench = record(status.workbench);
+    const selected = record(workbench.selected);
+    if (!selected.id) return status;
+    return {
+      ...status,
+      workbench: {
+        ...workbench,
+        selected: {
+          ...selected,
+          presentation: buildWorkItemPresentation(selected),
+        },
+      },
+    };
+  }
+
   async refresh(silent = false): Promise<void> {
-    if (this.refreshing) return;
-    this.refreshing = true;
+    const request = ++this.refreshRequested;
+    if (!silent) this.interactiveRefreshRequested = true;
+    if (!this.refreshPromise) this.refreshPromise = this.drainRefreshes();
+    await this.refreshPromise;
+    // A request can arrive after the drain loop observes an empty queue but
+    // before its promise is cleared. Make that narrow race schedule a trailing
+    // refresh instead of silently losing a selection or operation result.
+    if (this.refreshCompleted < request) {
+      if (!this.refreshPromise) this.refreshPromise = this.drainRefreshes();
+      await this.refreshPromise;
+    }
+  }
+
+  private async drainRefreshes(): Promise<void> {
+    try {
+      while (this.refreshCompleted < this.refreshRequested) {
+        const throughRequest = this.refreshRequested;
+        const silent = !this.interactiveRefreshRequested;
+        this.interactiveRefreshRequested = false;
+        await this.refreshOnce(silent);
+        this.refreshCompleted = throughRequest;
+      }
+    } finally {
+      this.refreshPromise = undefined;
+    }
+  }
+
+  private async refreshOnce(silent: boolean): Promise<void> {
     const root = workspaceRoot();
     if (!root) {
+      this.stopPolling();
       this.lastStatus = {};
       await this.post({
         type: 'state',
@@ -245,10 +353,10 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
           pending: this.pending,
         },
       });
-      this.refreshing = false;
       return;
     }
     if (!vscode.workspace.isTrusted) {
+      this.stopPolling();
       this.lastStatus = {};
       await this.post({
         type: 'state',
@@ -260,7 +368,6 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
           pending: this.pending,
         },
       });
-      this.refreshing = false;
       return;
     }
     try {
@@ -269,16 +376,19 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
       this.lastStatus = status;
       const workbench = record(status.workbench);
       const items = asItems(workbench.items);
-      if (!this.selectedItemId && items[0]?.id) {
-        this.selectedItemId = String(items[0].id);
+      if (!record(workbench.selected).id) {
+        const nextItem = items.find((item) => text(item.status) !== 'archived') ?? items[0];
+        this.selectedItemId = nextItem?.id ? String(nextItem.id) : undefined;
         await this.context.workspaceState.update('baldr.console.selectedItemId', this.selectedItemId);
-        const selectedStatus = await this.runtime.consoleStatus(root, this.selectedItemId);
-        this.lastStatus = selectedStatus;
+        if (this.selectedItemId) {
+          const selectedStatus = await this.runtime.consoleStatus(root, this.selectedItemId);
+          this.lastStatus = selectedStatus;
+        }
       }
       await this.post({
         type: 'state',
         state: {
-          ...this.lastStatus,
+          ...this.statusForView(this.lastStatus),
           workspaceRoot: root,
           trusted: true,
           busy: this.operationCount > 0,
@@ -290,11 +400,15 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
       await this.post({ type: 'error', message: error instanceof Error ? error.message : String(error) });
     } finally {
       if (!silent) await this.post({ type: 'loading', value: false });
-      this.refreshing = false;
+      if (!silent) this.resetPolling();
     }
   }
 
   private async handleMessage(message: ConsoleMessage): Promise<void> {
+    if (
+      this.operationCount > 0
+      && ['submit', 'plusAction', 'chip', 'itemAction'].includes(String(message.type ?? ''))
+    ) return;
     switch (message.type) {
       case 'ready':
       case 'refresh':
@@ -326,6 +440,12 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
       case 'itemAction':
         await this.itemAction(String(message.action ?? ''), message.itemId);
         return;
+      case 'inspectDeliverable':
+        await this.inspectDeliverable(message);
+        return;
+      case 'loadDeliverableIndex':
+        await this.loadDeliverableIndex(message);
+        return;
       case 'openLogs':
         this.output.show(true);
         return;
@@ -346,7 +466,7 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
     }
     const root = this.requireWorkspace();
     const pending = this.consumePendingContext();
-    this.launchOperation('Creando y ejecutando la tarea…', async () => {
+    this.launchOperation('Creando y ejecutando la sesión…', async () => {
       const result = await this.runtime.runFacade('run', {
         workspaceRoot: root,
         task: value,
@@ -431,6 +551,12 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
       case 'archive':
         await this.itemAction('archive', this.selectedItemId);
         return;
+      case 'restore':
+        await this.itemAction('restore', this.selectedItemId);
+        return;
+      case 'delete':
+        await this.itemAction('delete', this.selectedItemId);
+        return;
       case 'help':
         await this.post({ type: 'showHelp' });
         return;
@@ -441,13 +567,18 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
 
   private requireWorkspace(): string {
     const root = workspaceRoot();
-    if (!root) throw new Error('Abrí una carpeta antes de crear una tarea.');
+    if (!root) throw new Error('Abrí una carpeta antes de crear una sesión.');
     if (!vscode.workspace.isTrusted) throw new Error('Autorizá esta carpeta antes de usar Baldr.');
     return root;
   }
 
-  private launchOperation(label: string, operation: () => Promise<JsonRecord>): void {
+  private launchOperation(
+    label: string,
+    operation: () => Promise<JsonRecord>,
+    afterSuccess?: () => Promise<void>,
+  ): void {
     this.operationCount += 1;
+    this.resetPolling();
     void this.post({ type: 'operation', busy: true, label });
     void operation()
       .then(async (result) => {
@@ -460,6 +591,7 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
           const reason = text(result.reason, text(record(result.error).message, 'Baldr no pudo completar la operación.'));
           void vscode.window.showErrorMessage(reason);
         }
+        if (result.ok !== false) await afterSuccess?.();
       })
       .catch((error) => {
         this.output.error(error instanceof Error ? error : new Error(String(error)));
@@ -478,7 +610,7 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
 
     const item = record(result.work_item);
     const choice = await vscode.window.showWarningMessage(
-      'La tarea quedó guardada, pero esta opción necesita un repositorio Git. Podés volver a la protección automática, abrir otra carpeta o trabajar sin protección.',
+      'La sesión quedó guardada, pero esta opción necesita un repositorio Git. Podés volver a la protección automática, abrir otra carpeta o trabajar sin protección.',
       { modal: true },
       'Protección automática',
       'Sin protección',
@@ -491,7 +623,7 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
     if (choice === 'Protección automática') {
       const configured = await this.setSafetyMode('automatic');
       if (configured && item.id) {
-        this.launchOperation('Iniciando la tarea con protección automática…', () => this.runtime.startWorkItem(
+        this.launchOperation('Iniciando la sesión con protección automática…', () => this.runtime.startWorkItem(
           this.requireWorkspace(),
           String(item.id),
         ));
@@ -501,7 +633,7 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
     if (choice === 'Sin protección') {
       const configured = await this.setSafetyMode('non-git');
       if (configured && item.id) {
-        this.launchOperation('Iniciando la tarea sin protección…', () => this.runtime.startWorkItem(
+        this.launchOperation('Iniciando la sesión sin protección…', () => this.runtime.startWorkItem(
           this.requireWorkspace(),
           String(item.id),
         ));
@@ -520,26 +652,54 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
 
   private async itemAction(action: string, itemId = this.selectedItemId): Promise<void> {
     if (!itemId) {
-      void vscode.window.showInformationMessage('Elegí una tarea primero.');
+      void vscode.window.showInformationMessage('Elegí una sesión primero.');
       return;
     }
     const root = this.requireWorkspace();
     if (action === 'start') {
-      this.launchOperation('Iniciando la tarea…', () => this.runtime.startWorkItem(root, itemId));
+      this.launchOperation('Iniciando la sesión…', () => this.runtime.startWorkItem(root, itemId));
       return;
     }
     if (action === 'cancel') {
       const confirm = await vscode.window.showWarningMessage(
-        '¿Querés cancelar esta tarea y detener el trabajo en curso?',
+        '¿Querés cancelar esta sesión y detener el trabajo en curso?',
         { modal: true },
-        'Cancelar tarea',
+        'Cancelar sesión',
       );
-      if (confirm !== 'Cancelar tarea') return;
-      this.launchOperation('Cancelando la tarea…', () => this.runtime.cancelWorkItem(root, itemId));
+      if (confirm !== 'Cancelar sesión') return;
+      this.launchOperation('Cancelando la sesión…', () => this.runtime.cancelWorkItem(root, itemId));
       return;
     }
     if (action === 'archive') {
-      this.launchOperation('Archivando la tarea…', () => this.runtime.archiveWorkItem(root, itemId));
+      this.launchOperation(
+        'Archivando la sesión…',
+        () => this.runtime.archiveWorkItem(root, itemId),
+        () => this.post({ type: 'historyFilter', filter: 'archived' }),
+      );
+      return;
+    }
+    if (action === 'restore') {
+      this.launchOperation(
+        'Restaurando la sesión…',
+        () => this.runtime.restoreWorkItem(root, itemId),
+        () => this.post({ type: 'historyFilter', filter: 'active' }),
+      );
+      return;
+    }
+    if (action === 'delete') {
+      const item = this.selectedItem();
+      const title = text(item?.title, 'esta sesión');
+      const confirmed = await vscode.window.showWarningMessage(
+        `¿Eliminar permanentemente “${title}”? Se borrará su historial y sus entregas, pero no se tocarán archivos de la carpeta.`,
+        { modal: true },
+        'Eliminar permanentemente',
+      );
+      if (confirmed !== 'Eliminar permanentemente') return;
+      this.launchOperation(
+        'Eliminando la sesión…',
+        () => this.runtime.deleteWorkItem(root, itemId),
+        () => this.post({ type: 'historyFilter', filter: 'active' }),
+      );
       return;
     }
     if (action === 'reconcile') {
@@ -548,16 +708,133 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
     }
   }
 
+  private async inspectDeliverable(message: ConsoleMessage): Promise<void> {
+    const itemId = String(message.itemId ?? '');
+    const stage = String(message.stage ?? '');
+    const round = Number(message.round);
+    const runOrdinal = message.runOrdinal === undefined ? undefined : Number(message.runOrdinal);
+    const cursor = String(message.cursor ?? '');
+    const descriptorDigest = String(message.descriptorDigest ?? '').slice(0, 128);
+    const requestId = Number(message.requestId);
+    const responseContext = { itemId, descriptorDigest, requestId };
+    if (
+      !itemId
+      || itemId !== this.selectedItemId
+      || !['planning', 'execution', 'review'].includes(stage)
+      || !Number.isInteger(round)
+      || round < 0
+      || (runOrdinal !== undefined && (!Number.isInteger(runOrdinal) || runOrdinal < 0))
+      || !Number.isSafeInteger(requestId)
+      || requestId < 1
+    ) {
+      await this.post({
+        type: 'deliverableError',
+        ...responseContext,
+        message: 'No pudimos identificar esa entrega.',
+      });
+      return;
+    }
+    try {
+      const result = await this.runtime.inspectWorkItemPhase(
+        this.requireWorkspace(),
+        itemId,
+        stage as 'planning' | 'execution' | 'review',
+        round,
+        { runOrdinal, cursor: cursor || undefined, pageSize: 30 },
+      );
+      const descriptor = record(result.deliverable);
+      const page = record(result.page);
+      if (result.ok !== true || !descriptor.stage || !Array.isArray(page.entries)) {
+        throw new Error('phase deliverable unavailable');
+      }
+      const returnedDigest = String(descriptor.digest ?? '');
+      if (descriptorDigest && returnedDigest && descriptorDigest !== returnedDigest) {
+        throw new Error('phase deliverable changed');
+      }
+      await this.post({
+        type: 'deliverableResult',
+        ...responseContext,
+        deliverable: {
+          ...descriptor,
+          contract: result.contract,
+          version: result.version,
+          sections: Array.isArray(result.sections) ? result.sections : [],
+          page,
+          redaction: record(result.redaction),
+        },
+        append: Boolean(cursor),
+      });
+    } catch {
+      this.output.warn('Baldr could not load the requested public phase deliverable.');
+      await this.post({
+        type: 'deliverableError',
+        ...responseContext,
+        message: 'No pudimos abrir la entrega. Probá nuevamente.',
+      });
+    }
+  }
+
+  private async loadDeliverableIndex(message: ConsoleMessage): Promise<void> {
+    const itemId = String(message.itemId ?? '');
+    const cursor = String(message.cursor ?? '');
+    const requestId = Number(message.requestId);
+    const responseContext = { itemId, cursor, requestId };
+    if (
+      !itemId
+      || itemId !== this.selectedItemId
+      || !cursor
+      || !Number.isSafeInteger(requestId)
+      || requestId < 1
+    ) {
+      await this.post({
+        type: 'deliverableIndexError',
+        ...responseContext,
+        message: 'No pudimos identificar las entregas anteriores.',
+      });
+      return;
+    }
+    try {
+      const result = await this.runtime.listWorkItemDeliverables(
+        this.requireWorkspace(),
+        itemId,
+        { cursor, pageSize: 50 },
+      );
+      const page = record(result.page);
+      if (
+        result.ok !== true
+        || result.contract !== 'baldr-phase-deliverable-index-page'
+        || Number(result.version) !== 1
+        || !Array.isArray(result.items)
+        || typeof page.has_more !== 'boolean'
+      ) {
+        throw new Error('phase deliverable index unavailable');
+      }
+      await this.post({
+        type: 'deliverableIndexResult',
+        ...responseContext,
+        items: buildPhaseDeliverablePresentations(result.items),
+        page,
+      });
+    } catch {
+      this.output.warn('Baldr could not load the requested public phase deliverable index.');
+      await this.post({
+        type: 'deliverableIndexError',
+        ...responseContext,
+        message: 'No pudimos cargar las entregas anteriores. Probá nuevamente.',
+      });
+    }
+  }
+
   private async createDraft(task?: string): Promise<void> {
     const root = this.requireWorkspace();
     const value = task ?? await vscode.window.showInputBox({
-      title: 'Guardar una tarea para después',
+      title: 'Guardar una sesión para después',
       prompt: 'Escribí qué necesitás',
       ignoreFocusOut: true,
     });
     if (!value?.trim()) return;
     const pending = this.consumePendingContext();
-    const result = await this.withProgress('Guardando la tarea…', () => this.runtime.createWorkItem(
+    const result = await this.withProgress('Guardando la sesión…', () => this.runtime.createWorkItem(
       root,
       value.trim(),
       { extraContext: pending.extraContext, attachments: pending.attachments },
@@ -570,16 +847,16 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
 
   private async openPlusMenu(): Promise<void> {
     const choice = await vscode.window.showQuickPick([
-      { id: 'draft', label: '$(add) Guardar para después', description: 'Crear una tarea sin empezarla' },
-      { id: 'file', label: '$(file) Agregar el archivo abierto', description: 'Usarlo como referencia para la tarea' },
+      { id: 'draft', label: '$(add) Guardar para después', description: 'Crear una sesión sin empezarla' },
+      { id: 'file', label: '$(file) Agregar el archivo abierto', description: 'Usarlo como referencia para el pedido' },
       { id: 'selection', label: '$(selection) Agregar el texto seleccionado', description: 'Usar solamente la parte marcada' },
-      { id: 'path', label: '$(folder-opened) Agregar archivos o carpetas', description: 'Sumar material útil para la tarea' },
+      { id: 'path', label: '$(folder-opened) Agregar archivos o carpetas', description: 'Sumar material útil para el pedido' },
       { id: 'git', label: '$(shield) Protección de cambios', description: 'Elegir cómo guardar y recuperar el trabajo' },
       { id: 'preset', label: '$(dashboard) Nivel de detalle', description: 'Rápido, estándar, detallado o a medida' },
       { id: 'roles', label: '$(organization) Equipo de Baldr', description: 'Elegir cómo se reparte el trabajo' },
       { id: 'profile-create', label: '$(tools) Crear una configuración avanzada', description: 'Elegir proveedor y modelo paso a paso' },
       { id: 'context', label: '$(sparkle) Ayuda adicional', description: 'Buscar información útil cuando haga falta' },
-      { id: 'status', label: '$(refresh) Actualizar', description: 'Volver a cargar las tareas y su estado' },
+      { id: 'status', label: '$(refresh) Actualizar', description: 'Volver a cargar las sesiones y su estado' },
       { id: 'logs', label: '$(output) Ver detalles técnicos', description: 'Abrir el registro de Baldr' },
     ], {
       title: 'Baldr',
@@ -667,7 +944,7 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
     const current = text(preference.context_mode, 'auto');
     const selected = await vscode.window.showQuickPick([
       { id: 'auto', label: 'Automática', description: 'Baldr busca información adicional cuando puede ayudar' },
-      { id: 'on', label: 'Siempre activa', description: 'Busca información adicional para cada tarea' },
+      { id: 'on', label: 'Siempre activa', description: 'Busca información adicional para cada pedido' },
       { id: 'off', label: 'Desactivada', description: 'No busca información adicional' },
     ], { title: 'Ayuda adicional', placeHolder: `Actual: ${contextModeLabel(current)}`, ignoreFocusOut: true });
     if (selected) await this.setContextMode(selected.id as 'auto' | 'on' | 'off');
@@ -1060,14 +1337,14 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
           : 'Tomar como válidos los cambios que ya están en la carpeta',
       },
       { id: 'discard_worktree', label: 'Descartar los cambios interrumpidos', description: 'Eliminar la copia aislada que no se terminó' },
-      { id: 'mark_failed', label: 'Dar la tarea por fallida', description: 'Detener la recuperación y conservar los detalles' },
+      { id: 'mark_failed', label: 'Dar la sesión por fallida', description: 'Detener la recuperación y conservar los detalles' },
     ].filter((option) => actions.includes(option.id));
     if (!options.length) {
-      void vscode.window.showInformationMessage('Esta tarea no necesita ninguna acción de recuperación.');
+      void vscode.window.showInformationMessage('Esta sesión no necesita ninguna acción de recuperación.');
       return;
     }
     const selected = await vscode.window.showQuickPick(options, {
-      title: 'Recuperar la tarea',
+      title: 'Recuperar la sesión',
       ignoreFocusOut: true,
     });
     if (!selected) return;
@@ -1089,7 +1366,7 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
       });
       return;
     }
-    this.launchOperation('Recuperando la tarea…', () => this.runtime.reconcileWorkItem(root, itemId, selected.id));
+    this.launchOperation('Recuperando la sesión…', () => this.runtime.reconcileWorkItem(root, itemId, selected.id));
   }
 
   private async attachCurrentFile(): Promise<void> {
@@ -1174,7 +1451,13 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
 <title>Baldr</title>
 <style>
-:root { color-scheme: light dark; }
+:root {
+  color-scheme: light dark;
+  --baldr-content-width: 720px;
+  --baldr-surface: color-mix(in srgb, var(--vscode-editorWidget-background, var(--vscode-sideBar-background)) 72%, transparent);
+  --baldr-warning-accent: var(--vscode-editorWarning-foreground, var(--vscode-inputValidation-warningBorder, var(--vscode-testing-iconFailed)));
+  --baldr-error-accent: var(--vscode-editorError-foreground, var(--vscode-inputValidation-errorBorder, var(--vscode-testing-iconFailed)));
+}
 * { box-sizing: border-box; }
 body { margin: 0; height: 100vh; overflow: hidden; color: var(--vscode-foreground); background: var(--vscode-sideBar-background); font: 13px/1.4 var(--vscode-font-family); }
 button, textarea { font: inherit; }
@@ -1182,36 +1465,148 @@ button { color: inherit; -webkit-tap-highlight-color: transparent; }
 button:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
 #root { height: 100%; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; }
 .header { padding: 12px 16px 8px; border-bottom: 1px solid var(--vscode-sideBar-border, transparent); }
+.header-row, .history-panel { width: 100%; max-width: var(--baldr-content-width); margin-left: auto; margin-right: auto; }
 .header-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .header-actions { display: flex; align-items: center; justify-content: center; gap: 2px; }
 .heading { font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; opacity: .8; }
 .icon-button { display: inline-grid; place-items: center; border: 0; background: transparent; border-radius: 6px; width: 28px; height: 28px; padding: 0; cursor: pointer; color: var(--vscode-icon-foreground, var(--vscode-foreground)); opacity: .82; }
 .icon-button:hover { background: var(--vscode-toolbar-hoverBackground); opacity: 1; }
 .button-icon { display: block; width: 16px; height: 16px; fill: currentColor; pointer-events: none; }
-.task-list { margin-top: 5px; max-height: 168px; overflow: auto; }
-.view-all { width: 100%; border: 0; background: transparent; color: var(--vscode-textLink-foreground); text-align: left; padding: 5px 4px; cursor: pointer; font-size: 11px; }
-.view-all:hover { text-decoration: underline; }
-.task-empty { padding: 8px 4px; color: var(--vscode-descriptionForeground); }
-.task { width: 100%; display: grid; grid-template-columns: 13px minmax(0,1fr) auto; gap: 7px; align-items: center; text-align: left; border: 0; padding: 7px 4px; background: transparent; border-radius: 5px; cursor: pointer; }
+.history-panel[hidden] { display: none; }
+.history-toggle-icon { transition: transform 120ms ease; }
+.history-toggle[aria-expanded="true"] .history-toggle-icon { transform: rotate(180deg); }
+.history-controls { display: flex; gap: 4px; margin-top: 8px; }
+.history-filter { flex: 1 1 0; min-width: 0; min-height: 26px; overflow: hidden; border: 1px solid var(--vscode-widget-border); border-radius: 5px; padding: 3px 5px; background: transparent; color: var(--vscode-descriptionForeground); cursor: pointer; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.history-filter:hover { background: var(--vscode-list-hoverBackground); color: var(--vscode-foreground); }
+.history-filter[aria-pressed="true"] { border-color: var(--vscode-focusBorder); background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
+.history-search { width: 100%; margin-top: 6px; border: 1px solid var(--vscode-input-border, var(--vscode-widget-border)); border-radius: 5px; padding: 5px 7px; color: var(--vscode-input-foreground); background: var(--vscode-input-background); font: inherit; font-size: 11px; }
+.history-search:focus { border-color: var(--vscode-focusBorder); outline: 0; }
+.task-list { margin-top: 6px; max-height: min(30vh, 240px); overflow: auto; }
+.task-empty { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 4px; color: var(--vscode-descriptionForeground); }
+.task-empty-action { flex: none; border: 0; padding: 2px 0; background: transparent; color: var(--vscode-textLink-foreground); cursor: pointer; font-size: 10px; }
+.task-empty-action:hover { color: var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground)); text-decoration: underline; }
+.task-wrap { display: grid; grid-template-columns: minmax(0, 1fr) 28px; align-items: start; border-radius: 6px; }
+.task { width: 100%; display: grid; grid-template-columns: 13px minmax(0,1fr); gap: 7px; align-items: start; text-align: left; border: 0; padding: 8px 4px; background: transparent; border-radius: 6px; cursor: pointer; }
 .task:hover, .task.selected { background: var(--vscode-list-hoverBackground); }
 .task.selected { outline: 1px solid var(--vscode-focusBorder); }
-.task-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.task-main { min-width: 0; }
+.task-title { display: block; overflow: hidden; color: var(--vscode-foreground); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.task-summary { display: block; margin-top: 1px; overflow: hidden; color: var(--vscode-descriptionForeground); font-size: 10px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+.task-meta { display: flex; min-width: 0; gap: 5px; margin-top: 3px; align-items: center; color: var(--vscode-descriptionForeground); font-size: 10px; }
+.task-meta-status { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-meta-time { flex: none; }
+.task-menu { width: 28px; height: 28px; margin-top: 3px; border: 0; border-radius: 5px; padding: 0; background: transparent; color: var(--vscode-descriptionForeground); cursor: pointer; font-size: 16px; line-height: 1; }
+.task-menu:hover, .task-menu[aria-expanded="true"] { background: var(--vscode-toolbar-hoverBackground); color: var(--vscode-foreground); }
+.task-actions { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 4px; padding: 1px 4px 7px 24px; }
+.task-action { min-height: 25px; border: 1px solid var(--vscode-widget-border); border-radius: 5px; padding: 3px 6px; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); cursor: pointer; font-size: 10px; }
+.task-action:hover { background: var(--vscode-button-secondaryHoverBackground, var(--vscode-toolbar-hoverBackground)); }
+.task-action.danger { border-color: var(--baldr-error-accent); }
 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--vscode-descriptionForeground); }
+.task .dot { margin-top: 5px; }
 .dot.running { background: var(--vscode-progressBar-background); box-shadow: 0 0 0 2px color-mix(in srgb, var(--vscode-progressBar-background) 25%, transparent); }
 .dot.completed { background: var(--vscode-testing-iconPassed); }
 .dot.failed, .dot.needs_attention { background: var(--vscode-testing-iconFailed); }
 .dot.draft, .dot.cancelled { background: var(--vscode-descriptionForeground); }
-.status-text { font-size: 10px; opacity: .65; }
 .content { min-height: 0; overflow: auto; padding: 16px; position: relative; }
+.content-background { width: 100%; max-width: var(--baldr-content-width); margin: 0 auto; }
 .empty { min-height: 100%; display: grid; place-items: center; text-align: center; color: var(--vscode-descriptionForeground); }
 .empty-inner { max-width: 330px; line-height: 1.5; }
 .empty-mark { display: grid; place-items: center; margin-bottom: 14px; color: var(--vscode-descriptionForeground); opacity: .72; }
 .empty-logo { display: block; width: 34px; height: 34px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .empty-title { color: var(--vscode-foreground); font-weight: 600; margin-bottom: 3px; }
 .empty-detail { color: var(--vscode-descriptionForeground); }
-.item-title { font-size: 15px; font-weight: 600; margin: 0 0 3px; }
+.item-title { font-size: 16px; font-weight: 650; margin: 0 0 4px; line-height: 1.3; }
 .item-meta { display: flex; flex-wrap: wrap; gap: 6px; font-size: 11px; color: var(--vscode-descriptionForeground); }
-.task-body { margin: 12px 0; white-space: pre-wrap; line-height: 1.45; }
+.task-body { margin: 12px 0; white-space: pre-wrap; line-height: 1.45; overflow-wrap: anywhere; }
+.session-section { margin-top: 12px; border: 1px solid var(--vscode-widget-border); border-radius: 9px; background: var(--baldr-surface); }
+.session-section > summary { padding: 9px 11px; color: var(--vscode-foreground); cursor: pointer; font-size: 11px; font-weight: 600; }
+.session-section[open] > summary { border-bottom: 1px solid var(--vscode-widget-border); }
+.session-section-body { padding: 0 11px 11px; }
+.session-section .stage-list { margin-bottom: 0; }
+.sr-only { position: absolute !important; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+.now-card, .result-card, .attention-card { min-width: 0; margin: 14px 0; padding: 12px; border: 1px solid var(--vscode-widget-border); border-radius: 10px; background: var(--baldr-surface); overflow-wrap: anywhere; }
+.now-card { border-color: color-mix(in srgb, var(--vscode-progressBar-background) 48%, var(--vscode-widget-border)); }
+.attention-card, .result-card.warning { border-color: var(--baldr-warning-accent); border-left-width: 4px; }
+.result-card.positive { border-color: color-mix(in srgb, var(--vscode-testing-iconPassed) 48%, var(--vscode-widget-border)); }
+.refresh-error { margin: 10px 0; padding: 10px; border: 1px solid var(--baldr-error-accent); border-left-width: 4px; border-radius: 8px; background: var(--baldr-surface); }
+.refresh-error-title { font-weight: 650; }
+.refresh-error-copy { margin: 4px 0 9px; color: var(--vscode-descriptionForeground); }
+.card-eyebrow { margin-bottom: 3px; color: var(--vscode-descriptionForeground); font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.attention-card .card-eyebrow, .result-card.warning .card-eyebrow { color: var(--baldr-warning-accent); }
+.card-title { margin: 0; font-size: 14px; font-weight: 650; line-height: 1.3; }
+.card-copy { margin: 5px 0 0; color: var(--vscode-descriptionForeground); line-height: 1.45; white-space: pre-wrap; }
+.last-update { margin-top: 8px; color: var(--vscode-descriptionForeground); font-size: 10px; }
+.stage-strip { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; margin-top: 11px; }
+.stage-strip-item { min-width: 0; padding-top: 6px; border-top: 2px solid var(--vscode-widget-border); color: var(--vscode-descriptionForeground); font-size: 10px; overflow-wrap: anywhere; }
+.stage-strip-item.active { border-color: var(--vscode-progressBar-background); color: var(--vscode-foreground); }
+.stage-strip-item.complete { border-color: var(--vscode-testing-iconPassed); color: var(--vscode-foreground); }
+.stage-strip-item.attention { border-color: var(--vscode-testing-iconFailed); color: var(--vscode-foreground); }
+.stage-strip-icon { margin-right: 3px; font-weight: 700; }
+.recent-milestone { display: flex; gap: 6px; margin-top: 9px; color: var(--vscode-descriptionForeground); font-size: 11px; }
+.stage-milestones { margin-top: 11px; }
+.stage-milestones-title { margin: 0 0 5px; font-size: 11px; font-weight: 650; }
+.stage-milestones-list { list-style: none; margin: 0; padding: 0; }
+.stage-milestone { display: grid; grid-template-columns: 14px minmax(0, 1fr); gap: 5px; margin: 5px 0; color: var(--vscode-descriptionForeground); font-size: 11px; }
+.stage-milestone-copy { min-width: 0; }
+.stage-milestone-evidence { display: block; margin-top: 1px; font-size: 10px; opacity: .78; }
+.stage-deliverables { margin-top: 11px; }
+.stage-deliverables-title { margin: 0 0 5px; font-size: 11px; font-weight: 650; }
+.stage-deliverable-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; margin: 7px 0; }
+.stage-deliverable-copy { display: block; flex: 1; min-width: 0; color: var(--vscode-descriptionForeground); font-size: 10px; overflow-wrap: anywhere; }
+.stage-deliverable-name { display: block; color: var(--vscode-foreground); font-weight: 650; }
+.stage-deliverable-preview, .stage-deliverable-note { display: block; margin-top: 2px; }
+.stage-deliverable-status { flex: none; color: var(--vscode-descriptionForeground); font-size: 10px; }
+.deliverable-index { display: grid; justify-items: center; gap: 5px; margin: 12px 0; text-align: center; }
+.deliverable-index-note { color: var(--vscode-descriptionForeground); font-size: 10px; }
+.deliverable-panel { position: fixed; z-index: 30; inset: 8px 8px 132px 8px; display: flex; flex-direction: column; min-width: 0; border: 1px solid var(--vscode-widget-border); border-radius: 10px; background: var(--vscode-editorWidget-background, var(--vscode-sideBar-background)); box-shadow: 0 8px 28px var(--vscode-widget-shadow); }
+.deliverable-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; padding: 12px; border-bottom: 1px solid var(--vscode-widget-border); }
+.deliverable-title { margin: 0; font-size: 14px; }
+.deliverable-subtitle { margin-top: 3px; color: var(--vscode-descriptionForeground); font-size: 10px; }
+.deliverable-body { min-height: 0; overflow: auto; padding: 12px; }
+.deliverable-note { margin: 0 0 10px; color: var(--vscode-descriptionForeground); font-size: 11px; }
+.deliverable-section { margin: 0 0 14px; }
+.deliverable-section-title { margin: 0 0 5px; font-size: 12px; }
+.deliverable-entries { margin: 0; padding-left: 18px; }
+.deliverable-entry { margin: 4px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.deliverable-footer { display: flex; justify-content: center; padding: 10px 12px; border-top: 1px solid var(--vscode-widget-border); }
+.stage-list { display: grid; gap: 8px; margin: 12px 0; }
+.stage-card { min-width: 0; border: 1px solid var(--vscode-widget-border); border-radius: 9px; overflow: hidden; background: color-mix(in srgb, var(--vscode-sideBar-background) 72%, var(--vscode-input-background)); }
+.stage-toggle { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; align-items: center; width: 100%; min-width: 0; gap: 7px; padding: 10px; border: 0; color: inherit; text-align: left; background: transparent; cursor: pointer; }
+.stage-toggle:hover { background: var(--vscode-list-hoverBackground); }
+.stage-state-icon { display: grid; place-items: center; width: 18px; height: 18px; border: 1px solid var(--vscode-widget-border); border-radius: 50%; color: var(--vscode-descriptionForeground); font-size: 10px; font-weight: 700; }
+.stage-card.active .stage-state-icon { border-color: var(--vscode-progressBar-background); color: var(--vscode-progressBar-background); }
+.stage-card.complete .stage-state-icon { border-color: var(--vscode-testing-iconPassed); color: var(--vscode-testing-iconPassed); }
+.stage-card.attention .stage-state-icon { border-color: var(--vscode-testing-iconFailed); color: var(--vscode-testing-iconFailed); }
+.stage-heading { min-width: 0; }
+.stage-title { display: block; font-weight: 650; }
+.stage-subtitle { display: block; color: var(--vscode-descriptionForeground); font-size: 10px; line-height: 1.35; }
+.stage-chevron { color: var(--vscode-descriptionForeground); font-size: 11px; transition: transform 120ms ease; }
+.stage-toggle[aria-expanded="true"] .stage-chevron { transform: rotate(90deg); }
+.stage-body { min-width: 0; padding: 0 10px 11px 37px; overflow-wrap: anywhere; }
+.stage-body[hidden] { display: none; }
+.stage-status { color: var(--vscode-descriptionForeground); font-size: 11px; font-weight: 600; }
+.stage-duration { margin-top: 2px; color: var(--vscode-descriptionForeground); font-size: 10px; }
+.stage-duration:empty { display: none; }
+.stage-purpose { margin: 4px 0 0; line-height: 1.45; }
+.report-summary { margin: 9px 0 0; padding-left: 9px; border-left: 2px solid var(--vscode-widget-border); line-height: 1.45; white-space: pre-wrap; }
+.facts { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 9px; }
+.fact { padding: 2px 6px; border: 1px solid var(--vscode-widget-border); border-radius: 999px; color: var(--vscode-descriptionForeground); font-size: 10px; }
+.fact.positive { border-color: color-mix(in srgb, var(--vscode-testing-iconPassed) 45%, var(--vscode-widget-border)); }
+.fact.warning, .fact.danger { border-color: var(--baldr-warning-accent); color: var(--vscode-foreground); }
+.report-section { margin-top: 11px; }
+.report-section-title { margin: 0 0 4px; font-size: 11px; font-weight: 650; }
+.report-section ul { margin: 0; padding-left: 17px; }
+.report-section li { margin: 3px 0; white-space: pre-wrap; }
+.report-section.warning, .report-section.danger { color: var(--vscode-foreground); }
+.disclosure { margin-top: 10px; border-top: 1px solid var(--vscode-widget-border); padding-top: 7px; }
+.disclosure summary { color: var(--vscode-textLink-foreground); font-size: 11px; cursor: pointer; }
+.history-row { margin-top: 7px; }
+.history-label { font-size: 11px; font-weight: 600; }
+.history-copy, .technical-value { color: var(--vscode-descriptionForeground); font-size: 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.technical-grid { display: grid; gap: 7px; margin-top: 8px; }
+.technical-label { color: var(--vscode-descriptionForeground); font-size: 10px; font-weight: 600; text-transform: capitalize; }
+.result-card .facts { margin-bottom: 4px; }
+.attention-action { display: flex; justify-content: center; margin-top: 10px; }
 .timeline { border-left: 1px solid var(--vscode-widget-border); margin: 14px 0 10px 6px; padding-left: 14px; }
 .phase { position: relative; padding: 0 0 14px; }
 .phase::before { content: ''; position: absolute; width: 8px; height: 8px; border-radius: 50%; left: -19px; top: 3px; background: var(--vscode-descriptionForeground); }
@@ -1220,13 +1615,13 @@ button:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-off
 .phase.failed::before, .phase.blocked::before, .phase.needs_changes::before { background: var(--vscode-testing-iconFailed); }
 .phase-name { font-weight: 600; text-transform: capitalize; }
 .phase-detail { font-size: 11px; color: var(--vscode-descriptionForeground); margin-top: 2px; }
-.notice { border: 1px solid var(--vscode-inputValidation-warningBorder); background: var(--vscode-inputValidation-warningBackground); padding: 9px; border-radius: 6px; margin: 10px 0; }
-.actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-start; gap: 8px; margin-top: 14px; }
+.notice { border: 1px solid var(--baldr-warning-accent); border-left-width: 4px; background: var(--baldr-surface); padding: 9px; border-radius: 6px; margin: 10px 0; }
+.actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px; margin-top: 14px; }
 .action { display: inline-flex; min-height: 28px; align-items: center; justify-content: center; border: 1px solid var(--vscode-button-border, transparent); border-radius: 6px; padding: 4px 10px; cursor: pointer; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
 .action:hover { background: var(--vscode-button-secondaryHoverBackground, var(--vscode-toolbar-hoverBackground)); }
 .action.primary { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
 .composer { position: relative; padding: 10px 16px 12px; background: var(--vscode-sideBar-background); }
-.input-shell { border: 1px solid var(--vscode-input-border, var(--vscode-widget-border)); background: var(--vscode-input-background); border-radius: 16px; padding: 10px 11px 9px; box-shadow: 0 3px 12px rgba(0,0,0,.12); transition: border-color 120ms ease, box-shadow 120ms ease; }
+.input-shell { width: 100%; max-width: var(--baldr-content-width); margin: 0 auto; border: 1px solid var(--vscode-input-border, var(--vscode-widget-border)); background: var(--vscode-input-background); border-radius: 16px; padding: 10px 11px 9px; box-shadow: 0 3px 12px rgba(0,0,0,.12); transition: border-color 120ms ease, box-shadow 120ms ease; }
 .input-shell:focus-within { border-color: var(--vscode-focusBorder); box-shadow: 0 3px 12px rgba(0,0,0,.12), 0 0 0 1px color-mix(in srgb, var(--vscode-focusBorder) 20%, transparent); }
 textarea { display: block; width: 100%; min-height: 44px; max-height: 150px; resize: none; border: 0; outline: none; background: transparent; color: var(--vscode-input-foreground); padding: 3px 4px 8px; line-height: 1.45; }
 textarea::placeholder { color: var(--vscode-input-placeholderForeground); opacity: 1; }
@@ -1249,7 +1644,7 @@ textarea::placeholder { color: var(--vscode-input-placeholderForeground); opacit
 .attachment-kind { color: var(--vscode-descriptionForeground); font-size: 10px; }
 .remove-attachment { position: absolute; top: 4px; right: 4px; display: grid; place-items: center; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--vscode-descriptionForeground); cursor: pointer; }
 .remove-attachment:hover { color: var(--vscode-foreground); background: var(--vscode-toolbar-hoverBackground); }
-.plus-menu { position: absolute; left: 16px; right: 16px; bottom: calc(100% + 8px); display: none; max-height: min(520px, calc(100vh - 150px)); overflow: auto; padding: 10px; border: 1px solid var(--vscode-widget-border); border-radius: 12px; background: var(--vscode-quickInput-background); box-shadow: 0 -3px 18px var(--vscode-widget-shadow); z-index: 20; }
+.plus-menu { position: absolute; left: 50%; right: auto; width: calc(100% - 32px); max-width: var(--baldr-content-width); transform: translateX(-50%); bottom: calc(100% + 8px); display: none; max-height: min(520px, calc(100vh - 150px)); overflow: auto; padding: 10px; border: 1px solid var(--vscode-widget-border); border-radius: 12px; background: var(--vscode-quickInput-background); box-shadow: 0 -3px 18px var(--vscode-widget-shadow); z-index: 20; }
 .plus-menu.visible { display: block; }
 .plus-menu-heading, .plus-menu-group { color: var(--vscode-descriptionForeground); font-size: 11px; font-weight: 600; margin: 0 3px 5px; }
 .plus-menu-group { margin-top: 10px; }
@@ -1262,7 +1657,7 @@ textarea::placeholder { color: var(--vscode-input-placeholderForeground); opacit
 .plus-empty { padding: 13px 8px 5px; color: var(--vscode-descriptionForeground); text-align: center; font-size: 11px; }
 .plus-filter { width: 100%; margin-top: 10px; border: 1px solid var(--vscode-input-border, transparent); border-radius: 6px; outline: 0; padding: 7px 9px; color: var(--vscode-input-foreground); background: var(--vscode-input-background); }
 .plus-filter:focus { border-color: var(--vscode-focusBorder); }
-.slash { position: absolute; left: 10px; right: 10px; bottom: 77px; max-height: 220px; overflow: auto; border: 1px solid var(--vscode-widget-border); background: var(--vscode-quickInput-background); box-shadow: 0 5px 18px var(--vscode-widget-shadow); border-radius: 7px; z-index: 10; display: none; }
+.slash { position: absolute; left: 50%; right: auto; width: calc(100% - 32px); max-width: var(--baldr-content-width); transform: translateX(-50%); bottom: 77px; max-height: 220px; overflow: auto; border: 1px solid var(--vscode-widget-border); background: var(--vscode-quickInput-background); box-shadow: 0 5px 18px var(--vscode-widget-shadow); border-radius: 7px; z-index: 10; display: none; }
 .slash.visible { display: block; }
 .slash-item { padding: 7px 9px; cursor: pointer; display: flex; gap: 8px; }
 .slash-item:hover, .slash-item.active { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
@@ -1276,55 +1671,78 @@ textarea::placeholder { color: var(--vscode-input-placeholderForeground); opacit
 }
 @media (max-width: 420px) {
   .header, .composer { padding-left: 10px; padding-right: 10px; }
-  .plus-menu { left: 10px; right: 10px; }
+  .plus-menu, .slash { width: calc(100% - 20px); }
   .composer-row { gap: 5px; }
   .chip { padding-left: 5px; padding-right: 5px; }
   .chip[data-chip="context"] { display: none; }
 }
 @media (max-width: 300px) {
   .chip[data-chip="preset"] { display: none; }
+  .content { padding-left: 10px; padding-right: 10px; }
+  .now-card, .result-card, .attention-card { padding: 10px; }
+  .stage-toggle { grid-template-columns: 18px minmax(0, 1fr) auto; padding: 9px 8px; }
+  .stage-body { padding-left: 33px; padding-right: 8px; }
+  .stage-strip { gap: 3px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .loading { animation: none; }
   .input-shell { transition: none; }
+  .stage-chevron { transition: none; }
+  .history-toggle-icon { transition: none; }
+}
+@media (forced-colors: active) {
+  .now-card, .result-card, .attention-card, .stage-card, .refresh-error, .deliverable-panel, .session-section { border: 1px solid CanvasText; }
+  .stage-strip-item.active, .stage-strip-item.complete { border-color: Highlight; }
+  .action.primary, .send { border: 1px solid ButtonText; }
 }
 </style>
 </head>
 <body>
 <div id="root">
-  <section class="header">
+  <div class="sr-only" id="liveStatus" role="status" aria-live="polite" aria-atomic="true"></div>
+  <section class="header" id="header">
     <div class="header-row">
-      <div class="heading">Tus tareas</div>
+      <div class="heading">Tus sesiones</div>
       <div class="header-actions">
-        <button type="button" class="icon-button" id="refresh" title="Actualizar" aria-label="Actualizar tareas"><svg class="button-icon" viewBox="0 0 16 16" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" d="M13 8a5 5 0 1 1-1.46-3.54L13 5.92M13 3v3h-3"/></svg></button>
+        <button type="button" class="icon-button history-toggle" id="historyToggle" title="Ocultar historial" aria-label="Ocultar historial de sesiones" aria-expanded="true" aria-controls="historyPanel"><svg class="button-icon history-toggle-icon" viewBox="0 0 16 16" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round" d="m4.5 6 3.5 3.5L11.5 6"/></svg></button>
+        <button type="button" class="icon-button" id="refresh" title="Actualizar" aria-label="Actualizar sesiones"><svg class="button-icon" viewBox="0 0 16 16" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" d="M13 8a5 5 0 1 1-1.46-3.54L13 5.92M13 3v3h-3"/></svg></button>
         <button type="button" class="icon-button" id="configure" title="Opciones de Baldr" aria-label="Opciones de Baldr"><svg class="button-icon" viewBox="0 0 16 16" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.15" stroke-linejoin="round" d="M6.8 2h2.4l.42 1.55 1.25.72 1.55-.42 1.2 2.08-1.13 1.13v1.45l1.13 1.13-1.2 2.08-1.55-.42-1.25.72L9.2 13.6H6.8l-.42-1.58-1.25-.72-1.55.42-1.2-2.08 1.13-1.13V7.06L2.38 5.93l1.2-2.08 1.55.42 1.25-.72L6.8 2Z"/><circle cx="8" cy="7.79" r="2.15" fill="none" stroke="currentColor" stroke-width="1.15"/></svg></button>
       </div>
     </div>
-    <div class="task-list" id="tasks"></div>
+    <div class="history-panel" id="historyPanel">
+      <div class="history-controls" role="group" aria-label="Filtrar historial de sesiones">
+        <button type="button" class="history-filter" data-history-filter="active" data-history-label="Activas" aria-pressed="true">Activas</button>
+        <button type="button" class="history-filter" data-history-filter="completed" data-history-label="Finalizadas" aria-pressed="false">Finalizadas</button>
+        <button type="button" class="history-filter" data-history-filter="archived" data-history-label="Archivadas" aria-pressed="false">Archivadas</button>
+      </div>
+      <input class="history-search" id="historySearch" type="search" placeholder="Buscar sesiones" aria-label="Buscar sesiones" aria-keyshortcuts="Control+F Meta+F">
+      <div class="sr-only" id="historyStatus" role="status" aria-live="polite" aria-atomic="true"></div>
+      <div class="task-list" id="tasks" role="region" aria-label="Sesiones"></div>
+    </div>
   </section>
   <main class="content" id="content"><div class="loading" id="loading"></div></main>
-  <section class="composer">
+  <section class="composer" id="composer">
     <div class="input-shell">
       <div class="attachments" id="attachments"></div>
-      <textarea id="input" rows="2" placeholder="Escribí qué necesitás…" aria-label="Nueva tarea para Baldr"></textarea>
+      <textarea id="input" rows="2" placeholder="Escribí qué necesitás…" aria-label="Nuevo pedido para Baldr"></textarea>
       <div class="composer-row">
         <button type="button" class="plus" id="plus" title="Agregar archivos u opciones" aria-label="Agregar archivos u opciones" aria-expanded="false" aria-controls="plusMenu"><svg class="button-icon" viewBox="0 0 16 16" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" d="M8 3v10M3 8h10"/></svg></button>
-        <div class="chips" aria-label="Opciones de la tarea">
+        <div class="chips" aria-label="Opciones de la sesión">
           <button type="button" class="chip" data-chip="git" id="gitChip"><svg class="chip-icon" viewBox="0 0 16 16" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.15" stroke-linejoin="round" d="M8 1.8 12.8 3.4v3.45c0 3.15-1.9 5.65-4.8 7.35-2.9-1.7-4.8-4.2-4.8-7.35V3.4L8 1.8Z"/></svg><span id="gitChipLabel">Protección automática</span></button>
           <button type="button" class="chip" data-chip="preset" id="presetChip"><svg class="chip-icon" viewBox="0 0 16 16" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.15" stroke-linecap="round" d="M3 4h10M3 8h10M3 12h10M6 2.8v2.4M10 6.8v2.4M7 10.8v2.4"/></svg><span id="presetChipLabel">Estándar</span></button>
           <button type="button" class="chip" data-chip="roles" id="rolesChip"><svg class="chip-icon" viewBox="0 0 16 16" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.15" stroke-linecap="round" stroke-linejoin="round" d="M6.2 7a2.2 2.2 0 1 0 0-4.4A2.2 2.2 0 0 0 6.2 7ZM2.5 13.2c.25-2.55 1.5-3.8 3.7-3.8s3.45 1.25 3.7 3.8M10.2 3.2a2 2 0 0 1 0 3.8M10.9 9.5c1.55.25 2.4 1.45 2.6 3.4"/></svg><span id="rolesChipLabel">Equipo estándar</span></button>
           <button type="button" class="chip" data-chip="context" id="contextChip"><svg class="chip-icon" viewBox="0 0 16 16" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.15" stroke-linecap="round" stroke-linejoin="round" d="M8 1.8c.35 2.65 1.55 3.85 4.2 4.2C9.55 6.35 8.35 7.55 8 10.2 7.65 7.55 6.45 6.35 3.8 6 6.45 5.65 7.65 4.45 8 1.8ZM12.2 10.2c.18 1.35.85 2.02 2.2 2.2-1.35.18-2.02.85-2.2 2.2-.18-1.35-.85-2.02-2.2-2.2 1.35-.18 2.02-.85 2.2-2.2Z"/></svg><span id="contextChipLabel">Ayuda automática</span></button>
         </div>
-        <button type="button" class="send" id="send" title="Enviar tarea" aria-label="Enviar tarea" disabled><svg class="button-icon" viewBox="0 0 16 16" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" d="M8 12.8V3.2M4.4 6.8 8 3.2l3.6 3.6"/></svg></button>
+        <button type="button" class="send" id="send" title="Enviar pedido" aria-label="Enviar pedido" disabled><svg class="button-icon" viewBox="0 0 16 16" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" d="M8 12.8V3.2M4.4 6.8 8 3.2l3.6 3.6"/></svg></button>
       </div>
     </div>
     <div class="slash" id="slash"></div>
     <div class="plus-menu" id="plusMenu" role="dialog" aria-label="Agregar detalles u opciones de Baldr" aria-hidden="true">
       <div class="plus-menu-heading" data-plus-heading="add">Agregar</div>
-      <button type="button" class="plus-option" data-plus-action="path" data-plus-group="add"><span class="plus-option-icon">⌕</span><span><span class="plus-option-label">Archivos y carpetas</span><span class="plus-option-detail">Sumá material útil para la tarea</span></span></button>
+      <button type="button" class="plus-option" data-plus-action="path" data-plus-group="add"><span class="plus-option-icon">⌕</span><span><span class="plus-option-label">Archivos y carpetas</span><span class="plus-option-detail">Sumá material útil para el pedido</span></span></button>
       <button type="button" class="plus-option" data-plus-action="file" data-plus-group="add"><span class="plus-option-icon">▣</span><span><span class="plus-option-label">Archivo abierto</span><span class="plus-option-detail">Usalo como referencia</span></span></button>
       <button type="button" class="plus-option" data-plus-action="selection" data-plus-group="add"><span class="plus-option-icon">≡</span><span><span class="plus-option-label">Texto seleccionado</span><span class="plus-option-detail">Sumá solo la parte marcada</span></span></button>
-      <button type="button" class="plus-option" data-plus-action="draft" data-plus-group="add"><span class="plus-option-icon">＋</span><span><span class="plus-option-label">Guardar para después</span><span class="plus-option-detail">Creá una tarea sin empezarla todavía</span></span></button>
+      <button type="button" class="plus-option" data-plus-action="draft" data-plus-group="add"><span class="plus-option-icon">＋</span><span><span class="plus-option-label">Guardar para después</span><span class="plus-option-detail">Creá una sesión sin empezarla todavía</span></span></button>
       <div class="plus-menu-group" data-plus-heading="preferences">Preferencias</div>
       <button type="button" class="plus-option" data-plus-action="git" data-plus-group="preferences"><span class="plus-option-icon">⌘</span><span><span class="plus-option-label">Protección de cambios</span><span class="plus-option-detail">Elegí cómo guardar y recuperar el trabajo</span></span></button>
       <button type="button" class="plus-option" data-plus-action="preset" data-plus-group="preferences"><span class="plus-option-icon">◈</span><span><span class="plus-option-label">Nivel de detalle</span><span class="plus-option-detail">Rápido, estándar o detallado</span></span></button>
@@ -1337,70 +1755,166 @@ textarea::placeholder { color: var(--vscode-input-placeholderForeground); opacit
 </div>
 <script nonce="${nonce}">
 const vscode = acquireVsCodeApi();
-const els = Object.fromEntries(['tasks','content','input','send','plus','configure','refresh','gitChip','gitChipLabel','presetChip','presetChipLabel','rolesChip','rolesChipLabel','contextChip','contextChipLabel','attachments','slash','plusMenu','plusFilter','plusEmpty','loading'].map(id => [id, document.getElementById(id)]));
-let state = {}; let slashIndex = 0; let showAllTasks = false; let plusMenuOpen = false;
+const els = Object.fromEntries(['header','historyPanel','historyToggle','historyStatus','tasks','content','composer','input','send','plus','configure','refresh','gitChip','gitChipLabel','presetChip','presetChipLabel','rolesChip','rolesChipLabel','contextChip','contextChipLabel','attachments','slash','plusMenu','plusFilter','plusEmpty','historySearch','loading','liveStatus'].map(id => [id, document.getElementById(id)]));
+const persistedView = vscode.getState() || {};
+let expandedByItem = persistedView.expandedByItem || {};
+let activeStageByItem = persistedView.activeStageByItem || {};
+let openDisclosuresByItem = persistedView.openDisclosuresByItem || {};
+let historyFilter=['active','completed','archived'].includes(persistedView.historyFilter)?persistedView.historyFilter:'active';let historySearch=String(persistedView.historySearch||'');let historyExpanded=persistedView.historyExpanded!==false;let draftText=String(persistedView.draftText||'');let openTaskMenuId='';let state = {}; let slashIndex = 0; let plusMenuOpen = false; let lastContentKey = ''; let lastTasksKey = ''; let lastPendingKey = ''; let lastAnnouncement = '';let deliverableView={open:false,loading:false,error:'',descriptor:null,data:null,itemId:'',descriptorDigest:'',requestId:0};let deliverableRequestSequence=0;let deliverableIndexView={itemId:'',initialized:false,loading:false,error:'',sourceCursor:'',nextCursor:'',requestCursor:'',requestId:0,items:[]};let deliverableIndexRequestSequence=0;let pendingFocusKey='';let deliverableReturnFocusKey='';let deliverableScrollTop=0;let deliverableTechnicalOpen=false;
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 const post = message => vscode.postMessage(message);
 const workbench = () => state.workbench || {};
 const selected = () => workbench().selected || null;
 const commands = () => ((workbench().options || {}).slash_commands || [
- {id:'setup',usage:'/setup',description:'Abrir las opciones de Baldr.'},{id:'new',usage:'/new <tarea>',description:'Guardar una tarea para después.'},{id:'run',usage:'/run [tarea]',description:'Empezar la tarea seleccionada.'},{id:'status',usage:'/status',description:'Actualizar el estado.'},{id:'profile',usage:'/profile <nivel>',description:'Cambiar el nivel de detalle.'},{id:'git',usage:'/git <modo>',description:'Cambiar la protección de cambios.'},{id:'context',usage:'/context <modo>',description:'Configurar la ayuda adicional.'},{id:'roles',usage:'/roles',description:'Configurar el equipo de Baldr.'},{id:'cancel',usage:'/cancel',description:'Cancelar la tarea seleccionada.'},{id:'resume',usage:'/resume',description:'Continuar una tarea interrumpida.'},{id:'archive',usage:'/archive',description:'Archivar la tarea seleccionada.'},{id:'help',usage:'/help',description:'Ver los comandos disponibles.'}
+ {id:'setup',usage:'/setup',description:'Abrir las opciones de Baldr.'},{id:'new',usage:'/new <tarea>',description:'Guardar una sesión para después.'},{id:'run',usage:'/run [tarea]',description:'Empezar la sesión seleccionada.'},{id:'status',usage:'/status',description:'Actualizar el estado.'},{id:'profile',usage:'/profile <nivel>',description:'Cambiar el nivel de detalle.'},{id:'git',usage:'/git <modo>',description:'Cambiar la protección de cambios.'},{id:'context',usage:'/context <modo>',description:'Configurar la ayuda adicional.'},{id:'roles',usage:'/roles',description:'Configurar el equipo de Baldr.'},{id:'cancel',usage:'/cancel',description:'Cancelar la sesión seleccionada.'},{id:'resume',usage:'/resume',description:'Continuar una sesión interrumpida.'},{id:'archive',usage:'/archive',description:'Archivar la sesión seleccionada.'},{id:'restore',usage:'/restore',description:'Restaurar la sesión archivada seleccionada.'},{id:'delete',usage:'/delete',description:'Eliminar permanentemente la sesión archivada seleccionada.'},{id:'help',usage:'/help',description:'Ver los comandos disponibles.'}
 ]);
 function statusClass(status){ return String(status || 'draft').replace(/[^a-z_]/g,'_'); }
 function statusLabel(status){ const labels={draft:'Pendiente',queued:'En espera',running:'En curso',cancelling:'Cancelando',completed:'Lista',archived:'Archivada',failed:'Necesita atención',cancelled:'Cancelada',needs_attention:'Necesita atención'}; return labels[String(status || 'draft')] || String(status || 'Pendiente'); }
 function presetLabel(value){ return ({fast:'Rápido',balanced:'Estándar',deep:'Detallado',custom:'A medida'}[value]||'Estándar'); }
 function safetyLabel(value){ return ({automatic:'Protección automática',worktree:'Protección automática',current:'Trabajar directamente','non-git':'Sin protección'}[value]||'Protección automática'); }
 function contextLabel(value){ return ({auto:'Ayuda automática',on:'Ayuda activa',off:'Ayuda desactivada'}[value]||'Ayuda automática'); }
-function itemErrorMessage(item){ if(item.error_code==='workspace_reconciliation_required'&&item.safety_mode==='non-git')return 'La tarea se detuvo al intentar crear un respaldo Git que esta carpeta no usa. Tus archivos siguen en la carpeta: revisá las opciones para continuar con ellos.'; return item.error_reason||item.error_code||''; }
+function itemErrorMessage(item){ if(item.error_code==='workspace_reconciliation_required'&&item.safety_mode==='non-git')return 'La sesión se detuvo al intentar crear un respaldo Git que esta carpeta no usa. Tus archivos siguen en la carpeta: revisá las opciones para continuar con ellos.'; return item.error_reason||item.error_code||''; }
 function phaseLabel(value){ return ({architecture:'Planificación',architect:'Planificación',implementation:'Ejecución',implementer:'Ejecución',review:'Revisión',reviewer:'Revisión'}[String(value||'').toLowerCase()]||String(value||'Etapa')); }
 function emptyMark(){ return '<div class="empty-mark"><svg class="empty-logo" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 20V5.5h6.1c3 0 5 1.5 5 4 0 1.8-1 3-2.5 3.6 2 .5 3.4 1.8 3.4 3.8 0 2.4-2 3.1-5.4 3.1H6Z"/><path d="M9.3 8.5h2.8c1.2 0 1.8.4 1.8 1.2s-.6 1.3-1.8 1.3H9.3V8.5Zm0 5.5h3.3c1.4 0 2.1.5 2.1 1.4 0 1-.7 1.5-2.1 1.5H9.3V14Z"/></svg></div>'; }
+function historyGroup(item){const status=String(item?.status||'draft');if(status==='archived')return 'archived';if(['completed','failed','cancelled'].includes(status))return 'completed';return 'active';}
+function isHistoryItem(item){return historyGroup(item)===historyFilter;}
+function historyActionLabel(action){return ({archive:'Archivar',restore:'Restaurar',delete:'Eliminar'}[action]||'');}
+function formatSessionWhen(value){if(!value)return '';const date=new Date(value);if(Number.isNaN(date.getTime()))return '';const elapsed=Math.max(0,Date.now()-date.getTime());const minute=60*1000;const hour=60*minute;const day=24*hour;if(elapsed<minute)return 'Ahora';if(elapsed<hour)return 'Hace '+Math.floor(elapsed/minute)+' min';if(elapsed<day)return 'Hace '+Math.floor(elapsed/hour)+' h';if(elapsed<2*day)return 'Ayer';return date.toLocaleDateString('es',{day:'2-digit',month:'short'});}
+function sessionListSummary(item){const summary=item?.progress_summary||{};return String(summary.activity||statusLabel(item?.status)||'');}
+function renderHistoryControls(visibleCount){if(els.historySearch&&els.historySearch.value!==historySearch)els.historySearch.value=historySearch;const counts={active:0,completed:0,archived:0};(workbench().items||[]).forEach(item=>{counts[historyGroup(item)]+=1;});document.querySelectorAll('[data-history-filter]').forEach(node=>{const filter=node.dataset.historyFilter;node.setAttribute('aria-pressed',String(filter===historyFilter));node.textContent=(node.dataset.historyLabel||'')+' '+String(counts[filter]||0);});if(Number.isInteger(visibleCount)){const label=visibleCount===1?'1 sesión visible':String(visibleCount)+' sesiones visibles';els.historyStatus.textContent=historySearch.trim()?label+' para la búsqueda actual':label;}}
+function renderHistoryVisibility(){els.historyPanel.hidden=!historyExpanded;els.historyToggle.setAttribute('aria-expanded',String(historyExpanded));const label=historyExpanded?'Ocultar historial de sesiones':'Mostrar historial de sesiones';els.historyToggle.setAttribute('aria-label',label);els.historyToggle.title=historyExpanded?'Ocultar historial':'Mostrar historial';}
+function setHistoryExpanded(expanded){historyExpanded=Boolean(expanded);openTaskMenuId='';renderHistoryVisibility();saveViewState();}
+function focusHistorySearch(){if(!historyExpanded)setHistoryExpanded(true);els.historySearch.focus();els.historySearch.select?.();}
+function historyItemNodes(){return [...els.tasks.querySelectorAll('[data-item]')];}
+function moveHistoryFocus(event,node){if(!['ArrowDown','ArrowUp','Home','End'].includes(event.key))return;const nodes=historyItemNodes();if(!nodes.length)return;event.preventDefault();const index=nodes.indexOf(node);const next=event.key==='Home'?nodes[0]:event.key==='End'?nodes[nodes.length-1]:nodes[(Math.max(0,index)+(event.key==='ArrowDown'?1:-1)+nodes.length)%nodes.length];next?.focus();}
 function renderTasks(){
- const allItems = workbench().items || []; const items = showAllTasks ? allItems : allItems.slice(0,8); const current = selected()?.id;
- const rows = items.map(item => '<button class="task '+(item.id===current?'selected':'')+'" data-item="'+escapeHtml(item.id)+'"><span class="dot '+statusClass(item.status)+'"></span><span class="task-title">'+escapeHtml(item.title || item.task || 'Sin título')+'</span><span class="status-text">'+escapeHtml(statusLabel(item.status))+'</span></button>').join('');
- const more = allItems.length > 8 ? '<button class="view-all" id="viewAll">'+(showAllTasks?'Ver los más recientes':'Ver todos ('+allItems.length+')')+'</button>' : '';
- els.tasks.innerHTML = allItems.length ? rows + more : '<div class="task-empty">Todavía no hay tareas</div>';
- els.tasks.querySelectorAll('[data-item]').forEach(node => node.addEventListener('click', () => post({type:'select', itemId:node.dataset.item})));
- document.getElementById('viewAll')?.addEventListener('click',()=>{showAllTasks=!showAllTasks;renderTasks();});
+ const allItems = workbench().items || []; const query=normalizeSearch(historySearch.trim());const items=allItems.filter(item=>{const searchable=[item.title,item.task,sessionListSummary(item)].filter(Boolean).join(' ');return isHistoryItem(item)&&(!query||normalizeSearch(searchable).includes(query));});const current = selected()?.id;
+ const key=[historyFilter,query,openTaskMenuId,allItems.length,current||'',items.map(item=>[item.id,item.title||item.task,item.status,item.updated_at,sessionListSummary(item),(item.allowed_actions||[]).join(',')].join(':')).join('|')].join('|');if(key===lastTasksKey){renderHistoryControls(items.length);return;}lastTasksKey=key;
+ const previousScroll=els.tasks.scrollTop;const focusedItem=els.tasks.contains(document.activeElement)?String(document.activeElement?.dataset?.item||''):'';
+ const rows = items.map(item => {const id=String(item.id||'');const title=String(item.title||item.task||'Sin título');const summary=sessionListSummary(item);const when=formatSessionWhen(item?.progress_summary?.last_event_at||item.updated_at);const lifecycle=(item.allowed_actions||[]).filter(action=>['archive','restore','delete'].includes(action));const menuOpen=openTaskMenuId===id;const actions=menuOpen&&lifecycle.length?'<div class="task-actions" role="group" aria-label="Acciones de '+escapeHtml(title)+'">'+lifecycle.map(action=>'<button type="button" class="task-action '+(action==='delete'?'danger':'')+'" data-history-action="'+escapeHtml(action)+'" data-item-id="'+escapeHtml(id)+'">'+historyActionLabel(action)+'</button>').join('')+'</div>':'';const accessible=[title,statusLabel(item.status),summary,when].filter(Boolean).join('. ');return '<div class="task-wrap" role="listitem"><button class="task '+(item.id===current?'selected':'')+'" data-item="'+escapeHtml(id)+'" aria-label="'+escapeHtml(accessible)+'"'+(item.id===current?' aria-current="true"':'')+'><span class="dot '+statusClass(item.status)+'" aria-hidden="true"></span><span class="task-main"><span class="task-title">'+escapeHtml(title)+'</span>'+(summary?'<span class="task-summary">'+escapeHtml(summary)+'</span>':'')+'<span class="task-meta"><span class="task-meta-status">'+escapeHtml(statusLabel(item.status))+'</span>'+(when?'<span aria-hidden="true">·</span><span class="task-meta-time">'+escapeHtml(when)+'</span>':'')+'</span></span></button>'+(lifecycle.length?'<button type="button" class="task-menu" data-item-menu="'+escapeHtml(id)+'" aria-label="Opciones de '+escapeHtml(title)+'" aria-expanded="'+String(menuOpen)+'">⋯</button>':'')+actions+'</div>';}).join('');
+ const empty=historyFilter==='archived'?'No hay sesiones archivadas.':historyFilter==='completed'?'No hay sesiones finalizadas.':'No hay sesiones activas.';
+ els.tasks.innerHTML = rows?'<div role="list">'+rows+'</div>':allItems.length?(query?'<div class="task-empty" role="status"><span>No encontramos sesiones.</span><button type="button" class="task-empty-action" data-clear-history>Limpiar búsqueda</button></div>':'<div class="task-empty" role="status"><span>'+empty+'</span></div>'):'<div class="task-empty" role="status"><span>Todavía no hay sesiones</span></div>';
+ els.tasks.querySelectorAll('[data-item]').forEach(node => {node.addEventListener('click', () => post({type:'select', itemId:node.dataset.item}));node.addEventListener('keydown',event=>moveHistoryFocus(event,node));});
+ els.tasks.querySelectorAll('[data-item-menu]').forEach(node=>node.addEventListener('click',()=>{openTaskMenuId=openTaskMenuId===node.dataset.itemMenu?'':String(node.dataset.itemMenu||'');renderTasks();}));
+ els.tasks.querySelectorAll('[data-history-action]').forEach(node=>node.addEventListener('click',()=>{openTaskMenuId='';post({type:'itemAction',action:node.dataset.historyAction,itemId:node.dataset.itemId});}));
+ els.tasks.querySelector('[data-clear-history]')?.addEventListener('click',()=>{historySearch='';saveViewState();renderTasks();focusHistorySearch();});
+ renderHistoryControls(items.length);els.tasks.scrollTop=previousScroll;if(focusedItem){const focusTarget=[...els.tasks.querySelectorAll('[data-item]')].find(node=>node.dataset.item===focusedItem);focusTarget?.focus({preventScroll:true});}
 }
-function phaseHtml(phase){
- const participants = (phase.participants || []).map(p => escapeHtml([p.profile,p.model||p.agent,p.status].filter(Boolean).join(' · '))).join('<br>');
- return '<div class="phase '+statusClass(phase.status)+'"><div class="phase-name">'+escapeHtml(phaseLabel(phase.phase || phase.key))+'</div><div class="phase-detail">'+escapeHtml(statusLabel(phase.status))+(participants?'<br>'+participants:'')+'</div></div>';
-}
-function actionButtons(item){ const actions = item.allowed_actions || []; const rows=[];
- if(actions.includes('start')) rows.push('<button class="action primary" data-action="start">Empezar</button>');
- if(actions.includes('cancel')) rows.push('<button class="action" data-action="cancel">Cancelar</button>');
- if(actions.some(a => ['inspect_shadow','continue_from_shadow','apply_shadow_changes','discard_shadow','resume_from_checkpoint','accept_existing_changes','discard_worktree','mark_failed'].includes(a))) rows.push('<button class="action primary" data-action="reconcile">Revisar opciones</button>');
- if(actions.includes('archive')) rows.push('<button class="action" data-action="archive">Archivar</button>');
- rows.push('<button class="action" data-action="logs">Ver detalles</button>'); return rows.join(''); }
-function renderContent(){
- const item=selected();
+function stageIcon(stageState){ return stageState==='complete'?'✓':stageState==='active'?'●':stageState==='attention'?'!':stageState==='cancelled'?'×':stageState==='skipped'?'—':'○'; }
+function formatWhen(value){ if(!value)return '';const date=new Date(value);if(Number.isNaN(date.getTime()))return '';return 'Actualizado a las '+date.toLocaleTimeString('es',{hour:'2-digit',minute:'2-digit'}); }
+function factsHtml(facts){ return (facts||[]).length?'<div class="facts">'+facts.map(fact=>'<span class="fact '+escapeHtml(fact.tone||'neutral')+'">'+escapeHtml(fact.label)+'</span>').join('')+'</div>':''; }
+function sectionsHtml(sections){ return (sections||[]).map(section=>'<section class="report-section '+escapeHtml(section.tone||'neutral')+'"><h4 class="report-section-title">'+escapeHtml(section.title)+'</h4><ul>'+((section.items||[]).map(item=>'<li>'+escapeHtml(item)+'</li>').join(''))+'</ul></section>').join(''); }
+function technicalRowsHtml(rows){ return (rows||[]).map(row=>'<div><div class="technical-label">'+escapeHtml(row.label)+'</div><div class="technical-value">'+escapeHtml(row.value)+'</div></div>').join(''); }
+function milestoneIcon(entry){return entry?.state==='complete'&&entry?.evidence==='verified'?'✓':entry?.state==='attention'?'!':entry?.state==='cancelled'?'×':'•';}
+function evidenceLabel(value){return value==='verified'?'Comprobado por Baldr':value==='reported'?'Informado por el equipo':'Registrado por Baldr';}
+function stageMilestonesHtml(stage){const values=stage.milestones||[];if(!values.length)return '';return '<section class="stage-milestones" aria-label="Hitos de '+escapeHtml(stage.title)+'"><h4 class="stage-milestones-title">Hitos</h4><ol class="stage-milestones-list">'+values.map(entry=>'<li class="stage-milestone"><span aria-hidden="true">'+milestoneIcon(entry)+'</span><span class="stage-milestone-copy">'+escapeHtml(entry.label)+'<span class="stage-milestone-evidence">'+escapeHtml(evidenceLabel(entry.evidence))+'</span></span></li>').join('')+'</ol></section>';}
+		function deliverableRunOrdinal(entry){return Number(entry?.runOrdinal??entry?.run_ordinal??0);}
+		function deliverableLabel(entry){const parts=[];const runOrdinal=deliverableRunOrdinal(entry);if(runOrdinal>1)parts.push('Intento '+runOrdinal);parts.push('Ronda '+(Number(entry?.round||0)+1));return parts.join(' · ');}
+		function deliverablePreview(entry){const value=entry?.preview;return value&&typeof value==='object'?String(value.summary||''):String(value||'');}
+		function deliverableDescriptorKey(entry){return [String(entry?.stage||''),Number(entry?.round||0),deliverableRunOrdinal(entry)].join('|');}
+		function stageDeliverableValues(stage){const values=[...(stage.deliverables||[])];if(deliverableIndexView.itemId===String(selected()?.id||''))values.push(...deliverableIndexView.items.filter(entry=>entry.stage===stage.id));const unique=new Map();values.forEach(entry=>unique.set(deliverableDescriptorKey(entry),entry));return [...unique.values()].sort((left,right)=>deliverableRunOrdinal(left)-deliverableRunOrdinal(right)||Number(left.round||0)-Number(right.round||0));}
+		function stageDeliverablesHtml(stage){const values=stageDeliverableValues(stage);if(!values.length)return '';return '<section class="stage-deliverables" aria-label="Entregas de '+escapeHtml(stage.title)+'"><h4 class="stage-deliverables-title">Entregas</h4>'+values.map(entry=>{const key='deliverable-'+stage.id+'-'+entry.runOrdinal+'-'+entry.round;const preview=deliverablePreview(entry);const label=entry.availability==='available'?'Ver entrega completa':entry.availability==='summary_only'?(preview?'Ver resumen disponible':'Ver información disponible'):'No disponible';return '<div class="stage-deliverable-row"><span class="stage-deliverable-copy"><span class="stage-deliverable-name">'+escapeHtml(deliverableLabel(entry))+'</span>'+(preview?'<span class="stage-deliverable-preview">'+escapeHtml(preview)+'</span>':'')+(entry.reason?'<span class="stage-deliverable-note">'+escapeHtml(entry.reason)+'</span>':'')+'</span>'+(entry.availability==='unavailable'?'<span class="stage-deliverable-status">'+label+'</span>':'<button type="button" class="action" data-deliverable-stage="'+escapeHtml(stage.id)+'" data-deliverable-round="'+escapeHtml(entry.round)+'" data-deliverable-run="'+escapeHtml(entry.runOrdinal)+'" data-focus-key="'+escapeHtml(key)+'">'+label+'</button>')+'</div>';}).join('')+'</section>';}
+		function deliverableIndexHtml(presentation){const index=presentation?.deliverableIndex||{};if(index.truncated!==true)return '';if(deliverableIndexView.error)return '<section class="deliverable-index" role="alert"><span class="deliverable-index-note">'+escapeHtml(deliverableIndexView.error)+'</span><button type="button" class="action" data-deliverable-index data-focus-key="deliverable-index">Reintentar entregas anteriores</button></section>';if(deliverableIndexView.loading)return '<section class="deliverable-index" role="status" aria-live="polite"><button type="button" class="action" data-focus-key="deliverable-index" disabled>Cargando entregas anteriores…</button></section>';if(!deliverableIndexView.nextCursor)return '<section class="deliverable-index"><span class="deliverable-index-note">Ya estás viendo todas las entregas de esta sesión.</span></section>';return '<section class="deliverable-index"><button type="button" class="action" data-deliverable-index data-focus-key="deliverable-index">Ver entregas anteriores</button>'+(Number(index.total)>0?'<span class="deliverable-index-note">Hay '+escapeHtml(index.total)+' entregas guardadas.</span>':'')+'</section>';}
+function deliverableSectionTitle(value){return ({summary:'Resumen',interpretation:'Lo que entendió Baldr',scope:'Alcance',approach:'Enfoque',plan_steps:'Plan acordado',decisions:'Decisiones',acceptance_criteria:'Cómo sabremos que está listo',assumptions:'Supuestos',work_completed:'Trabajo completado',work_next:'Qué sigue',files_modified:'Cambios informados',tests_run:'Comprobaciones informadas',verification_evidence:'Evidencia de comprobación',verification_needed:'Qué falta comprobar',findings:'Hallazgos',corrections:'Correcciones',risks:'A tener en cuenta',follow_up:'Próximos pasos',blockers:'Qué impide avanzar',review_decision:'Veredicto',commands_run:'Comandos ejecutados',constraints:'Límites considerados',alternatives_rejected:'Opciones descartadas'}[value]||String(value||'Detalle').replace(/_/g,' '));}
+	function deliverableEntryValue(entry){const value=entry?.value;if(value&&typeof value==='object'&&!Array.isArray(value)){const key=String(value.key??value.title??'');const detail=String(value.value??value.detail??'');return key&&detail?key+': '+detail:key||detail;}return String(value??'');}
+	function deliverableEntriesHtml(entries){const visible=(entries||[]).filter(entry=>!entry.technical);const technical=(entries||[]).filter(entry=>entry.technical);const groups=values=>{const by={};values.forEach(entry=>{const key=String(entry.section||'summary');(by[key]||(by[key]=[])).push(entry);});return Object.entries(by).map(([key,items])=>'<section class="deliverable-section"><h4 class="deliverable-section-title">'+escapeHtml(deliverableSectionTitle(key))+'</h4><ul class="deliverable-entries">'+items.map(entry=>'<li class="deliverable-entry">'+escapeHtml(deliverableEntryValue(entry))+'</li>').join('')+'</ul></section>').join('');};return groups(visible)+(technical.length?'<details class="disclosure" data-deliverable-technical'+(deliverableTechnicalOpen?' open':'')+'><summary data-focus-key="deliverable-technical">Detalles técnicos de la entrega</summary>'+groups(technical)+'</details>':'');}
+		function deliverableViewHtml(){if(!deliverableView.open)return '';const data=deliverableView.data||{};const descriptor=deliverableView.descriptor||data;const page=data.page||{};const title=({planning:'Plan completo',execution:'Entrega de ejecución',review:'Informe de revisión'}[descriptor.stage]||'Entrega completa');const preview=deliverablePreview(data)||deliverablePreview(descriptor);const safeReason=descriptor.reason||'Esta entrega completa no está disponible.';const body=deliverableView.error?'<div class="refresh-error" role="alert"><div class="refresh-error-title">No pudimos abrir la entrega</div><p class="refresh-error-copy">'+escapeHtml(deliverableView.error)+'</p><button type="button" class="action" data-deliverable-retry data-focus-key="deliverable-retry">Reintentar</button></div>':deliverableView.loading&&!deliverableView.data?'<div role="status" aria-live="polite">Cargando la entrega…</div>':data.availability==='unavailable'?'<p>'+escapeHtml(safeReason)+'</p>':data.availability==='summary_only'?'<p class="deliverable-note">'+escapeHtml(safeReason)+'</p>'+(preview?'<section class="deliverable-section"><h4 class="deliverable-section-title">Resumen disponible</h4><p>'+escapeHtml(preview)+'</p></section>':'<p>No se conservaron más detalles de esta entrega.</p>'):'<p class="deliverable-note">Contenido estructurado y protegido. No incluye prompts, razonamiento ni salida cruda del proveedor.</p>'+((page.entries||[]).length?deliverableEntriesHtml(page.entries||[]):'<p>Esta entrega no agregó detalles adicionales.</p>');return '<section class="deliverable-panel" role="dialog" aria-modal="true" aria-labelledby="deliverable-title"><div class="deliverable-header"><div><h3 class="deliverable-title" id="deliverable-title">'+escapeHtml(title)+'</h3><div class="deliverable-subtitle">'+escapeHtml(deliverableLabel(descriptor))+'</div></div><button type="button" class="icon-button" data-deliverable-close data-focus-key="deliverable-close" aria-label="Cerrar entrega">×</button></div><div class="deliverable-body">'+body+'</div>'+(!deliverableView.error&&page.has_more?'<div class="deliverable-footer"><button type="button" class="action" data-deliverable-more data-focus-key="deliverable-more"'+(deliverableView.loading?' disabled':'')+'>'+(deliverableView.loading?'Cargando…':'Cargar más')+'</button></div>':'')+'</section>';}
+function disclosureAttributes(id){const itemId=String(selected()?.id||'selected');const values=Array.isArray(openDisclosuresByItem[itemId])?openDisclosuresByItem[itemId]:[];return ' data-disclosure="'+escapeHtml(id)+'"'+(values.includes(id)?' open':'');}
+function historyHtml(stage){ const history=stage.history||[];if(!history.length)return '';const id='history-'+stage.id;return '<details class="disclosure"'+disclosureAttributes(id)+'><summary data-focus-key="disclosure-'+escapeHtml(id)+'">Rondas anteriores ('+history.length+')</summary>'+history.map(entry=>'<div class="history-row"><div class="history-label">'+escapeHtml(entry.label)+' · '+escapeHtml(entry.stateLabel)+'</div>'+(entry.summary?'<div class="history-copy">'+escapeHtml(entry.summary)+'</div>':'')+'</div>').join('')+'</details>'; }
+function stageTechnicalHtml(stage){ const rows=stage.technicalRows||[];const sections=stage.technicalSections||[];if(!rows.length&&!sections.length)return '';const id='technical-'+stage.id;return '<details class="disclosure"'+disclosureAttributes(id)+'><summary data-focus-key="disclosure-'+escapeHtml(id)+'">Detalles técnicos de esta etapa</summary>'+(rows.length?'<div class="technical-grid">'+technicalRowsHtml(rows)+'</div>':'')+sectionsHtml(sections)+'</details>'; }
+function saveViewState(){ vscode.setState({expandedByItem,activeStageByItem,openDisclosuresByItem,historyFilter,historySearch,historyExpanded,draftText}); }
+function expandedStages(item){ const id=String(item.id||'selected');const presentation=item.presentation||{};const hasSaved=Array.isArray(expandedByItem[id]);let values=hasSaved?[...expandedByItem[id]]:[];const preferred=presentation.activeStage||(presentation.overallState==='complete'?'review':'planning');if(preferred&&activeStageByItem[id]!==preferred){if(!values.includes(preferred))values.push(preferred);activeStageByItem[id]=preferred;}expandedByItem[id]=values;saveViewState();return new Set(values); }
+function setStageExpanded(itemId,stageId,open){ const values=new Set(Array.isArray(expandedByItem[itemId])?expandedByItem[itemId]:[]);if(open)values.add(stageId);else values.delete(stageId);expandedByItem[itemId]=[...values];saveViewState();const toggle=[...els.content.querySelectorAll('[data-stage-toggle]')].find(node=>node.dataset.stageToggle===stageId);const body=document.getElementById('stage-body-'+stageId);if(toggle){toggle.setAttribute('aria-expanded',String(open));toggle.setAttribute('aria-label',toggle.dataset.stageTitle+': '+toggle.dataset.stageStatus+'. '+(open?'Contraer':'Expandir'));}if(body)body.hidden=!open; }
+function stageHtml(stage,open){ const label=stage.title+': '+stage.statusLabel+'. '+(open?'Contraer':'Expandir');return '<article class="stage-card '+escapeHtml(stage.state)+'"><button type="button" class="stage-toggle" data-stage-toggle="'+escapeHtml(stage.id)+'" data-stage-title="'+escapeHtml(stage.title)+'" data-stage-status="'+escapeHtml(stage.statusLabel)+'" data-focus-key="stage-'+escapeHtml(stage.id)+'" aria-label="'+escapeHtml(label)+'" aria-expanded="'+String(open)+'" aria-controls="stage-body-'+escapeHtml(stage.id)+'"><span class="stage-state-icon" aria-hidden="true">'+stageIcon(stage.state)+'</span><span class="stage-heading"><span class="stage-title">'+escapeHtml(stage.title)+'</span><span class="stage-subtitle">'+escapeHtml(stage.subtitle)+'</span></span><span class="stage-chevron" aria-hidden="true">›</span></button><div class="stage-body" id="stage-body-'+escapeHtml(stage.id)+'"'+(open?'':' hidden')+'><div class="stage-status">'+escapeHtml(stage.statusLabel)+'</div><div class="stage-duration" data-stage-duration="'+escapeHtml(stage.id)+'">'+escapeHtml(stage.durationLabel||'')+'</div><p class="stage-purpose">'+escapeHtml(stage.purpose)+'</p>'+(stage.summary?'<div class="report-summary">'+escapeHtml(stage.summary)+'</div>':'')+factsHtml(stage.facts)+sectionsHtml(stage.sections)+stageMilestonesHtml(stage)+stageDeliverablesHtml(stage)+historyHtml(stage)+stageTechnicalHtml(stage)+'</div></article>'; }
+function stageStripHtml(stages){ return '<div class="stage-strip" aria-label="Avance de la sesión">'+(stages||[]).map(stage=>'<div class="stage-strip-item '+escapeHtml(stage.state)+'"'+(stage.state==='active'?' aria-current="step"':'')+'><span class="stage-strip-icon" aria-hidden="true">'+stageIcon(stage.state)+'</span>'+escapeHtml(stage.title)+'<span class="sr-only">: '+escapeHtml(stage.statusLabel)+'</span></div>').join('')+'</div>'; }
+function nowCardHtml(presentation){ const latest=(presentation.milestones||[]).slice(-1)[0];return '<section class="now-card" aria-labelledby="now-title"><div class="card-eyebrow">Ahora</div><h3 class="card-title" id="now-title">'+escapeHtml(presentation.headline)+'</h3><p class="card-copy">'+escapeHtml(presentation.explanation)+'</p>'+stageStripHtml(presentation.stages)+(latest?'<div class="recent-milestone"><span aria-hidden="true">'+milestoneIcon(latest)+'</span><span>'+escapeHtml(latest.label)+'</span></div>':'')+(presentation.lastEventAt?'<div class="last-update">'+escapeHtml(formatWhen(presentation.lastEventAt))+'</div>':'')+'</section>'; }
+function outcomeHtml(outcome){if(!outcome)return '';const sections=outcome.sections||[];const technical=outcome.technicalSections||[];const fallback=outcome.tone==='positive'?'Baldr completó y revisó el trabajo.':'Este es el resultado disponible hasta el momento.';const id='result-details';const details=sections.length||technical.length?'<details class="disclosure"'+disclosureAttributes(id)+'><summary data-focus-key="disclosure-'+id+'">Ver resultado completo</summary>'+sectionsHtml(sections)+(technical.length?'<section class="report-section"><h4 class="report-section-title">Detalles técnicos</h4></section>'+sectionsHtml(technical):'')+'</details>':'';return '<section class="result-card '+escapeHtml(outcome.tone||'neutral')+'" aria-labelledby="result-title"><div class="card-eyebrow">Resultado</div><h3 class="card-title" id="result-title">'+escapeHtml(outcome.title||'Resultado hasta ahora')+'</h3><p class="card-copy">'+escapeHtml(outcome.summary||fallback)+'</p>'+factsHtml(outcome.facts)+details+'</section>';}
+function hasReconciliation(item){ return (item.allowed_actions||[]).some(action=>['inspect_shadow','continue_from_shadow','apply_shadow_changes','discard_shadow','resume_from_checkpoint','accept_existing_changes','discard_worktree','mark_failed'].includes(action)); }
+function attentionPrimaryAction(item,attention){ if(!attention)return null;if(hasReconciliation(item))return {id:'reconcile',label:attention.actionLabel||'Elegir cómo continuar'};if(attention.retryable===true&&(item.allowed_actions||[]).includes('start'))return {id:'start',label:attention.actionLabel||'Volver a intentar'};return null; }
+function attentionHtml(item,attention){ if(!attention)return '';const primary=attentionPrimaryAction(item,attention);const blockers=attention.blockers||[];const disabled=state.busy?' disabled':'';return '<section class="attention-card" role="alert" aria-labelledby="attention-title"><div class="card-eyebrow">Necesita tu atención</div><h3 class="card-title" id="attention-title">'+escapeHtml(attention.title)+'</h3><p class="card-copy">'+escapeHtml(attention.message)+'</p>'+(blockers.length?'<section class="report-section danger"><h4 class="report-section-title">Qué necesita resolverse</h4><ul>'+blockers.map(blocker=>'<li>'+escapeHtml(blocker)+'</li>').join('')+'</ul></section>':'')+(primary?'<div class="attention-action"><button class="action primary" data-action="'+escapeHtml(primary.id)+'" data-focus-key="action-'+escapeHtml(primary.id)+'"'+disabled+'>'+escapeHtml(primary.label)+'</button></div>':'')+'</section>'; }
+function refreshErrorHtml(hasItemAttention){ if(!state.error||hasItemAttention)return '';return '<section class="refresh-error" role="alert"><div class="refresh-error-title">No pudimos actualizar esta vista</div><p class="refresh-error-copy">Tu sesión sigue guardada. Probá nuevamente.</p><button type="button" class="action" data-refresh-action data-focus-key="refresh-error">Reintentar</button></section>'; }
+function globalTechnicalHtml(presentation){ const rows=presentation.technicalRows||[];const id='technical-session';return '<details class="disclosure"'+disclosureAttributes(id)+'><summary data-focus-key="disclosure-'+id+'">Detalles técnicos de la sesión</summary>'+(rows.length?'<div class="technical-grid">'+technicalRowsHtml(rows)+'</div>':'')+'<p><button class="action" data-action="logs" data-focus-key="action-logs">Abrir registro técnico</button></p></details>'; }
+function sessionRequestHtml(item){const task=String(item?.task||'').trim();if(!task)return '';const id='session-request';return '<details class="session-section"'+disclosureAttributes(id)+'><summary data-focus-key="disclosure-'+id+'">Pedido original</summary><div class="session-section-body"><div class="task-body">'+escapeHtml(task)+'</div></div></details>';}
+function sessionProgressHtml(stages,presentation,expanded){if(!stages.length)return '';const id='session-progress';return '<details class="session-section"'+disclosureAttributes(id)+'><summary data-focus-key="disclosure-'+id+'">Etapas y entregas</summary><div class="session-section-body"><section class="stage-list" aria-label="Etapas de la sesión">'+stages.map(stage=>stageHtml(stage,expanded.has(stage.id))).join('')+'</section>'+deliverableIndexHtml(presentation)+'</div></details>';}
+	function actionButtons(item,attention,attentionActionShown){ const actions = item.allowed_actions || []; const rows=[];
+ const disabled=state.busy?' disabled':'';
+ if(actions.includes('start')&&!attentionActionShown&&(!attention||attention.retryable===true)) rows.push('<button class="action primary" data-action="start" data-focus-key="action-start"'+disabled+'>'+escapeHtml(attention?'Volver a intentar':'Empezar')+'</button>');
+ if(actions.includes('cancel')) rows.push('<button class="action" data-action="cancel" data-focus-key="action-cancel"'+disabled+'>Cancelar</button>');
+ if(!attentionActionShown&&hasReconciliation(item)) rows.push('<button class="action primary" data-action="reconcile" data-focus-key="action-reconcile"'+disabled+'>Revisar opciones</button>');
+	 if(actions.includes('archive')) rows.push('<button class="action" data-action="archive" data-focus-key="action-archive"'+disabled+'>Archivar</button>');
+	 if(actions.includes('restore')) rows.push('<button class="action primary" data-action="restore" data-focus-key="action-restore"'+disabled+'>Restaurar</button>');
+	 if(actions.includes('delete')) rows.push('<button class="action" data-action="delete" data-focus-key="action-delete"'+disabled+'>Eliminar permanentemente</button>');
+	 return rows.join(''); }
+		function deliverableFingerprint(){const descriptor=deliverableView.descriptor||{};const data=deliverableView.data||{};const page=data.page||{};return [deliverableView.open,deliverableView.loading,deliverableView.error,deliverableView.itemId,deliverableView.descriptorDigest,deliverableView.requestId,descriptor.stage,descriptor.round,deliverableRunOrdinal(descriptor),data.digest,(page.entries||[]).length,page.next_cursor].join('|');}
+		function blankDeliverableView(){return {open:false,loading:false,error:'',descriptor:null,data:null,itemId:'',descriptorDigest:'',requestId:0};}
+		function syncDeliverableModality(){const open=Boolean(deliverableView.open);els.content.style.overflow=open?'hidden':'';for(const node of [els.header,els.composer]){if(!node)continue;node.inert=open;if(open){node.setAttribute('inert','');node.setAttribute('aria-hidden','true');}else{node.removeAttribute('inert');node.removeAttribute('aria-hidden');}}const background=els.content.querySelector('[data-deliverable-background]');if(background){background.inert=open;if(open){background.setAttribute('inert','');background.setAttribute('aria-hidden','true');}else{background.removeAttribute('inert');background.removeAttribute('aria-hidden');}}}
+		function rerenderDeliverable(){lastContentKey='';renderContent();syncDeliverableModality();updateSendState();}
+		function requestDeliverable(descriptor,cursor){const item=selected();if(!deliverableView.open||!item||!descriptor||String(item.id||'')!==deliverableView.itemId)return;const requestId=++deliverableRequestSequence;deliverableView.requestId=requestId;post({type:'inspectDeliverable',itemId:deliverableView.itemId,stage:descriptor.stage,round:Number(descriptor.round||0),runOrdinal:deliverableRunOrdinal(descriptor)||undefined,cursor:cursor||undefined,descriptorDigest:deliverableView.descriptorDigest,requestId});}
+		function openDeliverable(node){const item=selected();const stageId=String(node?.dataset?.deliverableStage||'');const round=Number(node?.dataset?.deliverableRound);const runOrdinal=Number(node?.dataset?.deliverableRun);const stage=(item?.presentation?.stages||[]).find(value=>value.id===stageId);const descriptor=stageDeliverableValues(stage||{}).find(value=>Number(value.round)===round&&deliverableRunOrdinal(value)===runOrdinal);if(!item||!descriptor)return;setPlusMenu(false);deliverableReturnFocusKey=String(node.dataset.focusKey||'');deliverableScrollTop=0;deliverableTechnicalOpen=false;deliverableView={open:true,loading:true,error:'',descriptor,data:null,itemId:String(item.id||''),descriptorDigest:String(descriptor.digest||''),requestId:0};pendingFocusKey='deliverable-close';requestDeliverable(descriptor,'');rerenderDeliverable();}
+		function closeDeliverable(restoreFocus=true){if(!deliverableView.open)return;const returnFocus=restoreFocus?deliverableReturnFocusKey:'';++deliverableRequestSequence;deliverableView=blankDeliverableView();deliverableReturnFocusKey='';deliverableScrollTop=0;deliverableTechnicalOpen=false;pendingFocusKey=returnFocus;rerenderDeliverable();}
+		function loadMoreDeliverable(){const descriptor=deliverableView.descriptor;const cursor=String(deliverableView.data?.page?.next_cursor||'');if(!descriptor||!cursor||deliverableView.loading)return;deliverableView.loading=true;deliverableView.error='';pendingFocusKey='deliverable-more';requestDeliverable(descriptor,cursor);rerenderDeliverable();}
+		function retryDeliverable(){const descriptor=deliverableView.descriptor;if(!descriptor||deliverableView.loading)return;deliverableView.loading=true;deliverableView.error='';deliverableView.data=null;deliverableScrollTop=0;pendingFocusKey='deliverable-close';requestDeliverable(descriptor,'');rerenderDeliverable();}
+		function matchesDeliverableResponse(message,data){const descriptor=deliverableView.descriptor||{};return deliverableView.open&&String(selected()?.id||'')===deliverableView.itemId&&String(message?.itemId||'')===deliverableView.itemId&&Number(message?.requestId)===deliverableView.requestId&&String(message?.descriptorDigest||'')===deliverableView.descriptorDigest&&String(data?.stage||'')===String(descriptor.stage||'')&&Number(data?.round)===Number(descriptor.round)&&(!deliverableRunOrdinal(data)||!deliverableRunOrdinal(descriptor)||deliverableRunOrdinal(data)===deliverableRunOrdinal(descriptor));}
+		function applyDeliverableResult(message){const data=message?.deliverable||{};if(!matchesDeliverableResponse(message,data))return;const incomingPage=data.page||{};if(message.append&&deliverableView.data){const previousEntries=deliverableView.data.page?.entries||[];deliverableView.data={...data,page:{...incomingPage,entries:[...previousEntries,...(incomingPage.entries||[])]}};}else{deliverableView.data=data;}deliverableView.loading=false;deliverableView.error='';pendingFocusKey=incomingPage.has_more?'deliverable-more':'deliverable-close';rerenderDeliverable();}
+		function applyDeliverableError(message){if(!matchesDeliverableResponse(message,deliverableView.descriptor||{}))return;deliverableView.loading=false;deliverableView.error=String(message?.message||'No pudimos abrir la entrega. Probá nuevamente.');pendingFocusKey='deliverable-close';rerenderDeliverable();}
+		function blankDeliverableIndexView(itemId='',index={}){const sourceCursor=String(index?.nextCursor||'');return {itemId,initialized:Boolean(itemId),loading:false,error:'',sourceCursor,nextCursor:sourceCursor,requestCursor:'',requestId:0,items:[]};}
+		function syncDeliverableIndexForItem(item){const itemId=String(item?.id||'');const index=item?.presentation?.deliverableIndex||{};const sourceCursor=String(index?.nextCursor||'');if(deliverableIndexView.itemId!==itemId||!deliverableIndexView.initialized||deliverableIndexView.sourceCursor!==sourceCursor){++deliverableIndexRequestSequence;deliverableIndexView=blankDeliverableIndexView(itemId,index);}}
+		function requestDeliverableIndex(){const item=selected();const cursor=String(deliverableIndexView.nextCursor||'');if(!item||deliverableIndexView.loading||String(item.id||'')!==deliverableIndexView.itemId||!cursor)return;const requestId=++deliverableIndexRequestSequence;deliverableIndexView.loading=true;deliverableIndexView.error='';deliverableIndexView.requestCursor=cursor;deliverableIndexView.requestId=requestId;pendingFocusKey='deliverable-index';lastContentKey='';renderContent();post({type:'loadDeliverableIndex',itemId:deliverableIndexView.itemId,cursor,requestId});}
+		function matchesDeliverableIndexResponse(message){return String(selected()?.id||'')===deliverableIndexView.itemId&&String(message?.itemId||'')===deliverableIndexView.itemId&&Number(message?.requestId)===deliverableIndexView.requestId&&String(message?.cursor||'')===deliverableIndexView.requestCursor;}
+		function applyDeliverableIndexResult(message){if(!matchesDeliverableIndexResponse(message))return;const unique=new Map();[...deliverableIndexView.items,...(Array.isArray(message.items)?message.items:[])].forEach(entry=>unique.set(deliverableDescriptorKey(entry),entry));deliverableIndexView.items=[...unique.values()];deliverableIndexView.loading=false;deliverableIndexView.error='';deliverableIndexView.nextCursor=message.page?.has_more?String(message.page?.next_cursor||''):'';deliverableIndexView.requestCursor='';pendingFocusKey='deliverable-index';lastContentKey='';renderContent();}
+		function applyDeliverableIndexError(message){if(!matchesDeliverableIndexResponse(message))return;deliverableIndexView.loading=false;deliverableIndexView.error=String(message?.message||'No pudimos cargar las entregas anteriores. Probá nuevamente.');deliverableIndexView.requestCursor='';pendingFocusKey='deliverable-index';lastContentKey='';renderContent();}
+	function trapDeliverableFocus(event,panel){if(event.key!=='Tab')return;const focusable=[...panel.querySelectorAll('button:not([disabled]), summary, [href], input:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')];if(!focusable.length)return;const first=focusable[0];const last=focusable[focusable.length-1];if(event.shiftKey&&(document.activeElement===first||!panel.contains(document.activeElement))){event.preventDefault();last.focus();}else if(!event.shiftKey&&(document.activeElement===last||!panel.contains(document.activeElement))){event.preventDefault();first.focus();}}
+	function renderContent(){
+	 const item=selected();
+	 const presentation=item?.presentation||null;const contentKey=(state.emptyWorkspace?'empty':state.trusted===false?'untrusted':!item?'none':String(item.id)+'|'+String(presentation?.revision||item.updated_at||'')+'|'+String(item.status||'')+'|'+JSON.stringify(item.allowed_actions||[])+'|'+String(Boolean(state.busy)))+'|error:'+String(Boolean(state.error))+'|deliverable:'+deliverableFingerprint()+'|deliverable-index:'+[deliverableIndexView.itemId,deliverableIndexView.loading,deliverableIndexView.error,deliverableIndexView.nextCursor,deliverableIndexView.items.length].join('|');
+ if(contentKey===lastContentKey)return;lastContentKey=contentKey;
+ els.content.setAttribute('aria-busy',String(Boolean(state.busy)));
+ const currentDeliverableBody=els.content.querySelector('.deliverable-body');if(currentDeliverableBody)deliverableScrollTop=currentDeliverableBody.scrollTop;const previousScroll=els.content.scrollTop;const activeElement=document.activeElement;const focusKey=els.content.contains(activeElement)?String(activeElement?.dataset?.focusKey||''):'';
  if(state.emptyWorkspace){ els.content.innerHTML='<div class="empty"><div class="empty-inner">'+emptyMark()+'<div class="empty-title">Abrí una carpeta para empezar</div><div class="empty-detail">Baldr necesita una carpeta donde guardar el trabajo.</div></div></div>'; return; }
  if(state.trusted===false){ els.content.innerHTML='<div class="empty"><div class="empty-inner">'+emptyMark()+'<div class="empty-title">Falta tu permiso</div><div class="empty-detail">Autorizá esta carpeta para que Baldr pueda trabajar.</div><p><button type="button" class="action primary" id="trust">Revisar permisos</button></p></div></div>'; document.getElementById('trust')?.addEventListener('click',()=>post({type:'requestTrust'})); return; }
- if(!item){ els.content.innerHTML='<div class="empty"><div class="empty-inner">'+emptyMark()+'<div class="empty-title">¿Qué querés hacer?</div><div class="empty-detail">Escribí lo que necesitás. Baldr lo organiza y te muestra el avance.</div></div></div>'; return; }
- const error = itemErrorMessage(item); const phases=(item.phases||[]).map(phaseHtml).join('');
- els.content.innerHTML='<h2 class="item-title">'+escapeHtml(item.title || 'Sin título')+'</h2><div class="item-meta"><span>'+escapeHtml(statusLabel(item.status))+'</span><span>'+escapeHtml(presetLabel(item.preset))+'</span><span>'+escapeHtml(safetyLabel(item.safety_mode))+'</span></div>'+(error?'<div class="notice">'+escapeHtml(error)+'</div>':'')+'<div class="task-body">'+escapeHtml(item.task || '')+'</div>'+(phases?'<div class="timeline">'+phases+'</div>':'')+'<div class="actions">'+actionButtons(item)+'</div><div class="loading '+(state.busy?'visible':'')+'" id="loading"></div>';
+ if(!item){ els.content.innerHTML=refreshErrorHtml(false)+'<div class="empty"><div class="empty-inner">'+emptyMark()+'<div class="empty-title">¿Qué querés hacer?</div><div class="empty-detail">Escribí lo que necesitás. Baldr lo organiza y te muestra el avance.</div><p><button type="button" class="action primary" data-start-request>Escribir un pedido</button></p></div></div>';els.content.querySelector('[data-refresh-action]')?.addEventListener('click',()=>post({type:'refresh'}));els.content.querySelector('[data-start-request]')?.addEventListener('click',()=>els.input.focus());return; }
+ const error = itemErrorMessage(item);const expanded=expandedStages(item);const stages=presentation?.stages||[];
+ const activeStagePresentation=(presentation?.stages||[]).find(stage=>stage.id===presentation?.activeStage);const announcementDetail=presentation?.attention?.message||activeStagePresentation?.summary||presentation?.outcome?.summary||'';
+ const announcementKey=presentation?String(item.id||'selected')+'|'+String(presentation.revision||'')+'|'+String(presentation.headline||'')+'|'+String(presentation.activeStage||'')+'|'+String(announcementDetail):'';
+ if(presentation&&presentation.headline&&announcementKey!==lastAnnouncement){lastAnnouncement=announcementKey;els.liveStatus.textContent=presentation.headline+'. '+presentation.explanation+(announcementDetail?' '+announcementDetail:'');}
+ const attentionActionShown=Boolean(attentionPrimaryAction(item,presentation?.attention));const availableActions=actionButtons(item,presentation?.attention,attentionActionShown);
+		 els.content.innerHTML=deliverableViewHtml()+'<div class="content-background" data-deliverable-background'+(deliverableView.open?' inert aria-hidden="true"':'')+'><h2 class="item-title">'+escapeHtml(item.title || 'Sin título')+'</h2><div class="item-meta"><span>'+escapeHtml(statusLabel(item.status))+'</span><span>'+escapeHtml(presetLabel(item.preset))+'</span><span>'+escapeHtml(safetyLabel(item.safety_mode))+'</span></div>'+refreshErrorHtml(Boolean(presentation?.attention))+(error&&!presentation?.attention?'<div class="notice">'+escapeHtml(error)+'</div>':'')+(presentation?nowCardHtml(presentation):'')+attentionHtml(item,presentation?.attention)+(availableActions?'<div class="actions">'+availableActions+'</div>':'')+outcomeHtml(presentation?.outcome)+sessionRequestHtml(item)+sessionProgressHtml(stages,presentation,expanded)+globalTechnicalHtml(presentation||{technicalRows:[]})+'<div class="loading '+(state.busy?'visible':'')+'" id="loading" role="status" aria-live="polite"><span class="sr-only">'+escapeHtml(state.operationLabel||'')+'</span></div></div>';
+	 els.content.querySelectorAll('[data-stage-toggle]').forEach(node=>node.addEventListener('click',()=>setStageExpanded(String(item.id||'selected'),node.dataset.stageToggle,node.getAttribute('aria-expanded')!=='true')));
+	 els.content.querySelectorAll('[data-deliverable-stage]').forEach(node=>node.addEventListener('click',()=>openDeliverable(node)));
+		 els.content.querySelector('[data-deliverable-close]')?.addEventListener('click',()=>closeDeliverable(true));
+	 els.content.querySelector('[data-deliverable-more]')?.addEventListener('click',loadMoreDeliverable);
+		 els.content.querySelector('[data-deliverable-retry]')?.addEventListener('click',retryDeliverable);
+		 els.content.querySelector('[data-deliverable-index]')?.addEventListener('click',requestDeliverableIndex);
+		 els.content.querySelector('[data-deliverable-technical]')?.addEventListener('toggle',event=>{deliverableTechnicalOpen=Boolean(event.currentTarget?.open);});
+	 const deliverablePanel=els.content.querySelector('.deliverable-panel');if(deliverablePanel)deliverablePanel.addEventListener('keydown',event=>trapDeliverableFocus(event,deliverablePanel));
+ els.content.querySelectorAll('[data-disclosure]').forEach(node=>node.addEventListener('toggle',()=>{const itemId=String(item.id||'selected');const values=new Set(Array.isArray(openDisclosuresByItem[itemId])?openDisclosuresByItem[itemId]:[]);if(node.open)values.add(node.dataset.disclosure);else values.delete(node.dataset.disclosure);openDisclosuresByItem[itemId]=[...values];saveViewState();}));
  els.content.querySelectorAll('[data-action]').forEach(node => node.addEventListener('click',()=>{ const action=node.dataset.action; if(action==='logs')post({type:'openLogs'}); else post({type:'itemAction',action,itemId:item.id}); }));
+ els.content.querySelector('[data-refresh-action]')?.addEventListener('click',()=>post({type:'refresh'}));
+		 els.content.scrollTop=previousScroll;const nextDeliverableBody=els.content.querySelector('.deliverable-body');if(nextDeliverableBody)nextDeliverableBody.scrollTop=deliverableScrollTop;const requestedFocus=pendingFocusKey||focusKey;pendingFocusKey='';if(requestedFocus){const focusTarget=[...els.content.querySelectorAll('[data-focus-key]')].find(node=>node.dataset.focusKey===requestedFocus);focusTarget?.focus({preventScroll:true});}
 }
 function shortModelLabel(value){ const raw=String(value||'').trim(); const named=raw.match(/^gpt-[0-9]+(?:[.][0-9]+)*-(sol|terra|luna|spark)$/i); if(named)return named[1].charAt(0).toUpperCase()+named[1].slice(1).toLowerCase(); const version=raw.match(/^gpt-([0-9]+(?:[.][0-9]+)*)(?:-(mini))?$/i); if(version)return 'GPT-'+version[1]+(version[2]?' Mini':''); return raw||''; }
 function effortChipLabel(value){ return ({minimal:'Mínimo',low:'Bajo',medium:'Medio',high:'Alto',xhigh:'Muy alto',max:'Máximo',ultra:'Ultra'}[String(value||'').toLowerCase()]||String(value||'')); }
 function configuredRole(role){ const wb=workbench(); const pref=wb.preferences||{}; const profiles=wb.profiles||{}; const selected=(((pref.role_profiles||{})[role]||[])[0]); if(selected&&profiles.execution_profiles&&profiles.execution_profiles[selected])return profiles.execution_profiles[selected]; return (((profiles.resolved_roles||{})[role]||[])[0])||{}; }
 function renderChips(){ const pref=workbench().preferences||{}; const safety=safetyLabel(pref.safety_mode); const preset=presetLabel(pref.preset); const context=contextLabel(pref.context_mode); const roleNames={architect:'Planificación',implementer:'Ejecución',reviewer:'Revisión'}; const roleConfigurations=['architect','implementer','reviewer'].map(role=>{const config=configuredRole(role);const raw=config.model||config.agent||config.provider||'';return {role,label:shortModelLabel(raw),effort:effortChipLabel(config.reasoning_effort||config.effort)};}); const modelNames=[...new Set(roleConfigurations.map(item=>item.label).filter(Boolean))]; const team=modelNames.length?modelNames.join(' · '):'Equipo estándar'; const teamDetail=roleConfigurations.filter(item=>item.label).map(item=>roleNames[item.role]+': '+item.label+(item.effort?' ('+item.effort+')':'')).join(' · '); els.gitChipLabel.textContent=safety; els.gitChip.title='Uso de Git y protección: '+safety; els.gitChip.setAttribute('aria-label',els.gitChip.title); els.presetChipLabel.textContent=preset; els.presetChip.title='Nivel de detalle: '+preset; els.presetChip.setAttribute('aria-label',els.presetChip.title); els.rolesChipLabel.textContent=team; els.rolesChip.title='Equipo de Baldr: '+(teamDetail||team); els.rolesChip.setAttribute('aria-label',els.rolesChip.title); els.contextChipLabel.textContent=context; els.contextChip.title='Ayuda adicional: '+context; els.contextChip.setAttribute('aria-label',els.contextChip.title); }
-function renderPending(){ const items=(state.pending||{}).attachments||[]; const kindLabels={file:'Archivo',folder:'Carpeta',selection:'Selección'}; els.attachments.innerHTML=items.map((item,index)=>'<div class="attachment"><div class="attachment-icon" aria-hidden="true">'+({file:'▤',folder:'◇',selection:'≡'}[item.kind]||'▤')+'</div><div><div class="attachment-label" title="'+escapeHtml(item.label||'Archivo')+'">'+escapeHtml(item.label||'Archivo')+'</div><div class="attachment-kind">'+escapeHtml(kindLabels[item.kind]||'Archivo')+'</div></div><button type="button" class="remove-attachment" data-remove-pending="'+index+'" title="Quitar" aria-label="Quitar '+escapeHtml(item.label||'archivo')+'">×</button></div>').join(''); els.attachments.querySelectorAll('[data-remove-pending]').forEach(node=>node.addEventListener('click',()=>post({type:'removePending',index:Number(node.dataset.removePending)}))); }
-function updateSendState(){ els.send.disabled=Boolean(state.busy)||!els.input.value.trim(); }
-function render(){ renderTasks(); renderContent(); renderChips(); renderPending(); updateSendState(); }
-function updateState(next){ state=next||{}; render(); }
+function renderPending(){ const items=(state.pending||{}).attachments||[];const key=items.map(item=>[item.kind,item.label].join(':')).join('|');if(key===lastPendingKey)return;lastPendingKey=key;const focusedIndex=els.attachments.contains(document.activeElement)?String(document.activeElement?.dataset?.removePending||''):''; const kindLabels={file:'Archivo',folder:'Carpeta',selection:'Selección'}; els.attachments.innerHTML=items.map((item,index)=>'<div class="attachment"><div class="attachment-icon" aria-hidden="true">'+({file:'▤',folder:'◇',selection:'≡'}[item.kind]||'▤')+'</div><div><div class="attachment-label" title="'+escapeHtml(item.label||'Archivo')+'">'+escapeHtml(item.label||'Archivo')+'</div><div class="attachment-kind">'+escapeHtml(kindLabels[item.kind]||'Archivo')+'</div></div><button type="button" class="remove-attachment" data-remove-pending="'+index+'" title="Quitar" aria-label="Quitar '+escapeHtml(item.label||'archivo')+'">×</button></div>').join(''); els.attachments.querySelectorAll('[data-remove-pending]').forEach(node=>node.addEventListener('click',()=>post({type:'removePending',index:Number(node.dataset.removePending)})));if(focusedIndex){const focusTarget=[...els.attachments.querySelectorAll('[data-remove-pending]')].find(node=>node.dataset.removePending===focusedIndex);focusTarget?.focus({preventScroll:true});} }
+function updateDurations(){ const stages=selected()?.presentation?.stages||[];stages.forEach(stage=>{const node=els.content.querySelector('[data-stage-duration="'+stage.id+'"]');if(node)node.textContent=stage.durationLabel||'';}); }
+function resizeComposer(){els.input.style.height='auto';els.input.style.height=Math.min(150,els.input.scrollHeight)+'px';}
+function updateSendState(){ const blocked=Boolean(state.busy)||Boolean(deliverableView.open);els.send.disabled=blocked||!els.input.value.trim();for(const control of [els.plus,els.configure,els.refresh,els.gitChip,els.presetChip,els.rolesChip,els.contextChip])control.disabled=blocked; }
+function render(){ renderHistoryVisibility();renderTasks(); renderContent(); updateDurations(); renderChips(); renderPending(); syncDeliverableModality(); updateSendState(); }
+function updateState(next){const incoming={...(next||{}),error:''};const incomingItemId=String(incoming?.workbench?.selected?.id||'');if(deliverableView.open&&incomingItemId!==deliverableView.itemId){++deliverableRequestSequence;deliverableView=blankDeliverableView();deliverableReturnFocusKey='';deliverableScrollTop=0;deliverableTechnicalOpen=false;pendingFocusKey='';lastContentKey='';}state=incoming;syncDeliverableIndexForItem(selected());render(); }
 function setPlusMenu(open){ plusMenuOpen=open; els.plusMenu.classList.toggle('visible',open); els.plusMenu.setAttribute('aria-hidden',String(!open)); els.plus.setAttribute('aria-expanded',String(open)); if(open){els.plusFilter.value='';filterPlusActions();els.plusMenu.scrollTop=0;} }
 function normalizeSearch(value){ return String(value||'').normalize('NFD').replace(/[̀-ͯ]/g,'').toLowerCase(); }
 function visiblePlusActions(){ return [...els.plusMenu.querySelectorAll('[data-plus-action]')].filter(node=>!node.hidden); }
 function filterPlusActions(){ const query=normalizeSearch(els.plusFilter.value.trim()); const actions=[...els.plusMenu.querySelectorAll('[data-plus-action]')]; actions.forEach(node=>{node.hidden=Boolean(query)&&!normalizeSearch(node.textContent).includes(query);}); els.plusMenu.querySelectorAll('[data-plus-heading]').forEach(heading=>{const group=heading.dataset.plusHeading;heading.hidden=!actions.some(node=>node.dataset.plusGroup===group&&!node.hidden);}); els.plusEmpty.hidden=actions.some(node=>!node.hidden); }
 function renderSlash(){ const value=els.input.value.trim(); if(!value.startsWith('/')){els.slash.classList.remove('visible');return;} const query=value.slice(1).toLowerCase(); const list=commands().filter(c=>c.id.startsWith(query.split(/\s/)[0])).slice(0,8); if(!list.length){els.slash.classList.remove('visible');return;} slashIndex=Math.min(slashIndex,list.length-1); els.slash.innerHTML=list.map((c,i)=>'<div class="slash-item '+(i===slashIndex?'active':'')+'" data-command="'+escapeHtml(c.id)+'"><span class="slash-command">/'+escapeHtml(c.id)+'</span><span class="slash-description">'+escapeHtml(c.description)+'</span></div>').join(''); els.slash.classList.add('visible'); els.slash.querySelectorAll('[data-command]').forEach(n=>n.addEventListener('click',()=>{els.input.value='/'+n.dataset.command+' ';els.input.focus();els.slash.classList.remove('visible');})); }
-function submit(){ const value=els.input.value; if(!value.trim()||state.busy)return; setPlusMenu(false); post({type:'submit',value}); }
-els.send.addEventListener('click',submit); els.plus.addEventListener('click',()=>setPlusMenu(!plusMenuOpen)); els.configure.addEventListener('click',()=>post({type:'configure'})); els.refresh.addEventListener('click',()=>post({type:'refresh'})); els.plusMenu.querySelectorAll('[data-plus-action]').forEach(node=>{node.addEventListener('click',()=>{setPlusMenu(false);post({type:'plusAction',action:node.dataset.plusAction});});node.addEventListener('keydown',event=>{if(event.key!=='ArrowDown'&&event.key!=='ArrowUp')return;event.preventDefault();const actions=visiblePlusActions();const index=actions.indexOf(node);const next=(index+(event.key==='ArrowDown'?1:-1)+actions.length)%actions.length;actions[next]?.focus();});}); els.plusFilter.addEventListener('input',filterPlusActions); els.plusFilter.addEventListener('keydown',event=>{if(event.key!=='Enter'&&event.key!=='ArrowDown'&&event.key!=='ArrowUp')return;const actions=visiblePlusActions();if(!actions.length)return;event.preventDefault();if(event.key==='Enter')actions[0].click();else if(event.key==='ArrowDown')actions[0].focus();else actions[actions.length-1].focus();}); document.querySelectorAll('[data-chip]').forEach(n=>n.addEventListener('click',()=>post({type:'chip',value:n.dataset.chip})));
-els.input.addEventListener('input',()=>{els.input.style.height='auto';els.input.style.height=Math.min(150,els.input.scrollHeight)+'px';slashIndex=0;renderSlash();updateSendState();});
+function submit(){ const value=els.input.value; if(!value.trim()||state.busy||deliverableView.open)return; setPlusMenu(false); post({type:'submit',value}); }
+els.send.addEventListener('click',submit); els.plus.addEventListener('click',()=>setPlusMenu(!plusMenuOpen));els.historyToggle.addEventListener('click',()=>setHistoryExpanded(!historyExpanded)); els.configure.addEventListener('click',()=>post({type:'configure'})); els.refresh.addEventListener('click',()=>post({type:'refresh'})); els.plusMenu.querySelectorAll('[data-plus-action]').forEach(node=>{node.addEventListener('click',()=>{setPlusMenu(false);post({type:'plusAction',action:node.dataset.plusAction});});node.addEventListener('keydown',event=>{if(event.key!=='ArrowDown'&&event.key!=='ArrowUp')return;event.preventDefault();const actions=visiblePlusActions();const index=actions.indexOf(node);const next=(index+(event.key==='ArrowDown'?1:-1)+actions.length)%actions.length;actions[next]?.focus();});}); els.plusFilter.addEventListener('input',filterPlusActions); els.plusFilter.addEventListener('keydown',event=>{if(event.key!=='Enter'&&event.key!=='ArrowDown'&&event.key!=='ArrowUp')return;const actions=visiblePlusActions();if(!actions.length)return;event.preventDefault();if(event.key==='Enter')actions[0].click();else if(event.key==='ArrowDown')actions[0].focus();else actions[actions.length-1].focus();}); document.querySelectorAll('[data-chip]').forEach(n=>n.addEventListener('click',()=>post({type:'chip',value:n.dataset.chip})));document.querySelectorAll('[data-history-filter]').forEach(node=>node.addEventListener('click',()=>{historyFilter=['active','completed','archived'].includes(node.dataset.historyFilter)?node.dataset.historyFilter:'active';openTaskMenuId='';saveViewState();renderTasks();}));els.historySearch?.addEventListener('input',()=>{historySearch=els.historySearch.value;openTaskMenuId='';saveViewState();renderTasks();});els.historySearch?.addEventListener('keydown',event=>{if(event.key==='ArrowDown'){const first=historyItemNodes()[0];if(first){event.preventDefault();first.focus();}}else if(event.key==='Escape'&&historySearch){event.preventDefault();historySearch='';saveViewState();renderTasks();}});
+els.input.addEventListener('input',()=>{draftText=els.input.value;resizeComposer();slashIndex=0;saveViewState();renderSlash();updateSendState();});
 els.input.addEventListener('keydown',event=>{if(event.key==='Enter'&&!event.shiftKey&&!els.slash.classList.contains('visible')){event.preventDefault();submit();}else if(els.slash.classList.contains('visible')&&(event.key==='ArrowDown'||event.key==='ArrowUp')){event.preventDefault();slashIndex=Math.max(0,slashIndex+(event.key==='ArrowDown'?1:-1));renderSlash();}else if(els.slash.classList.contains('visible')&&event.key==='Tab'){event.preventDefault();const active=els.slash.querySelector('.active');if(active){els.input.value='/'+active.dataset.command+' ';els.slash.classList.remove('visible');}}});
-document.addEventListener('keydown',event=>{if(event.key==='Escape'&&plusMenuOpen){event.preventDefault();setPlusMenu(false);els.plus.focus();}});
+document.addEventListener('keydown',event=>{if((event.ctrlKey||event.metaKey)&&String(event.key).toLowerCase()==='f'&&!deliverableView.open){event.preventDefault();focusHistorySearch();return;}if(event.key!=='Escape')return;if(deliverableView.open){event.preventDefault();closeDeliverable(true);return;}if(openTaskMenuId){event.preventDefault();openTaskMenuId='';renderTasks();return;}if(plusMenuOpen){event.preventDefault();setPlusMenu(false);els.plus.focus();}});
 document.addEventListener('pointerdown',event=>{if(plusMenuOpen&&!els.plusMenu.contains(event.target)&&!els.plus.contains(event.target))setPlusMenu(false);});
-window.addEventListener('message',event=>{const msg=event.data||{};if(msg.type==='state')updateState(msg.state);else if(msg.type==='loading')els.loading?.classList.toggle('visible',Boolean(msg.value));else if(msg.type==='operation'){state.busy=Boolean(msg.busy);render();}else if(msg.type==='pending'){state.pending=msg.pending;renderPending();}else if(msg.type==='clearInput'){els.input.value='';els.input.style.height='auto';renderSlash();updateSendState();}else if(msg.type==='prefill'){els.input.value=msg.value||'';els.input.focus();renderSlash();updateSendState();}else if(msg.type==='showHelp'){els.input.value='/';els.input.focus();renderSlash();updateSendState();}else if(msg.type==='error'){state.error=msg.message;render();}});
+window.addEventListener('message',event=>{const msg=event.data||{};if(msg.type==='state')updateState(msg.state);else if(msg.type==='loading')document.getElementById('loading')?.classList.toggle('visible',Boolean(msg.value));else if(msg.type==='operation'){state.busy=Boolean(msg.busy);state.operationLabel=msg.label||'';render();}else if(msg.type==='pending'){state.pending=msg.pending;renderPending();}else if(msg.type==='historyFilter'){historyFilter=['active','completed','archived'].includes(msg.filter)?msg.filter:'active';historySearch='';historyExpanded=true;openTaskMenuId='';saveViewState();renderHistoryVisibility();renderTasks();}else if(msg.type==='clearInput'){els.input.value='';draftText='';resizeComposer();saveViewState();renderSlash();updateSendState();}else if(msg.type==='prefill'){els.input.value=msg.value||'';draftText=els.input.value;resizeComposer();saveViewState();els.input.focus();renderSlash();updateSendState();}else if(msg.type==='showHelp'){els.input.value='/';draftText='/';resizeComposer();saveViewState();els.input.focus();renderSlash();updateSendState();}else if(msg.type==='deliverableResult'){applyDeliverableResult(msg);}else if(msg.type==='deliverableError'){applyDeliverableError(msg);}else if(msg.type==='deliverableIndexResult'){applyDeliverableIndexResult(msg);}else if(msg.type==='deliverableIndexError'){applyDeliverableIndexError(msg);}else if(msg.type==='error'){state.error=msg.message;render();}});
+els.input.value=draftText;resizeComposer();renderHistoryVisibility();renderHistoryControls();updateSendState();
 post({type:'ready'});
 </script>
 </body>

@@ -1,0 +1,189 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://baldr.dev/contracts/phase-deliverable-v1.schema.json",
+  "title": "Baldr redacted phase deliverable v1",
+  "type": "object",
+  "required": [
+    "contract",
+    "version",
+    "work_item_id",
+    "source",
+    "stage",
+    "round",
+    "run_ordinal",
+    "item_revision",
+    "digest",
+    "redacted",
+    "availability",
+    "reason",
+    "created_at",
+    "preview",
+    "report",
+    "technical"
+  ],
+  "properties": {
+    "contract": { "const": "baldr-phase-deliverable" },
+    "version": { "const": 1 },
+    "work_item_id": { "type": "string", "minLength": 1, "maxLength": 160 },
+    "source": {
+      "type": "object",
+      "required": ["run_id", "step_id", "step_key"],
+      "properties": {
+        "run_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "step_id": { "type": "string", "minLength": 1, "maxLength": 384 },
+        "step_key": { "type": "string", "minLength": 1, "maxLength": 160 }
+      },
+      "additionalProperties": false
+    },
+    "stage": { "$ref": "#/$defs/stage" },
+    "round": { "type": "integer", "minimum": 0 },
+    "run_ordinal": { "type": "integer", "minimum": 1 },
+    "item_revision": { "type": "integer", "minimum": 1 },
+    "digest": {
+      "oneOf": [
+        { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        { "type": "null" }
+      ]
+    },
+    "redacted": { "const": true },
+    "availability": {
+      "enum": ["available", "summary_only", "unavailable"]
+    },
+    "reason": { "type": ["string", "null"], "maxLength": 160 },
+    "created_at": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "preview": {
+      "oneOf": [
+        { "$ref": "#/$defs/preview" },
+        { "type": "null" }
+      ]
+    },
+    "report": {
+      "oneOf": [
+        { "$ref": "#/$defs/report" },
+        { "type": "null" }
+      ]
+    },
+    "technical": {
+      "oneOf": [
+        { "$ref": "#/$defs/technical" },
+        { "type": "null" }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "availability": { "const": "available" } },
+        "required": ["availability"]
+      },
+      "then": {
+        "properties": {
+          "digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+          "report": { "$ref": "#/$defs/report" },
+          "technical": { "$ref": "#/$defs/technical" }
+        }
+      },
+      "else": {
+        "properties": {
+          "report": { "type": "null" },
+          "technical": { "type": "null" }
+        }
+      }
+    }
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "stage": { "enum": ["planning", "execution", "review"] },
+    "nullableToken": { "type": ["string", "null"], "maxLength": 96 },
+    "stringList": {
+      "type": "array",
+      "maxItems": 100,
+      "items": { "type": "string", "maxLength": 1024 }
+    },
+    "decision": {
+      "type": "object",
+      "required": ["key", "value"],
+      "properties": {
+        "key": { "type": "string", "maxLength": 160 },
+        "value": { "type": "string", "maxLength": 700 }
+      },
+      "additionalProperties": false
+    },
+    "preview": {
+      "type": "object",
+      "required": ["status", "summary", "review_decision"],
+      "properties": {
+        "status": { "$ref": "#/$defs/nullableToken" },
+        "summary": { "type": "string", "maxLength": 2400 },
+        "review_decision": { "$ref": "#/$defs/nullableToken" }
+      },
+      "additionalProperties": false
+    },
+    "report": {
+      "type": "object",
+      "required": [
+        "evidence",
+        "status",
+        "summary",
+        "interpretation",
+        "scope",
+        "approach",
+        "plan_steps",
+        "work_completed",
+        "work_next",
+        "findings",
+        "corrections",
+        "verification_evidence",
+        "decisions",
+        "acceptance_criteria",
+        "assumptions",
+        "files_modified",
+        "tests_run",
+        "verification_needed",
+        "risks",
+        "follow_up",
+        "blockers",
+        "review_decision"
+      ],
+      "properties": {
+        "evidence": { "const": "reported" },
+        "status": { "$ref": "#/$defs/nullableToken" },
+        "summary": { "type": "string", "maxLength": 2400 },
+        "interpretation": { "type": "string", "maxLength": 2400 },
+        "scope": { "$ref": "#/$defs/stringList" },
+        "approach": { "$ref": "#/$defs/stringList" },
+        "plan_steps": { "$ref": "#/$defs/stringList" },
+        "work_completed": { "$ref": "#/$defs/stringList" },
+        "work_next": { "$ref": "#/$defs/stringList" },
+        "findings": { "$ref": "#/$defs/stringList" },
+        "corrections": { "$ref": "#/$defs/stringList" },
+        "verification_evidence": { "$ref": "#/$defs/stringList" },
+        "decisions": {
+          "type": "array",
+          "maxItems": 24,
+          "items": { "$ref": "#/$defs/decision" }
+        },
+        "acceptance_criteria": { "$ref": "#/$defs/stringList" },
+        "assumptions": { "$ref": "#/$defs/stringList" },
+        "files_modified": { "$ref": "#/$defs/stringList" },
+        "tests_run": { "$ref": "#/$defs/stringList" },
+        "verification_needed": { "$ref": "#/$defs/stringList" },
+        "risks": { "$ref": "#/$defs/stringList" },
+        "follow_up": { "$ref": "#/$defs/stringList" },
+        "blockers": { "$ref": "#/$defs/stringList" },
+        "review_decision": { "$ref": "#/$defs/nullableToken" }
+      },
+      "additionalProperties": false
+    },
+    "technical": {
+      "type": "object",
+      "required": ["commands_run", "constraints", "alternatives_rejected"],
+      "properties": {
+        "commands_run": { "$ref": "#/$defs/stringList" },
+        "constraints": { "$ref": "#/$defs/stringList" },
+        "alternatives_rejected": { "$ref": "#/$defs/stringList" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

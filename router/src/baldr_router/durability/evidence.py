@@ -365,6 +365,7 @@ def _event_summary(event: Mapping[str, Any]) -> dict[str, Any]:
         "status",
         "mode",
         "phase",
+        "category",
         "checkpoint_id",
         "publication_id",
     ):
@@ -380,6 +381,8 @@ def _event_summary(event: Mapping[str, Any]) -> dict[str, Any]:
         public["plan_digest"] = plan_digest
     if public:
         result["facts"] = public
+    if payload.get("observed") is True:
+        result.setdefault("facts", {})["observed"] = True
     return result
 
 

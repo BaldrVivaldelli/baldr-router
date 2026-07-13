@@ -1,0 +1,139 @@
+{
+  "active_stage": null,
+  "activity": {
+    "evidence": "observed",
+    "kind": "preparing_workspace",
+    "message": "Preparando el trabajo",
+    "since": null
+  },
+  "attention": null,
+  "contract": "baldr-work-item-progress",
+  "deliverables": [
+    {
+      "action": "inspect-item-phase",
+      "availability": "available",
+      "created_at": "2026-07-12T10:02:00Z",
+      "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "entry_count": 5,
+      "item_revision": 4,
+      "preview": {
+        "review_decision": null,
+        "status": "planned",
+        "summary": "Baldr entendió el pedido y preparó un plan claro."
+      },
+      "reason": null,
+      "redacted": true,
+      "round": 0,
+      "run_ordinal": 1,
+      "stage": "planning"
+    },
+    {
+      "action": "inspect-item-phase",
+      "availability": "summary_only",
+      "created_at": "2026-07-12T10:03:00Z",
+      "digest": null,
+      "entry_count": 1,
+      "item_revision": 4,
+      "preview": {
+        "review_decision": null,
+        "status": "implemented",
+        "summary": "Se conservaron los cambios informados por una ejecución anterior."
+      },
+      "reason": "legacy_summary_only",
+      "redacted": true,
+      "round": 1,
+      "run_ordinal": 2,
+      "stage": "execution"
+    }
+  ],
+  "deliverable_index": {
+    "action": "list-item-deliverables",
+    "next_cursor": null,
+    "returned": 2,
+    "total": 2,
+    "truncated": false
+  },
+  "final_report": null,
+  "last_event_at": "2026-07-12T10:04:00Z",
+  "milestones": [],
+  "overall_state": "running",
+  "revision": 1783850640000000,
+  "stages": [
+    {
+      "completed_at": null,
+      "evidence": "observed",
+      "history": [],
+      "id": "planning",
+      "outcome": null,
+      "report": null,
+      "round_count": 0,
+      "started_at": null,
+      "state": "pending",
+      "technical": {
+        "alternatives_rejected": [],
+        "attempt_count": 0,
+        "commands_run": [],
+        "constraints": [],
+        "error_codes": [],
+        "participant_count": 0,
+        "participants": [],
+        "step_count": 0
+      }
+    },
+    {
+      "completed_at": null,
+      "evidence": "observed",
+      "history": [],
+      "id": "execution",
+      "outcome": null,
+      "report": null,
+      "round_count": 0,
+      "started_at": null,
+      "state": "pending",
+      "technical": {
+        "alternatives_rejected": [],
+        "attempt_count": 0,
+        "commands_run": [],
+        "constraints": [],
+        "error_codes": [],
+        "participant_count": 0,
+        "participants": [],
+        "step_count": 0
+      }
+    },
+    {
+      "completed_at": null,
+      "evidence": "observed",
+      "history": [],
+      "id": "review",
+      "outcome": null,
+      "report": null,
+      "round_count": 0,
+      "started_at": null,
+      "state": "pending",
+      "technical": {
+        "alternatives_rejected": [],
+        "attempt_count": 0,
+        "commands_run": [],
+        "constraints": [],
+        "error_codes": [],
+        "participant_count": 0,
+        "participants": [],
+        "step_count": 0
+      }
+    }
+  ],
+  "technical": {
+    "checkpoint_count": 0,
+    "error_codes": [],
+    "event_count": 0,
+    "item_state": "running",
+    "publication_count": 0,
+    "recovery_count": 0,
+    "run_id": null,
+    "run_state": null,
+    "unknown_step_count": 0,
+    "workflow_name": null
+  },
+  "version": 1
+}

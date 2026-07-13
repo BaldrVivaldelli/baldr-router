@@ -1,5 +1,15 @@
 # Change Log
 
+## 0.19.0
+
+- Replaces internal phase statuses with an understandable **Ahora** card, a three-stage narrative, and a final result that explains what changed, what was checked, and what remains.
+- Makes Planning, Execution, and Review expandable, groups correction rounds, preserves expansion across reloads, and keeps providers, models, IDs, commands, and traces under technical details.
+- Shows only allowlisted, evidence-backed live activity; it never renders raw prompts, reasoning, provider streams, secrets, or private paths.
+- Adds safe, paginated phase deliverables for every Planning, Execution, and Review round, including on-demand access to retries beyond the compact status window.
+- Adds clear attention cards and contextual actions for review findings, interruption, conflict, recovery, cancellation, and failure.
+- Improves keyboard navigation, a focus-contained deliverable viewer, screen-reader announcements, reduced motion, zoom and narrow-sidebar layouts, and compatibility with work items created before this release.
+- Uses a compact status path plus adaptive visible-only polling to reduce repeated runtime work and output-channel noise.
+
 ## 0.18.0
 
 - Makes **Automatic protection** the recommended default: exact Git roots use the existing worktree flow, while non-Git folders and selected repository subdirectories use a durable BALDR-managed shadow workspace.

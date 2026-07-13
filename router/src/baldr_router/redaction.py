@@ -17,9 +17,14 @@ _SECRET_ENV_NAMES = (
 )
 _PATTERNS = (
     re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+\-/=]{8,}"),
+    re.compile(r"(?i)\bBasic\s+[A-Za-z0-9+/=]{8,}"),
     re.compile(r"\bctx7sk-[A-Za-z0-9_-]{8,}"),
     re.compile(r"\bsk-[A-Za-z0-9_-]{16,}"),
-    re.compile(r"(?i)(api[_-]?key|token|password|secret)(\s*[=:]\s*)([^\s,;\]\}]{6,})"),
+    re.compile(
+        r"(?i)(api[_-]?key|authorization|token|password|secret)"
+        r"([\"']?\s*(?:[=:]|\bis\b|\bwas\b)\s*[\"']?)"
+        r"([^\"'\s,;\]\}]{6,})"
+    ),
 )
 _SENSITIVE_KEYS = re.compile(r"(?i)(api[_-]?key|authorization|token|password|secret|credential)")
 _SAFE_SENSITIVE_KEYS = re.compile(r"(?i)(^|_)(input_tokens|output_tokens|cached_input_tokens|reasoning_output_tokens|token_count|tokens_used)$")

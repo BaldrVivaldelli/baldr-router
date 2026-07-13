@@ -11,7 +11,22 @@ from .config import ExecutionProfileConfig, load_config, save_config
 from .durability.identity import workspace_identity
 from .durability.store import DurableStore, utc_now_iso
 from .execution_profiles import resolve_role_profiles
+from .phase_deliverables import (
+    PhaseDeliverableError,
+    inspect_phase_deliverable,
+    list_phase_deliverable_index_page,
+    list_phase_deliverables,
+    phase_deliverable_index_metadata,
+)
 from .platforming import normalize_path_for_runtime
+from .work_item_progress import (
+    compact_execution_profiles,
+    compact_list_item,
+    compact_preferences,
+    compact_selected_item,
+    progress_summary,
+    project_work_item_progress,
+)
 from .workspace_policy import (
     WorkspacePolicyError,
     inspect_workspace,
@@ -50,6 +65,12 @@ RECONCILIATION_ACTION_ORDER = (
     "discard_worktree",
     "mark_failed",
 )
+
+_PUBLIC_WORK_ITEM_COLUMNS = """
+    id, workspace_id, title, task_artifact_id, status, safety_mode, preset,
+    context_mode, current_run_id, idempotency_key, revision, error_code,
+    created_at, updated_at, started_at, completed_at, archived_at
+"""
 
 
 def _json(value: Any) -> str:
@@ -142,8 +163,14 @@ def _run_to_item_status(status: str | None) -> str:
     return "draft"
 
 
-def _item_row(value: Any) -> dict[str, Any]:
+def _item_row(value: Any, *, include_internal: bool = True) -> dict[str, Any]:
     item = dict(value)
+    if not include_internal:
+        item.pop("role_profiles_json", None)
+        item.pop("repository_identity_json", None)
+        item.pop("config_json", None)
+        item["context7_policy"] = str(item.get("context_mode") or "auto")
+        return item
     item["role_profiles"] = _parse_json(item.pop("role_profiles_json", None), {})
     item["repository_identity"] = _parse_json(
         item.pop("repository_identity_json", None), {}
@@ -219,6 +246,8 @@ def _phase_summary(snapshot: dict[str, Any] | None) -> list[dict[str, Any]]:
 
 def _allowed_actions(item: dict[str, Any], snapshot: dict[str, Any] | None) -> list[str]:
     status = str(item.get("status") or "draft")
+    if status == "archived":
+        return ["restore", "delete"]
     actions: list[str] = []
     if status in {"draft", "ready", "failed", "cancelled"}:
         actions.append("start")
@@ -270,29 +299,31 @@ def workbench_options() -> dict[str, Any]:
             },
         ],
         "presets": [
-            {"id": "fast", "label": "Fast", "description": "One profile per phase and low effort."},
-            {"id": "balanced", "label": "Balanced", "description": "Provider defaults with medium effort."},
-            {"id": "deep", "label": "Deep", "description": "Full phase plans and high effort."},
-            {"id": "custom", "label": "Custom", "description": "Use explicit profiles selected per phase."},
+            {"id": "fast", "label": "Rápido", "description": "Resuelve tareas simples con menos análisis."},
+            {"id": "balanced", "label": "Estándar", "description": "Equilibra rapidez y profundidad."},
+            {"id": "deep", "label": "Detallado", "description": "Dedica más análisis a trabajos complejos."},
+            {"id": "custom", "label": "A medida", "description": "Usa el equipo elegido para cada etapa."},
         ],
         "context_modes": [
-            {"id": "auto", "label": "Context7 Auto"},
-            {"id": "on", "label": "Context7 On"},
-            {"id": "off", "label": "Context7 Off"},
+            {"id": "auto", "label": "Ayuda automática"},
+            {"id": "on", "label": "Ayuda activa"},
+            {"id": "off", "label": "Ayuda desactivada"},
         ],
         "slash_commands": [
-            {"id": "setup", "usage": "/setup", "description": "Open Baldr configuration actions."},
-            {"id": "new", "usage": "/new <task>", "description": "Create a draft item."},
-            {"id": "run", "usage": "/run [task]", "description": "Start the selected item or create and run one."},
-            {"id": "status", "usage": "/status", "description": "Refresh runtime and item status."},
-            {"id": "profile", "usage": "/profile <fast|balanced|deep|custom>", "description": "Change the workspace preset."},
+            {"id": "setup", "usage": "/setup", "description": "Abrir las opciones de Baldr."},
+            {"id": "new", "usage": "/new <tarea>", "description": "Guardar una sesión para después."},
+            {"id": "run", "usage": "/run [tarea]", "description": "Empezar la sesión elegida o crear una nueva."},
+            {"id": "status", "usage": "/status", "description": "Actualizar el estado de las sesiones."},
+            {"id": "profile", "usage": "/profile <fast|balanced|deep|custom>", "description": "Cambiar el nivel de detalle."},
             {"id": "git", "usage": "/git <automatic|current|off>", "description": "Elegí cómo proteger los cambios de esta carpeta."},
-            {"id": "context", "usage": "/context <auto|on|off>", "description": "Change Context7 behavior."},
-            {"id": "roles", "usage": "/roles", "description": "Choose execution profiles for architecture, implementation, and review."},
-            {"id": "cancel", "usage": "/cancel", "description": "Cancel the selected running item."},
-            {"id": "resume", "usage": "/resume", "description": "Resume or reconcile a recoverable item."},
-            {"id": "archive", "usage": "/archive", "description": "Archive the selected terminal item."},
-            {"id": "help", "usage": "/help", "description": "Show available Baldr Console commands."},
+            {"id": "context", "usage": "/context <auto|on|off>", "description": "Configurar la ayuda adicional."},
+            {"id": "roles", "usage": "/roles", "description": "Elegir el equipo para cada etapa."},
+            {"id": "cancel", "usage": "/cancel", "description": "Detener la sesión en curso."},
+            {"id": "resume", "usage": "/resume", "description": "Continuar una sesión interrumpida."},
+            {"id": "archive", "usage": "/archive", "description": "Archivar la sesión elegida."},
+            {"id": "restore", "usage": "/restore", "description": "Restaurar la sesión archivada elegida."},
+            {"id": "delete", "usage": "/delete", "description": "Eliminar permanentemente la sesión archivada elegida."},
+            {"id": "help", "usage": "/help", "description": "Ver los comandos disponibles."},
         ],
     }
 
@@ -318,17 +349,36 @@ class WorkItemService:
             (item_id, event_type, _json(payload or {}), utc_now_iso()),
         )
 
-    def _load_item(self, row: Any, *, include_task: bool = True) -> dict[str, Any]:
-        item = _item_row(row)
+    def _load_item(
+        self,
+        row: Any,
+        *,
+        include_task: bool = True,
+        include_internal: bool = True,
+    ) -> dict[str, Any]:
+        item = _item_row(row, include_internal=include_internal)
         if include_task:
-            item["task"] = str(self.store.load_artifact(item.get("task_artifact_id")) or "")
-            item["extra_context"] = str(
-                self.store.load_artifact(item.get("extra_context_artifact_id")) or ""
-            )
+            if include_internal:
+                item["task"] = str(
+                    self.store.load_artifact(item.get("task_artifact_id")) or ""
+                )
+                item["extra_context"] = str(
+                    self.store.load_artifact(item.get("extra_context_artifact_id"))
+                    or ""
+                )
+            else:
+                item["task"] = self.store.load_public_text_artifact(
+                    item.get("task_artifact_id")
+                )
         return item
 
     def preferences(self, workspace_root: str | Path) -> dict[str, Any]:
         root, identity = _workspace(workspace_root)
+        return self._preferences_for_identity(root, identity)
+
+    def _preferences_for_identity(
+        self, root: Path, identity: dict[str, Any]
+    ) -> dict[str, Any]:
         row = self.store.connect().execute(
             "SELECT * FROM workspace_preferences WHERE workspace_id = ?",
             (identity["workspace_id"],),
@@ -727,8 +777,14 @@ class WorkItemService:
         if existing is None:
             ordinal = int(
                 connection.execute(
-                    "SELECT COALESCE(MAX(ordinal), 0) + 1 FROM work_item_runs WHERE item_id=?",
-                    (item_id,),
+                    """
+                    SELECT COALESCE(MAX(value), 0) + 1 FROM (
+                        SELECT ordinal AS value FROM work_item_runs WHERE item_id=?
+                        UNION ALL
+                        SELECT run_ordinal AS value FROM phase_deliverables WHERE work_item_id=?
+                    )
+                    """,
+                    (item_id, item_id),
                 ).fetchone()[0]
             )
             connection.execute(
@@ -739,14 +795,26 @@ class WorkItemService:
                 (item_id, run_id, ordinal, utc_now_iso()),
             )
 
-    def _sync(self, item: dict[str, Any]) -> dict[str, Any]:
+    def _sync(
+        self, item: dict[str, Any], *, include_internal: bool = True
+    ) -> dict[str, Any]:
         if item.get("status") == "archived":
             return item
         run = None
         if item.get("current_run_id"):
-            run = self.store.get_run(str(item["current_run_id"]))
+            run = (
+                self.store.get_run(str(item["current_run_id"]))
+                if include_internal
+                else self.store.get_run_public(str(item["current_run_id"]))
+            )
         if run is None:
-            run = self.store.get_run_by_idempotency_key(str(item["idempotency_key"]))
+            run = (
+                self.store.get_run_by_idempotency_key(str(item["idempotency_key"]))
+                if include_internal
+                else self.store.get_run_by_idempotency_key_public(
+                    str(item["idempotency_key"])
+                )
+            )
         if run is None:
             return item
         desired = _run_to_item_status(run.get("status"))
@@ -754,31 +822,68 @@ class WorkItemService:
             item.get("current_run_id") != run.get("id")
             or item.get("status") != desired
             or item.get("error_code") != run.get("error_code")
-            or item.get("error_reason") != run.get("error_reason")
+            or (
+                include_internal
+                and item.get("error_reason") != run.get("error_reason")
+            )
         )
+        if changed and not include_internal:
+            # Public status polling is observational.  Reflect the durable run
+            # in memory without turning every refresh into a work-item write.
+            item = {
+                **item,
+                "current_run_id": run.get("id"),
+                "status": desired,
+                "error_code": run.get("error_code"),
+                "updated_at": run.get("updated_at") or item.get("updated_at"),
+            }
+            if desired in TERMINAL_ITEM_STATUSES and not item.get("completed_at"):
+                item["completed_at"] = run.get("completed_at") or run.get(
+                    "updated_at"
+                )
+            changed = False
         if changed:
             terminal = desired in TERMINAL_ITEM_STATUSES
             now = utc_now_iso()
             with self.store.transaction(immediate=True) as connection:
                 self._link_run(connection, item["id"], str(run["id"]))
-                connection.execute(
-                    """
-                    UPDATE work_items
-                    SET current_run_id=?, status=?, error_code=?, error_reason=?, updated_at=?,
-                        completed_at=CASE WHEN ? THEN COALESCE(completed_at, ?) ELSE completed_at END
-                    WHERE id=?
-                    """,
-                    (
-                        run.get("id"),
-                        desired,
-                        run.get("error_code"),
-                        run.get("error_reason"),
-                        now,
-                        int(terminal),
-                        now,
-                        item["id"],
-                    ),
-                )
+                if include_internal:
+                    connection.execute(
+                        """
+                        UPDATE work_items
+                        SET current_run_id=?, status=?, error_code=?, error_reason=?, updated_at=?,
+                            completed_at=CASE WHEN ? THEN COALESCE(completed_at, ?) ELSE completed_at END
+                        WHERE id=?
+                        """,
+                        (
+                            run.get("id"),
+                            desired,
+                            run.get("error_code"),
+                            run.get("error_reason"),
+                            now,
+                            int(terminal),
+                            now,
+                            item["id"],
+                        ),
+                    )
+                else:
+                    connection.execute(
+                        """
+                        UPDATE work_items
+                        SET current_run_id=?, status=?, error_code=?, updated_at=?,
+                            completed_at=CASE WHEN ? THEN COALESCE(completed_at, ?) ELSE completed_at END
+                        WHERE id=?
+                        """,
+                        (
+                            run.get("id"),
+                            desired,
+                            run.get("error_code"),
+                            now,
+                            int(terminal),
+                            now,
+                            item["id"],
+                        ),
+                    )
                 self._event(
                     connection,
                     item["id"],
@@ -789,7 +894,11 @@ class WorkItemService:
                 "SELECT * FROM work_items WHERE id=?", (item["id"],)
             ).fetchone()
             assert row is not None
-            item = self._load_item(row, include_task="task" in item)
+            item = self._load_item(
+                row,
+                include_task="task" in item,
+                include_internal=include_internal,
+            )
         item["run"] = run
         return item
 
@@ -799,46 +908,94 @@ class WorkItemService:
         workspace_root: str | Path | None = None,
         limit: int = 100,
         include_archived: bool = False,
+        include_internal: bool = True,
+        _workspace_id: str | None = None,
     ) -> list[dict[str, Any]]:
         clauses: list[str] = []
         params: list[Any] = []
         if workspace_root is not None:
-            _, identity = _workspace(workspace_root)
             clauses.append("workspace_id=?")
-            params.append(identity["workspace_id"])
+            if _workspace_id is None:
+                _, identity = _workspace(workspace_root)
+                _workspace_id = str(identity["workspace_id"])
+            params.append(_workspace_id)
         if not include_archived:
             clauses.append("archived_at IS NULL")
-        query = "SELECT * FROM work_items"
+        query = (
+            "SELECT * FROM work_items"
+            if include_internal
+            else f"SELECT {_PUBLIC_WORK_ITEM_COLUMNS} FROM work_items"
+        )
         if clauses:
             query += " WHERE " + " AND ".join(clauses)
         query += " ORDER BY updated_at DESC LIMIT ?"
         params.append(max(1, min(int(limit), 500)))
         rows = self.store.connect().execute(query, tuple(params)).fetchall()
-        return [self._sync(self._load_item(row, include_task=False)) for row in rows]
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            item = self._sync(
+                self._load_item(
+                    row, include_task=False, include_internal=include_internal
+                ),
+                include_internal=include_internal,
+            )
+            item["allowed_actions"] = _allowed_actions(item, None)
+            item["progress_summary"] = progress_summary(item)
+            items.append(item)
+        return items
 
-    def get(self, item_id: str, *, include_timeline: bool = True) -> dict[str, Any]:
-        row = self.store.connect().execute(
-            "SELECT * FROM work_items WHERE id=?", (item_id,)
-        ).fetchone()
+    def get(
+        self,
+        item_id: str,
+        *,
+        include_timeline: bool = True,
+        include_internal: bool = True,
+    ) -> dict[str, Any]:
+        query = (
+            "SELECT * FROM work_items WHERE id=?"
+            if include_internal
+            else f"SELECT {_PUBLIC_WORK_ITEM_COLUMNS} FROM work_items WHERE id=?"
+        )
+        row = self.store.connect().execute(query, (item_id,)).fetchone()
         if row is None:
             raise KeyError(item_id)
-        item = self._sync(self._load_item(row))
+        item = self._sync(
+            self._load_item(row, include_internal=include_internal),
+            include_internal=include_internal,
+        )
         snapshot: dict[str, Any] | None = None
         if item.get("current_run_id"):
             try:
-                snapshot = self.store.snapshot_run(str(item["current_run_id"]))
+                snapshot = (
+                    self.store.snapshot_run(str(item["current_run_id"]))
+                    if include_internal
+                    else self.store.snapshot_run_public(str(item["current_run_id"]))
+                )
             except KeyError:
                 snapshot = None
         item["phases"] = _phase_summary(snapshot)
         item["allowed_actions"] = _allowed_actions(item, snapshot)
-        if snapshot:
+        item["deliverables"] = list_phase_deliverables(
+            self.store,
+            work_item_id=item_id,
+            workspace_id=str(item["workspace_id"]),
+        )
+        item["deliverable_index"] = phase_deliverable_index_metadata(
+            self.store,
+            work_item_id=item_id,
+            workspace_id=str(item["workspace_id"]),
+            returned=len(item["deliverables"]),
+        )
+        item["progress"] = project_work_item_progress(item, snapshot)
+        item["progress_summary"] = progress_summary(item, item["progress"])
+        if snapshot and include_internal:
             item["workflow"] = {
                 "run": snapshot.get("run"),
                 "steps": snapshot.get("steps"),
                 "checkpoints": snapshot.get("checkpoints"),
                 "events": snapshot.get("events"),
             }
-        if include_timeline:
+        if include_timeline and include_internal:
             timeline: list[dict[str, Any]] = []
             for event in self.store.connect().execute(
                 "SELECT * FROM work_item_events WHERE item_id=? ORDER BY sequence",
@@ -858,7 +1015,70 @@ class WorkItemService:
                 )
             )
             item["timeline"] = timeline[-200:]
-        return item
+        return item if include_internal else compact_selected_item(item)
+
+    def inspect_phase(
+        self,
+        item_id: str,
+        *,
+        workspace_root: str | Path,
+        stage: str,
+        round_number: int,
+        run_ordinal: int | None = None,
+        cursor: str | None = None,
+        page_size: int = 20,
+    ) -> dict[str, Any]:
+        """Read one bounded page without accepting an artifact or database ID."""
+
+        _root, identity = _workspace(workspace_root)
+        workspace_id = str(identity["workspace_id"])
+        row = self.store.connect().execute(
+            "SELECT workspace_id FROM work_items WHERE id = ?", (item_id,)
+        ).fetchone()
+        if row is None or str(row["workspace_id"]) != workspace_id:
+            # Keep cross-workspace and unknown-item responses indistinguishable.
+            raise PhaseDeliverableError(
+                "phase_deliverable_not_found",
+                "No phase deliverable exists for this task and workspace.",
+            )
+        return inspect_phase_deliverable(
+            self.store,
+            work_item_id=item_id,
+            workspace_id=workspace_id,
+            stage=stage,
+            round_number=round_number,
+            run_ordinal=run_ordinal,
+            cursor=cursor,
+            page_size=page_size,
+        )
+
+    def list_deliverables(
+        self,
+        item_id: str,
+        *,
+        workspace_root: str | Path,
+        cursor: str | None = None,
+        page_size: int = 20,
+    ) -> dict[str, Any]:
+        """Page descriptor history without reading any deliverable document."""
+
+        _root, identity = _workspace(workspace_root)
+        workspace_id = str(identity["workspace_id"])
+        row = self.store.connect().execute(
+            "SELECT workspace_id FROM work_items WHERE id = ?", (item_id,)
+        ).fetchone()
+        if row is None or str(row["workspace_id"]) != workspace_id:
+            raise PhaseDeliverableError(
+                "phase_deliverable_not_found",
+                "No phase deliverable history exists for this task and workspace.",
+            )
+        return list_phase_deliverable_index_page(
+            self.store,
+            work_item_id=item_id,
+            workspace_id=workspace_id,
+            cursor=cursor,
+            page_size=page_size,
+        )
 
     def _prepare_restart(self, item_id: str) -> dict[str, Any]:
         current = self.get(item_id, include_timeline=False)
@@ -1090,14 +1310,153 @@ class WorkItemService:
         current = self.get(item_id, include_timeline=False)
         if current["status"] in {"running", "cancelling"}:
             raise ValueError("A running work item cannot be archived.")
+        if current["status"] == "archived":
+            return current
         now = utc_now_iso()
         with self.store.transaction(immediate=True) as connection:
             connection.execute(
                 "UPDATE work_items SET status='archived', archived_at=?, updated_at=? WHERE id=?",
                 (now, now, item_id),
             )
-            self._event(connection, item_id, "work_item.archived", {})
+            self._event(
+                connection,
+                item_id,
+                "work_item.archived",
+                {"previous_status": current["status"]},
+            )
         return self.get(item_id)
+
+    def restore(self, item_id: str) -> dict[str, Any]:
+        current = self.get(item_id, include_timeline=False)
+        if current["status"] != "archived":
+            raise ValueError("Only an archived work item can be restored.")
+
+        previous = self.store.connect().execute(
+            """
+            SELECT payload_json FROM work_item_events
+            WHERE item_id=? AND event_type='work_item.archived'
+            ORDER BY sequence DESC LIMIT 1
+            """,
+            (item_id,),
+        ).fetchone()
+        archived_payload = _parse_json(
+            str(previous["payload_json"]) if previous else None,
+            {},
+        )
+        restored_status = str(archived_payload.get("previous_status") or "")
+        if restored_status not in WORK_ITEM_STATUSES - {"archived"}:
+            run = self.store.get_run(str(current["current_run_id"])) if current.get("current_run_id") else None
+            restored_status = _run_to_item_status(str((run or {}).get("status") or ""))
+            if restored_status in {"running", "cancelling"}:
+                raise ValueError("A running work item cannot be restored from the archive.")
+            if restored_status not in WORK_ITEM_STATUSES - {"archived"}:
+                restored_status = "completed" if current.get("completed_at") else "draft"
+
+        now = utc_now_iso()
+        with self.store.transaction(immediate=True) as connection:
+            connection.execute(
+                "UPDATE work_items SET status=?, archived_at=NULL, updated_at=? WHERE id=?",
+                (restored_status, now, item_id),
+            )
+            self._event(
+                connection,
+                item_id,
+                "work_item.restored",
+                {"restored_status": restored_status},
+            )
+        return self.get(item_id)
+
+    def delete(self, item_id: str) -> dict[str, Any]:
+        """Permanently remove one archived item and its durable session data.
+
+        Workspace files are never modified.  Provider sessions are deliberately
+        retained because they may be shared by another active work item.
+        """
+
+        current = self.get(item_id, include_timeline=False)
+        if current["status"] != "archived":
+            raise ValueError("Only an archived work item can be deleted permanently.")
+
+        connection = self.store.connect()
+        run_ids = {
+            str(row["run_id"])
+            for row in connection.execute(
+                "SELECT run_id FROM work_item_runs WHERE item_id=?",
+                (item_id,),
+            ).fetchall()
+        }
+        run_ids.update(
+            str(row["id"])
+            for row in connection.execute(
+                "SELECT id FROM workflow_runs WHERE work_item_id=?",
+                (item_id,),
+            ).fetchall()
+        )
+        if run_ids:
+            placeholders = ",".join("?" for _ in run_ids)
+            shared_run_ids = {
+                str(row["run_id"])
+                for row in connection.execute(
+                    f"SELECT DISTINCT run_id FROM work_item_runs WHERE item_id<>? AND run_id IN ({placeholders})",
+                    (item_id, *sorted(run_ids)),
+                ).fetchall()
+            }
+            # A run linked to another item is not this session's private
+            # history. Keep it and its artifacts intact for that other item.
+            run_ids.difference_update(shared_run_ids)
+        private_artifact_ids = {
+            str(value)
+            for value in (
+                current.get("task_artifact_id"),
+                current.get("extra_context_artifact_id"),
+            )
+            if value
+        }
+
+        clauses: list[str] = []
+        params: list[str] = []
+        if run_ids:
+            clauses.append("run_id IN (" + ",".join("?" for _ in run_ids) + ")")
+            params.extend(sorted(run_ids))
+        if private_artifact_ids:
+            clauses.append("id IN (" + ",".join("?" for _ in private_artifact_ids) + ")")
+            params.extend(sorted(private_artifact_ids))
+
+        removed_paths: list[str] = []
+        with self.store.transaction(immediate=True) as transaction:
+            if clauses:
+                for row in transaction.execute(
+                    "SELECT storage_path FROM artifacts WHERE " + " OR ".join(clauses),
+                    tuple(params),
+                ).fetchall():
+                    if row["storage_path"]:
+                        removed_paths.append(str(row["storage_path"]))
+                transaction.execute(
+                    "DELETE FROM artifacts WHERE " + " OR ".join(clauses),
+                    tuple(params),
+                )
+            if run_ids:
+                placeholders = ",".join("?" for _ in run_ids)
+                transaction.execute(
+                    f"DELETE FROM workflow_runs WHERE id IN ({placeholders})",
+                    tuple(sorted(run_ids)),
+                )
+            transaction.execute("DELETE FROM work_items WHERE id=?", (item_id,))
+
+        referenced_paths = {
+            str(row["storage_path"])
+            for row in self.store.connect().execute(
+                "SELECT storage_path FROM artifacts WHERE storage_path IS NOT NULL"
+            ).fetchall()
+        }
+        for raw_path in sorted(set(removed_paths) - referenced_paths):
+            try:
+                path = Path(raw_path)
+                if path.exists():
+                    path.unlink()
+            except OSError:
+                continue
+        return {"id": item_id, "deleted": True}
 
     def summary(
         self,
@@ -1106,22 +1465,50 @@ class WorkItemService:
         limit: int = 100,
         selected_item_id: str | None = None,
         include_archived: bool = False,
+        include_internal: bool = True,
     ) -> dict[str, Any]:
+        resolved_root = None
+        resolved_identity = None
+        if workspace_root is not None:
+            resolved_root, resolved_identity = _workspace(workspace_root)
         items = self.list(
-            workspace_root=workspace_root,
+            workspace_root=resolved_root,
             limit=limit,
             include_archived=include_archived,
+            include_internal=include_internal,
+            _workspace_id=(
+                str(resolved_identity["workspace_id"])
+                if resolved_identity is not None
+                else None
+            ),
         )
+        if not include_internal:
+            items = [compact_list_item(item) for item in items]
         counts: dict[str, int] = {}
         for item in items:
             counts[item["status"]] = counts.get(item["status"], 0) + 1
         selected = None
         selected_error = None
         if selected_item_id:
-            try:
-                selected = self.get(selected_item_id)
-            except KeyError:
+            selected_row = self.store.connect().execute(
+                "SELECT workspace_id FROM work_items WHERE id=?", (selected_item_id,)
+            ).fetchone()
+            expected_workspace_id = (
+                str(resolved_identity["workspace_id"])
+                if resolved_identity is not None
+                else None
+            )
+            if selected_row is None or (
+                expected_workspace_id is not None
+                and str(selected_row["workspace_id"]) != expected_workspace_id
+            ):
                 selected_error = "work_item_not_found"
+            else:
+                selected = self.get(
+                    selected_item_id,
+                    include_timeline=include_internal,
+                    include_internal=include_internal,
+                )
         return {
             "ok": True,
             "items": items,
@@ -1129,8 +1516,20 @@ class WorkItemService:
             "selected_error": selected_error,
             "counts": counts,
             "total": len(items),
-            "preferences": self.preferences(workspace_root) if workspace_root else None,
-            "profiles": available_execution_profiles(),
+            "preferences": (
+                self._preferences_for_identity(resolved_root, resolved_identity)
+                if resolved_root is not None and resolved_identity is not None
+                else None
+            )
+            if include_internal
+            else compact_preferences(
+                self._preferences_for_identity(resolved_root, resolved_identity)
+                if resolved_root is not None and resolved_identity is not None
+                else None
+            ),
+            "profiles": available_execution_profiles()
+            if include_internal
+            else compact_execution_profiles(available_execution_profiles()),
             "options": workbench_options(),
         }
 

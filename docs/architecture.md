@@ -7,6 +7,7 @@
 ```text
 client facade
   -> facade contract: setup | status | run
+  -> public work-item progress projection
   -> baldr-router core
       -> workflow engine
       -> provider registry
@@ -31,6 +32,8 @@ It defines three stable user intents:
 - `run`: execute the frozen orchestration workflow.
 
 Generated facade files are synchronized by `scripts/generate_facades.py`. CI-style validation uses `--check`.
+
+The console hot path uses the additive `baldr-work-item-progress` v1 contract in `contracts/work-item-progress-v1.schema.json`. The projector derives a bounded public narrative from durable steps, structured reports, checkpoints, publications, and allowlisted activity events. Structured reports can carry explicit interpretation, scope, approach, plan steps, completed/next work, findings, corrections, and verification evidence; legacy reports remain valid when those additive fields are absent. Provider and command start events are projected as generic `working`, while `changing` and `verifying` require typed evidence. It is a presentation boundary: prompts, provider wire events, sessions, leases, private roots, raw stderr/stdout, and reasoning never cross it. Existing `phases`, `workflow`, and `timeline` remain available to compatible full-status clients; `status --workbench-only` returns the compact projection without health probes or internal workflow payloads.
 
 ## Core owns
 

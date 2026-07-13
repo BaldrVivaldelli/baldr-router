@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "0.18.0"
+VERSION = "0.19.0"
 DIST = ROOT / "dist"
 ARTIFACTS = DIST / "artifacts"
 PYTHON_DIST = ARTIFACTS / "python"
@@ -32,6 +32,14 @@ def executable(name: str) -> str:
     if not found:
         raise SystemExit(f"Required executable not found: {name}")
     return found
+
+
+def require_zip_members(archive: Path, expected: set[str], *, label: str) -> None:
+    with zipfile.ZipFile(archive) as bundle:
+        members = set(bundle.namelist())
+    missing = sorted(expected - members)
+    if missing:
+        raise SystemExit(f"{label} is missing required files: {', '.join(missing)}")
 
 
 def _portable(value: Any, *, replacements: dict[str, str] | None = None) -> Any:
@@ -258,7 +266,7 @@ def build_validation_report() -> Path:
         "release": VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "feature_freeze": True,
-        "qualification_stage": "automatic-workspace-protection",
+        "qualification_stage": "narrative-progress-ux",
         "live_environment_qualified": False,
         "live_environment_note": (
             "Build and synthetic validation cannot qualify a real client environment. "
@@ -310,7 +318,7 @@ def write_checksums() -> Path:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Build Baldr Router v0.18 automatic-protection artifacts")
+    parser = argparse.ArgumentParser(description="Build Baldr Router v0.19 narrative-progress artifacts")
     parser.add_argument("--skip-tests", action="store_true")
     parser.add_argument("--keep-dist", action="store_true")
     args = parser.parse_args()
@@ -326,6 +334,7 @@ def main() -> int:
     for old_wheel in EXTENSION_RUNTIME.glob("baldr_router-*.whl"):
         old_wheel.unlink()
 
+    run(sys.executable, "scripts/check_release_consistency.py", label="release consistency")
     run(sys.executable, "scripts/generate_facades.py", label="generate shared facades")
     run(sys.executable, "scripts/generate_facades.py", "--check", label="facade conformance")
     shutil.copy2(ROOT / "launcher" / "lib" / "runtime-bootstrap.mjs", EXTENSION / "runtime" / "runtime-bootstrap.mjs")
@@ -405,6 +414,19 @@ def main() -> int:
     if len(core_wheels) != 1 or len(adapter_wheels) != 1:
         raise SystemExit(f"Expected one core and adapter wheel: {core_wheels=} {adapter_wheels=}")
     core_wheel, adapter_wheel = core_wheels[0], adapter_wheels[0]
+    require_zip_members(
+        core_wheel,
+        {
+            "baldr_router/provider_activity.py",
+            "baldr_router/phase_deliverables.py",
+            "baldr_router/work_item_progress.py",
+            "baldr_router/contracts/phase-deliverable-v1.schema.json",
+            "baldr_router/contracts/phase-deliverable-page-v1.schema.json",
+            "baldr_router/contracts/phase-deliverable-index-page-v1.schema.json",
+            "baldr_router/contracts/work-item-progress-v1.schema.json",
+        },
+        label="Core wheel",
+    )
     for hidden in PYTHON_DIST.glob(".*"):
         if hidden.is_file():
             hidden.unlink()
@@ -436,6 +458,27 @@ def main() -> int:
         raise SystemExit(
             f"VSIX packaging did not create the expected artifact: {vsix_target}"
         )
+    require_zip_members(
+        vsix_target,
+        {
+            "extension/dist/workItemPresentation.js",
+            "extension/resources/work-item-progress-v1.schema.json",
+            "extension/resources/phase-deliverable-v1.schema.json",
+            "extension/resources/phase-deliverable-page-v1.schema.json",
+            "extension/resources/phase-deliverable-index-page-v1.schema.json",
+            f"extension/resources/runtime/{core_wheel.name}",
+        },
+        label="VSIX",
+    )
+    run(
+        sys.executable,
+        "scripts/check_release_consistency.py",
+        "--core-wheel",
+        str(core_wheel),
+        "--vsix",
+        str(vsix_target),
+        label="packaged release consistency",
+    )
 
     zip_directory(
         ROOT / "facades" / "kiro" / "baldr-orchestrator",

@@ -4,8 +4,9 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 
 import { redactSensitive } from './redaction.js';
+import { describeRuntimeInvocation } from './runtimeLog.js';
 
-export const EXTENSION_VERSION = '0.18.0';
+export const EXTENSION_VERSION = '0.19.0';
 export const CONTEXT7_SECRET_KEY = 'baldr.context7ApiKey';
 const PROVIDER_MODELS_CACHE_TTL_MS = 5 * 60 * 1000;
 
@@ -34,6 +35,13 @@ export interface FacadeOptions {
   profileDefinition?: JsonRecord;
   itemConfig?: JsonRecord;
   trustWorkspace?: boolean;
+  phaseStage?: 'planning' | 'execution' | 'review';
+  phaseRound?: number;
+  phaseRunOrdinal?: number;
+  phaseCursor?: string;
+  phasePageSize?: number;
+  deliverableCursor?: string;
+  deliverablePageSize?: number;
 }
 
 function wslDistroFromPath(value: string | undefined): string {
@@ -107,7 +115,7 @@ export class BaldrRuntime {
       ? fs.readdirSync(runtimeDir).filter((name) => /^baldr_router-.*\.whl$/i.test(name)).sort()
       : [];
     if (candidates.length === 0) {
-      return path.join(runtimeDir, 'baldr_router-0.18.0-py3-none-any.whl');
+      return path.join(runtimeDir, 'baldr_router-0.19.0-py3-none-any.whl');
     }
     return path.join(runtimeDir, candidates.at(-1)!);
   }
@@ -198,8 +206,9 @@ export class BaldrRuntime {
     routerArgs: string[],
     token?: vscode.CancellationToken,
     allowFailure = false,
+    quiet = false,
   ): Promise<JsonRecord> {
-    return this.invokeBootstrapJson(['exec', '--', ...routerArgs], token, allowFailure);
+    return this.invokeBootstrapJson(['exec', '--', ...routerArgs], token, allowFailure, quiet);
   }
 
   async runFacade(
@@ -208,6 +217,8 @@ export class BaldrRuntime {
       workspaceRoot?: string;
       task?: string;
       recentLimit?: number;
+      workItemLimit?: number;
+      workbenchOnly?: boolean;
       dryRun?: boolean;
       workItemId?: string;
       workItemAction?: string;
@@ -225,6 +236,13 @@ export class BaldrRuntime {
       cancelReason?: string;
       itemConfig?: JsonRecord;
       profileDefinition?: JsonRecord;
+      phaseStage?: 'planning' | 'execution' | 'review';
+      phaseRound?: number;
+      phaseRunOrdinal?: number;
+      phaseCursor?: string;
+      phasePageSize?: number;
+      deliverableCursor?: string;
+      deliverablePageSize?: number;
     } = {},
     token?: vscode.CancellationToken,
     allowFailure = false,
@@ -245,8 +263,10 @@ export class BaldrRuntime {
     } else if (intent === 'status') {
       if (options.workspaceRoot) args.push(options.workspaceRoot);
       args.push('--recent-limit', String(options.recentLimit ?? 5));
+      args.push('--work-item-limit', String(options.workItemLimit ?? 100));
       if (options.workItemId) args.push('--work-item-id', options.workItemId);
       if (options.includeArchived) args.push('--include-archived');
+      if (options.workbenchOnly) args.push('--workbench-only');
     } else {
       if (!options.workspaceRoot) throw new Error('An open workspace is required for /run.');
       args.push(options.workspaceRoot, options.task?.trim() ?? '');
@@ -266,10 +286,22 @@ export class BaldrRuntime {
         args.push('--reconciliation-action', options.reconciliationAction);
       }
       if (options.cancelReason) args.push('--cancel-reason', options.cancelReason);
+      if (options.phaseStage) args.push('--phase-stage', options.phaseStage);
+      if (options.phaseRound !== undefined) args.push('--phase-round', String(options.phaseRound));
+      if (options.phaseRunOrdinal !== undefined) args.push('--phase-run-ordinal', String(options.phaseRunOrdinal));
+      if (options.phaseCursor) args.push('--phase-cursor', options.phaseCursor);
+      if (options.phasePageSize !== undefined) args.push('--phase-page-size', String(options.phasePageSize));
+      if (options.deliverableCursor) args.push('--deliverable-cursor', options.deliverableCursor);
+      if (options.deliverablePageSize !== undefined) args.push('--deliverable-page-size', String(options.deliverablePageSize));
       if (options.dryRun) args.push('--dry-run');
     }
     args.push('--client', 'vscode-extension');
-    return this.runRouterJson(args, token, allowFailure);
+    return this.runRouterJson(
+      args,
+      token,
+      allowFailure,
+      intent === 'status' && options.workbenchOnly === true,
+    );
   }
 
   private appendRoleProfiles(
@@ -287,11 +319,15 @@ export class BaldrRuntime {
     workspaceRoot: string,
     workItemId?: string,
     token?: vscode.CancellationToken,
+    includeArchived = false,
   ): Promise<JsonRecord> {
     return this.runFacade('status', {
       workspaceRoot,
       workItemId,
       recentLimit: 5,
+      workItemLimit: 100,
+      workbenchOnly: true,
+      includeArchived,
     }, token, true);
   }
 
@@ -386,13 +422,72 @@ export class BaldrRuntime {
     }, token, true);
   }
 
+  async restoreWorkItem(
+    workspaceRoot: string,
+    workItemId: string,
+    token?: vscode.CancellationToken,
+  ): Promise<JsonRecord> {
+    return this.runFacade('run', {
+      workspaceRoot,
+      workItemId,
+      workItemAction: 'restore-item',
+    }, token, true);
+  }
+
+  async deleteWorkItem(
+    workspaceRoot: string,
+    workItemId: string,
+    token?: vscode.CancellationToken,
+  ): Promise<JsonRecord> {
+    return this.runFacade('run', {
+      workspaceRoot,
+      workItemId,
+      workItemAction: 'delete-item',
+    }, token, true);
+  }
+
+  async inspectWorkItemPhase(
+    workspaceRoot: string,
+    workItemId: string,
+    stage: 'planning' | 'execution' | 'review',
+    round: number,
+    options: { runOrdinal?: number; cursor?: string; pageSize?: number } = {},
+    token?: vscode.CancellationToken,
+  ): Promise<JsonRecord> {
+    return this.runFacade('run', {
+      workspaceRoot,
+      workItemId,
+      workItemAction: 'inspect-item-phase',
+      phaseStage: stage,
+      phaseRound: round,
+      phaseRunOrdinal: options.runOrdinal,
+      phaseCursor: options.cursor,
+      phasePageSize: options.pageSize ?? 30,
+    }, token, true);
+  }
+
+  async listWorkItemDeliverables(
+    workspaceRoot: string,
+    workItemId: string,
+    options: { cursor?: string; pageSize?: number } = {},
+    token?: vscode.CancellationToken,
+  ): Promise<JsonRecord> {
+    return this.runFacade('run', {
+      workspaceRoot,
+      workItemId,
+      workItemAction: 'list-item-deliverables',
+      deliverableCursor: options.cursor,
+      deliverablePageSize: options.pageSize ?? 50,
+    }, token, true);
+  }
+
 
   async consoleStatus(
     workspaceRoot: string,
     workItemId?: string,
     token?: vscode.CancellationToken,
   ): Promise<JsonRecord> {
-    return this.workbenchStatus(workspaceRoot, workItemId, token);
+    return this.workbenchStatus(workspaceRoot, workItemId, token, true);
   }
 
   async setWorkspacePreferences(
@@ -564,9 +659,10 @@ export class BaldrRuntime {
     args: string[],
     token?: vscode.CancellationToken,
     allowFailure = false,
+    quiet = false,
   ): Promise<JsonRecord> {
     await fs.promises.mkdir(this.context.globalStorageUri.fsPath, { recursive: true });
-    const result = await this.spawnCapture(args, token);
+    const result = await this.spawnCapture(args, token, quiet);
     const stdout = result.stdout.trim();
     if (!stdout) throw new Error(result.stderr.trim() || 'Baldr returned no JSON output.');
     let parsed: JsonRecord;
@@ -594,10 +690,11 @@ export class BaldrRuntime {
   private async spawnCapture(
     bootstrapArgs: string[],
     token?: vscode.CancellationToken,
+    quiet = false,
   ): Promise<{ stdout: string; stderr: string; code: number }> {
     const env = await this.processEnvironment();
     const secrets = await this.knownSecrets();
-    this.output.appendLine(`[runtime] ${bootstrapArgs.join(' ')}`);
+    if (!quiet) this.output.appendLine(describeRuntimeInvocation(bootstrapArgs));
 
     return new Promise((resolve, reject) => {
       const child = spawn(process.execPath, [this.bootstrapPath, ...bootstrapArgs], {

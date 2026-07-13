@@ -53,6 +53,15 @@ Return a short JSON object only. Do not wrap it in Markdown.
 Required keys (use empty arrays when a section does not apply):
 - status: one of planned, implemented, reviewed, approved, needs_changes, partial, blocked, no_changes_needed
 - summary: concise operational summary
+- interpretation: one sentence explaining what you understood the person needs
+- scope: string array describing what is and is not included
+- approach: string array describing the chosen approach as conclusions, not hidden reasoning
+- plan_steps: ordered string array of concrete planned steps
+- work_completed: string array of concrete work already completed
+- work_next: string array of concrete work still remaining
+- findings: string array of review findings; use [] when none
+- corrections: string array of corrections applied; use [] when none
+- verification_evidence: string array of observable checks and their outcomes; do not claim a pass without evidence
 - files_modified: string array
 - commands_run: string array
 - tests_run: string array
@@ -67,6 +76,10 @@ Required keys (use empty arrays when a section does not apply):
 - blockers: string array
 - review_decision: approved, changes_required, inconclusive, or not_applicable; use not_applicable outside review
 Prefer status `{status_hint}` when appropriate.
+Write `summary`, `interpretation`, and every user-facing list item in the same language as the user's task.
+Use concise, plain language that a non-technical reader can understand.
+Report conclusions and observable evidence only. Never include hidden reasoning,
+private chain-of-thought, or an analysis transcript.
 """.strip()
 
 

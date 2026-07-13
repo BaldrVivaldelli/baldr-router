@@ -12,6 +12,11 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .process_control import managed_popen, terminate_process_tree, unregister_process
+from .provider_activity import (
+    ProviderActivitySink,
+    codex_public_activity,
+    emit_provider_activity,
+)
 from .provider_errors import provider_error
 from .redaction import redact_text, redact_value
 from .run import redact_command
@@ -77,12 +82,14 @@ def run_codex_exec_json(
     telemetry_enabled: bool,
     keep_raw_events: bool,
     max_events_returned: int,
+    activity_sink: ProviderActivitySink | None = None,
 ) -> dict[str, Any]:
     """Run ``codex exec --json`` and classify every failure deterministically."""
 
     run_id = f"codex-{uuid.uuid4().hex[:12]}"
     started = time.time()
     started_at = utc_now_iso()
+    emit_provider_activity(activity_sink, "working")
 
     with tempfile.TemporaryDirectory(prefix=f"baldr-router-{run_id}-") as tmpdir:
         tmp = Path(tmpdir)
@@ -197,6 +204,9 @@ def run_codex_exec_json(
                     continue
                 event = redact_value(event)
                 etype = str(event.get("type") or "unknown")
+                category = codex_public_activity(event)
+                if category:
+                    emit_provider_activity(activity_sink, category)
                 event_counts[etype] += 1
                 if keep_raw_events:
                     raw_events.append(event)
