@@ -90,16 +90,16 @@ Si un worktree desaparece, Baldr verifica el repo original y lo recrea desde `ch
 
 Un workspace sombra se guarda en el directorio de estado local de Baldr, bajo `shadow-workspaces/<run-id>`, nunca en `/tmp`. `tree/` contiene la copia y un Git privado auxiliar; `control/` guarda ownership, estado, manifests SHA-256, blobs y un journal por evento. Los manifests son la autoridad de recuperación: el Git privado no reemplaza la verificación por contenido.
 
-En protección automática, una raíz Git exacta y limpia usa worktree. Una raíz Git sucia o sin commit, una carpeta sin Git y una subcarpeta seleccionada dentro de un repositorio padre usan shadow; Baldr no expande el alcance al padre ni obliga a hacer stash. El original permanece sin cambios hasta que review aprueba o la persona elige aplicar el checkpoint verificado.
+En runs aislados creados con la semántica anterior, una raíz Git exacta y limpia usa worktree. Una raíz Git sucia o sin commit, una carpeta sin Git y una subcarpeta seleccionada dentro de un repositorio padre usan shadow; Baldr no expande el alcance al padre ni obliga a hacer stash. El original permanece sin cambios hasta que review aprueba o la persona elige aplicar el checkpoint verificado.
 
-La política siguiente permanece para flujos legados explícitos de worktree/in-place; no degrada `automatic` a escritura directa:
+La política siguiente permanece para flujos aislados explícitos de worktree/shadow:
 
 ```toml
 [workspace]
 dirty_workspace_policy = "reject"
 ```
 
-`current` e `in-place` son modos avanzados de escritura directa y conservan exactamente la subcarpeta elegida como cwd, aunque Git se encuentre en un padre. `non-git` corresponde a **Sin protección** y exige consentimiento explícito. `worktree` se conserva como valor legado para preferencias y tareas ya persistidas; el default nuevo es `automatic` (`auto` en el core de bajo nivel).
+`automatic` es el flujo predeterminado de escritura directa con autorización previa por tarea. `current` e `in-place` conservan el consentimiento directo persistente y exactamente la subcarpeta elegida como cwd, aunque Git se encuentre en un padre. `non-git` corresponde a **Sin protección** y exige consentimiento explícito. `worktree`, `auto` de bajo nivel y los shadows se conservan para runs aislados existentes y configuración avanzada.
 
 Antes de crear un shadow, Baldr excluye `.git`, `.hg`, `.svn`, un denylist mínimo no reemplazable de credenciales, patrones sensibles configurados y artefactos generados. Aplica límites visibles de entradas (incluidos directorios), bytes totales, tamaño individual, profundidad y enlaces. Sólo acepta symlinks relativos que permanezcan dentro del alcance; rechaza rutas no portables y reparse points no soportados. Los modos POSIX se conservan donde el filesystem los soporte; Windows usa semántica de permisos de mejor esfuerzo y falla explícitamente si no puede recrear un enlace.
 

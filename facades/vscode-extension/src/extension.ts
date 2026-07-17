@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import * as path from 'node:path';
 
 import { BaldrConsoleProvider } from './console.js';
 import { renderError, renderRun, renderSetup, renderStatus } from './render.js';
@@ -8,6 +9,11 @@ import {
   record,
 } from './runtime.js';
 import type { BaldrIntentId } from './generated/intents.js';
+import {
+  captureWorkspaceContext,
+  contextualWorkspaceRoot,
+  resolveWorkspaceRoot,
+} from './workspaceContext.js';
 
 type Intent = BaldrIntentId;
 type JsonRecord = Record<string, unknown>;
@@ -67,15 +73,16 @@ function createChatHandler(
   output: vscode.LogOutputChannel,
   consoleProvider: BaldrConsoleProvider,
 ): vscode.ChatRequestHandler {
-  return async (request, _chatContext, stream, token) => {
+  return async (request, chatContext, stream, token) => {
     const intent = normalizeIntent(request.command);
+    const prior = latestBaldrConversation(chatContext);
     try {
       if (intent === 'setup') {
         stream.progress('Preparing Baldr…');
         await runtime.ensure(token);
         const result = await runtime.runFacade(
           'setup',
-          { workspaceRoot: currentWorkspaceRoot() },
+          { workspaceRoot: contextualWorkspaceRoot(prior?.workspaceRoot) },
           token,
         );
         stream.markdown(renderSetup(result));
@@ -88,7 +95,7 @@ function createChatHandler(
         await runtime.ensure(token);
         const result = await runtime.runFacade(
           'status',
-          { workspaceRoot: currentWorkspaceRoot(), recentLimit: 5 },
+          { workspaceRoot: contextualWorkspaceRoot(prior?.workspaceRoot), recentLimit: 5 },
           token,
         );
         stream.markdown(renderStatus(result));
@@ -103,26 +110,53 @@ function createChatHandler(
         return { metadata: { intent, ok: false } };
       }
 
-      const workspaceRoot = requireWorkspaceRoot();
-      stream.progress('Creating a durable Baldr work item…');
-      const created = await runtime.createWorkItem(workspaceRoot, task, {}, token);
-      const item = record(created.work_item);
-      const itemId = String(item.id ?? '');
-      if (!itemId) throw new Error('Baldr did not return a work item id.');
-      stream.markdown(`Created durable item **${String(item.title ?? 'Baldr task')}**. Execution continues in the Baldr Console.`);
+      const workspaceRoot = await resolveWorkspaceRoot({
+        references: request.references,
+        preferredRoot: prior?.workspaceRoot,
+        promptIfAmbiguous: true,
+      });
+      requireWorkspaceRoot(workspaceRoot);
+      const captured = captureWorkspaceContext(workspaceRoot, request.references);
+      const capturedOptions = {
+        attachments: captured.attachments,
+        extraContext: captured.extraContext,
+      };
+      const canContinue = Boolean(
+        prior?.workItemId
+        && prior.workspaceRoot
+        && sameWorkspace(prior.workspaceRoot, workspaceRoot),
+      );
+      let itemId = prior?.workItemId ?? '';
+      let result: JsonRecord;
+      if (canContinue) {
+        stream.progress('Continuing the durable Baldr conversation…');
+        result = await runtime.continueWorkItem(workspaceRoot, itemId, task, capturedOptions, token);
+      } else {
+        stream.progress('Creating a durable Baldr conversation…');
+        const created = await runtime.createWorkItem(workspaceRoot, task, capturedOptions, token);
+        const item = record(created.work_item);
+        itemId = String(item.id ?? '');
+        if (!itemId) throw new Error('Baldr did not return a work item id.');
+        stream.progress('Baldr is planning, implementing, and reviewing…');
+        result = await runtime.startWorkItem(workspaceRoot, itemId, token);
+      }
+      const completed = record(result.work_item);
+      output.info(`Chat work item completed: ${JSON.stringify({
+        id: String(completed.id ?? itemId),
+        status: String(completed.status ?? result.status ?? 'unknown'),
+        error_code: completed.error_code ? String(completed.error_code) : undefined,
+      })}`);
+      stream.markdown(renderRun(result));
       stream.button({ command: 'baldr.open', title: 'Open Baldr Console' });
-      void runtime.startWorkItem(workspaceRoot, itemId).then((result) => {
-        const completed = record(result.work_item);
-        output.info(`Chat-created work item completed: ${JSON.stringify({
-          id: String(completed.id ?? itemId),
-          status: String(completed.status ?? 'unknown'),
-          error_code: completed.error_code ? String(completed.error_code) : undefined,
-        })}`);
-      }).catch((error) => {
-        output.error(error instanceof Error ? error : new Error(String(error)));
-      }).finally(() => void consoleProvider.refresh(false));
       void consoleProvider.refresh(false);
-      return { metadata: { intent, ok: true, workItemId: itemId } };
+      return {
+        metadata: {
+          intent,
+          ok: result.ok === true,
+          workItemId: itemId,
+          workspaceRoot,
+        },
+      };
     } catch (error) {
       if (error instanceof vscode.CancellationError) {
         stream.markdown('Baldr operation cancelled.');
@@ -140,17 +174,30 @@ function normalizeIntent(command: string | undefined): Intent {
   return command === 'setup' || command === 'status' || command === 'run' ? command : 'run';
 }
 
-function currentWorkspaceRoot(): string | undefined {
-  return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+function latestBaldrConversation(context: vscode.ChatContext): { workItemId: string; workspaceRoot: string } | undefined {
+  for (const turn of [...context.history].reverse()) {
+    const metadata = record(record(turn).result).metadata;
+    const value = record(metadata);
+    const workItemId = String(value.workItemId ?? '');
+    const workspaceRoot = String(value.workspaceRoot ?? '');
+    if (workItemId && workspaceRoot) return { workItemId, workspaceRoot };
+  }
+  return undefined;
 }
 
-function requireWorkspaceRoot(): string {
-  const root = currentWorkspaceRoot();
+function sameWorkspace(left: string, right: string): boolean {
+  const normalize = (value: string): string => {
+    const resolved = path.resolve(value).replace(/[\\/]+$/, '');
+    return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+  };
+  return normalize(left) === normalize(right);
+}
+
+function requireWorkspaceRoot(root: string | undefined): asserts root is string {
   if (!root) throw new Error('Open a workspace folder before running a Baldr task.');
   if (!vscode.workspace.isTrusted) {
     throw new Error('Trust this VS Code workspace before Baldr may run local providers.');
   }
-  return root;
 }
 
 async function warmRuntime(

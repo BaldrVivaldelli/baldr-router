@@ -20,7 +20,13 @@ const emptyReport = (overrides = {}) => ({
   findings: [],
   corrections: [],
   verification_evidence: [],
+  changes_added: [],
+  changes_modified: [],
+  changes_removed: [],
+  files_added: [],
   files_modified: [],
+  files_deleted: [],
+  file_changes: [],
   commands_run: [],
   tests_run: [],
   verification_needed: [],
@@ -372,7 +378,61 @@ test('completed work exposes a concise result with pluralized facts', () => {
     '1 comprobación informada',
     'Veredicto: revisión aprobada',
   ]);
+  assert.deepEqual(presentation.outcome.fileChanges, [
+    { path: 'a.ts', kind: 'modified', additions: null, deletions: null, evidence: 'reported' },
+    { path: 'b.ts', kind: 'modified', additions: null, deletions: null, evidence: 'reported' },
+  ]);
   assert.equal(presentation.outcome.sections.some((section) => section.title === 'Próximos pasos'), true);
+});
+
+test('completed work separates added, modified, and deleted files', () => {
+  const presentation = buildWorkItemPresentation({
+    id: 'wi-file-summary',
+    status: 'completed',
+    workflow: {
+      run: {
+        status: 'approved',
+        id: 'run-file-summary',
+        final: emptyReport({
+          status: 'approved',
+          summary: 'Los cambios quedaron listos.',
+          changes_added: ['Un resumen final separado por tipo de cambio.'],
+          changes_modified: ['La presentación del resultado de la sesión.'],
+          changes_removed: ['La lista genérica que mezclaba todos los cambios.'],
+          files_added: ['src/new.ts'],
+          files_modified: ['src/current.ts'],
+          files_deleted: ['src/old.ts'],
+          file_changes: [
+            { path: 'src/new.ts', kind: 'added', additions: 12, deletions: 0, evidence: 'observed' },
+            { path: 'src/current.ts', kind: 'modified', additions: 4, deletions: 2, evidence: 'observed' },
+            { path: 'src/old.ts', kind: 'deleted', additions: 0, deletions: 7, evidence: 'observed' },
+          ],
+          review_decision: 'approved',
+        }),
+      },
+      steps: [],
+    },
+  });
+
+  assert.deepEqual(
+    presentation.outcome.sections
+      .filter((section) => section.id.startsWith('changes-'))
+      .map((section) => [section.title, section.items]),
+    [
+      ['Qué agregó', ['Un resumen final separado por tipo de cambio.']],
+      ['Qué modificó', ['La presentación del resultado de la sesión.']],
+      ['Qué quitó', ['La lista genérica que mezclaba todos los cambios.']],
+    ],
+  );
+  assert.deepEqual(
+    presentation.outcome.fileChanges,
+    [
+      { path: 'src/new.ts', kind: 'added', additions: 12, deletions: 0, evidence: 'observed' },
+      { path: 'src/current.ts', kind: 'modified', additions: 4, deletions: 2, evidence: 'observed' },
+      { path: 'src/old.ts', kind: 'deleted', additions: 0, deletions: 7, evidence: 'observed' },
+    ],
+  );
+  assert.equal(presentation.outcome.facts[0].label, '3 archivos');
 });
 
 test('a provisional final report never claims the work is ready', () => {
@@ -419,6 +479,69 @@ test('attention has safe default wording and a single clear action', () => {
   assert.equal(presentation.attention.actionLabel, 'Elegir cómo continuar');
   assert.deepEqual(presentation.attention.blockers, ['Elegir cómo conservar los cambios.']);
   assert.doesNotMatch(presentation.explanation, /internal provider status/);
+});
+
+test('legacy phase failures explain the stopped stage instead of repeating generic recovery copy', () => {
+  const presentation = buildWorkItemPresentation({
+    status: 'needs_attention',
+    allowed_actions: ['mark_failed'],
+    progress: {
+      contract: 'baldr-work-item-progress',
+      version: 1,
+      overall_state: 'attention',
+      activity: { kind: 'waiting_for_choice' },
+      active_stage: 'planning',
+      stages: [{
+        id: 'planning', state: 'attention', outcome: 'blocked',
+        report: emptyReport({
+          status: 'blocked',
+          blockers: ['La fase de planificación no puede crear archivos.'],
+        }),
+      }],
+      attention: {
+        kind: 'reconciliation',
+        stage: 'planning',
+        summary: 'Los cambios están protegidos y Baldr necesita que elijas cómo continuar.',
+        blockers: ['La fase de planificación no puede crear archivos.'],
+      },
+      technical: { error_codes: ['workflow_phase_failed'] },
+    },
+  });
+
+  assert.equal(presentation.attention.title, 'La planificación se detuvo');
+  assert.equal(
+    presentation.attention.message,
+    'La planificación se detuvo por el motivo que aparece abajo. '
+      + 'No se llegó a modificar ningún archivo.',
+  );
+  assert.equal(presentation.attention.actionLabel, 'Cerrar esta sesión');
+});
+
+test('write authorization is presented as a decision instead of a failure', () => {
+  const presentation = buildWorkItemPresentation({
+    status: 'needs_attention',
+    allowed_actions: ['authorize_changes', 'decline_changes', 'archive'],
+    progress: {
+      contract: 'baldr-work-item-progress',
+      version: 1,
+      overall_state: 'attention',
+      activity: { kind: 'waiting_for_choice' },
+      active_stage: 'planning',
+      stages: [{ id: 'planning', state: 'complete', outcome: 'planned' }],
+      attention: {
+        kind: 'authorization',
+        summary: 'El plan está listo. Elegí si Baldr puede modificar archivos.',
+        blockers: [],
+      },
+      technical: { error_codes: ['write_authorization_required'] },
+    },
+  });
+
+  assert.equal(presentation.attention.kind, 'authorization');
+  assert.equal(presentation.attention.title, 'Baldr necesita permiso para modificar archivos');
+  assert.match(presentation.attention.message, /Elegí si Baldr puede modificar archivos/);
+  assert.equal(presentation.attention.actionLabel, 'Elegir autorización');
+  assert.deepEqual(presentation.attention.blockers, []);
 });
 
 test('live activity kinds use local Spanish copy', () => {

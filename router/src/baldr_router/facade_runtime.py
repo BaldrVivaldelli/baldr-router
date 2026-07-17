@@ -346,6 +346,8 @@ def run_facade(
         "create-item": "create-item",
         "update": "update-item",
         "update-item": "update-item",
+        "continue": "continue-item",
+        "continue-item": "continue-item",
         "start": "start-item",
         "start-item": "start-item",
         "cancel": "cancel-item",
@@ -400,6 +402,7 @@ def run_facade(
                 role_profiles=role_profiles,
                 config=execution,
                 allow_non_git=allow_non_git,
+                source=client_name,
             )
             return {"ok": True, "intent": "run", "operation": action, "work_item": item}
 
@@ -420,6 +423,28 @@ def run_facade(
                 allow_non_git=allow_non_git,
             )
             return {"ok": True, "intent": "run", "operation": action, "work_item": item}
+
+        if action == "continue-item":
+            if not work_item_id:
+                raise ValueError("work_item_id is required for continue-item.")
+            item = service.continue_item(
+                work_item_id,
+                workspace_root=workspace_root,
+                request=task,
+                extra_context=extra_context,
+                attachments=attachments,
+                source=client_name,
+            )
+            work_item_id = str(item["id"])
+            result = service.start(
+                work_item_id,
+                client_name=client_name,
+                dry_run=dry_run,
+                context7_libraries=context7_libraries,
+            )
+            result.setdefault("intent", "run")
+            result["operation"] = action
+            return result
 
         if action == "archive-item":
             if not work_item_id:
@@ -558,6 +583,7 @@ def run_facade(
                 role_profiles=role_profiles,
                 config=execution,
                 allow_non_git=allow_non_git,
+                source=client_name,
             )
             work_item_id = str(item["id"])
         elif execution or any(

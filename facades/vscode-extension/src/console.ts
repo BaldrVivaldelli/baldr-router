@@ -1,3 +1,4 @@
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 
@@ -13,12 +14,29 @@ import {
   buildPhaseDeliverablePresentations,
   buildWorkItemPresentation,
 } from './workItemPresentation.js';
+import {
+  captureWorkspaceContext,
+  contextualWorkspaceRoot,
+  resolveWorkspaceRoot,
+} from './workspaceContext.js';
 
 const VIEW_TYPE = 'baldr.console';
 const POLL_FAST_MS = 2_500;
 const POLL_STABLE_MS = 5_000;
 const POLL_IDLE_MS = 10_000;
 const MAX_SELECTION_CHARS = 20_000;
+const RECONCILIATION_ACTIONS = new Set([
+  'authorize_changes',
+  'decline_changes',
+  'inspect_shadow',
+  'continue_from_shadow',
+  'apply_shadow_changes',
+  'discard_shadow',
+  'resume_from_checkpoint',
+  'accept_existing_changes',
+  'discard_worktree',
+  'mark_failed',
+]);
 
 type WorkItem = JsonRecord & {
   id?: string;
@@ -31,6 +49,7 @@ type WorkItem = JsonRecord & {
 interface ConsoleMessage {
   type?: string;
   value?: string;
+  path?: string;
   itemId?: string;
   action?: string;
   index?: number;
@@ -76,6 +95,14 @@ function roleLabel(role: BaldrRole): string {
   } as Record<BaldrRole, string>)[role];
 }
 
+function isPathInsideRoot(root: string, target: string): boolean {
+  const relative = path.relative(root, target);
+  return Boolean(relative)
+    && relative !== '..'
+    && !relative.startsWith(`..${path.sep}`)
+    && !path.isAbsolute(relative);
+}
+
 function effortLabel(value: string): string {
   return ({
     minimal: 'Mínimo',
@@ -116,10 +143,6 @@ function generatedProfileName(model: string, effort: string): string {
   return `baldr-${modelPart.slice(0, Math.max(1, 64 - 'baldr-'.length - suffix.length))}${suffix}`;
 }
 
-function workspaceRoot(): string | undefined {
-  return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-}
-
 function asItems(value: unknown): WorkItem[] {
   return Array.isArray(value) ? value.filter((item): item is WorkItem => record(item) === item) : [];
 }
@@ -158,11 +181,11 @@ function normalizeContext(value: string): 'auto' | 'on' | 'off' | undefined {
 
 function safetyModeLabel(value: string): string {
   return ({
-    automatic: 'Protección automática',
-    worktree: 'Protección automática',
+    automatic: 'Pedir autorización',
+    worktree: 'Copia aislada',
     current: 'Trabajar directamente',
     'non-git': 'Sin protección',
-  } as Record<string, string>)[value] ?? 'Protección automática';
+  } as Record<string, string>)[value] ?? 'Pedir autorización';
 }
 
 function presetModeLabel(value: string): string {
@@ -189,6 +212,9 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
   private operationCount = 0;
   private lastStatus: JsonRecord = {};
   private pending: PendingContext = { attachments: [], extraContext: '', selectionContexts: {} };
+  private selectedWorkspaceRoot: string | undefined;
+  private workspacePinned: boolean;
+  private selectedByWorkspace: Record<string, string>;
   private readonly disposables: vscode.Disposable[] = [];
 
   constructor(
@@ -196,11 +222,62 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
     private readonly runtime: BaldrRuntime,
     private readonly output: vscode.LogOutputChannel,
   ) {
-    this.selectedItemId = context.workspaceState.get<string>('baldr.console.selectedItemId');
+    this.selectedWorkspaceRoot = context.workspaceState.get<string>('baldr.console.workspaceRoot');
+    this.workspacePinned = context.workspaceState.get<boolean>('baldr.console.workspacePinned', false);
+    this.selectedByWorkspace = context.workspaceState.get<Record<string, string>>('baldr.console.selectedByWorkspace', {});
+    this.selectedItemId = this.selectedWorkspaceRoot
+      ? this.selectedByWorkspace[this.workspaceKey(this.selectedWorkspaceRoot)]
+      : context.workspaceState.get<string>('baldr.console.selectedItemId');
     this.disposables.push(
       vscode.workspace.onDidChangeWorkspaceFolders(() => void this.refresh()),
       vscode.workspace.onDidGrantWorkspaceTrust(() => void this.refresh()),
+      vscode.window.onDidChangeActiveTextEditor(() => void this.refresh()),
     );
+  }
+
+  private workspaceKey(root: string): string {
+    return process.platform === 'win32' ? path.resolve(root).toLowerCase() : path.resolve(root);
+  }
+
+  private currentWorkspaceRoot(): string | undefined {
+    const pinned = this.workspacePinned && this.selectedWorkspaceRoot
+      ? vscode.workspace.workspaceFolders?.find(
+        (folder) => this.workspaceKey(folder.uri.fsPath) === this.workspaceKey(this.selectedWorkspaceRoot as string),
+      )?.uri.fsPath
+      : undefined;
+    const root = pinned ?? contextualWorkspaceRoot(this.selectedWorkspaceRoot);
+    if (root && this.workspaceKey(root) !== this.workspaceKey(this.selectedWorkspaceRoot ?? root)) {
+      this.selectedWorkspaceRoot = root;
+      this.selectedItemId = this.selectedByWorkspace[this.workspaceKey(root)];
+      void this.context.workspaceState.update('baldr.console.workspaceRoot', root);
+    } else if (root && !this.selectedWorkspaceRoot) {
+      this.selectedWorkspaceRoot = root;
+      void this.context.workspaceState.update('baldr.console.workspaceRoot', root);
+    }
+    return root;
+  }
+
+  private async rememberSelectedItem(itemId: string | undefined): Promise<void> {
+    this.selectedItemId = itemId;
+    const root = this.currentWorkspaceRoot();
+    if (root) {
+      const key = this.workspaceKey(root);
+      if (itemId) this.selectedByWorkspace[key] = itemId;
+      else delete this.selectedByWorkspace[key];
+      await this.context.workspaceState.update('baldr.console.selectedByWorkspace', this.selectedByWorkspace);
+    }
+    await this.context.workspaceState.update('baldr.console.selectedItemId', itemId);
+  }
+
+  private async chooseWorkspace(): Promise<void> {
+    const root = await resolveWorkspaceRoot({ promptIfAmbiguous: true, forcePicker: true });
+    if (!root) return;
+    this.selectedWorkspaceRoot = root;
+    this.workspacePinned = true;
+    this.selectedItemId = this.selectedByWorkspace[this.workspaceKey(root)];
+    await this.context.workspaceState.update('baldr.console.workspaceRoot', root);
+    await this.context.workspaceState.update('baldr.console.workspacePinned', true);
+    await this.refresh();
   }
 
   dispose(): void {
@@ -339,7 +416,7 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
   }
 
   private async refreshOnce(silent: boolean): Promise<void> {
-    const root = workspaceRoot();
+    const root = this.currentWorkspaceRoot();
     if (!root) {
       this.stopPolling();
       this.lastStatus = {};
@@ -348,6 +425,8 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
         state: {
           ok: false,
           emptyWorkspace: true,
+          workspaceChoiceRequired: (vscode.workspace.workspaceFolders?.length ?? 0) > 1,
+          workspaceFolders: (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.name),
           trusted: vscode.workspace.isTrusted,
           busy: this.operationCount > 0,
           pending: this.pending,
@@ -378,8 +457,7 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
       const items = asItems(workbench.items);
       if (!record(workbench.selected).id) {
         const nextItem = items.find((item) => text(item.status) !== 'archived') ?? items[0];
-        this.selectedItemId = nextItem?.id ? String(nextItem.id) : undefined;
-        await this.context.workspaceState.update('baldr.console.selectedItemId', this.selectedItemId);
+        await this.rememberSelectedItem(nextItem?.id ? String(nextItem.id) : undefined);
         if (this.selectedItemId) {
           const selectedStatus = await this.runtime.consoleStatus(root, this.selectedItemId);
           this.lastStatus = selectedStatus;
@@ -393,6 +471,7 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
           trusted: true,
           busy: this.operationCount > 0,
           pending: this.pending,
+          activeContext: captureWorkspaceContext(root).activeLabel,
         },
       });
     } catch (error) {
@@ -415,8 +494,7 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
         await this.refresh();
         return;
       case 'select':
-        this.selectedItemId = message.itemId || undefined;
-        await this.context.workspaceState.update('baldr.console.selectedItemId', this.selectedItemId);
+        await this.rememberSelectedItem(message.itemId || undefined);
         await this.refresh();
         return;
       case 'submit':
@@ -446,11 +524,17 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
       case 'loadDeliverableIndex':
         await this.loadDeliverableIndex(message);
         return;
+      case 'openChangedFile':
+        await this.openChangedFile(message.path);
+        return;
       case 'openLogs':
         this.output.show(true);
         return;
       case 'requestTrust':
         await vscode.commands.executeCommand('workbench.trust.manage');
+        return;
+      case 'chooseWorkspace':
+        await this.chooseWorkspace();
         return;
       default:
         return;
@@ -465,15 +549,24 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
       return;
     }
     const root = this.requireWorkspace();
-    const pending = this.consumePendingContext();
-    this.launchOperation('Creando y ejecutando la sesión…', async () => {
-      const result = await this.runtime.runFacade('run', {
-        workspaceRoot: root,
-        task: value,
-        workItemAction: 'execute',
-        extraContext: pending.extraContext,
-        attachments: pending.attachments,
-      }, undefined, true);
+    const requestContext = this.requestContext(root, this.consumePendingContext());
+    const selected = this.selectedItem();
+    const continuing = Boolean(selected?.id && allowedActions(selected).includes('continue'));
+    this.launchOperation(continuing ? 'Continuando la conversación…' : 'Creando y ejecutando la sesión…', async () => {
+      const result = continuing
+        ? await this.runtime.continueWorkItem(
+          root,
+          String(selected?.id),
+          value,
+          requestContext,
+        )
+        : await this.runtime.runFacade('run', {
+          workspaceRoot: root,
+          task: value,
+          workItemAction: 'execute',
+          extraContext: requestContext.extraContext,
+          attachments: requestContext.attachments,
+        }, undefined, true);
       const item = record(result.work_item);
       if (item.id) this.selectedItemId = String(item.id);
       return result;
@@ -485,6 +578,24 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
     const value = this.pending;
     this.pending = { attachments: [], extraContext: '', selectionContexts: {} };
     return value;
+  }
+
+  private requestContext(root: string, pending: PendingContext): PendingContext {
+    const automatic = captureWorkspaceContext(root);
+    const attachments = [...pending.attachments];
+    const seen = new Set(attachments.map((item) => `${text(item.kind)}:${text(item.path)}:${JSON.stringify(item.range ?? null)}`));
+    for (const attachment of automatic.attachments) {
+      const key = `${text(attachment.kind)}:${text(attachment.path)}:${JSON.stringify(attachment.range ?? null)}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        attachments.push(attachment);
+      }
+    }
+    return {
+      attachments: attachments.slice(0, 50),
+      extraContext: [automatic.extraContext, pending.extraContext].filter(Boolean).join('\n\n'),
+      selectionContexts: pending.selectionContexts,
+    };
   }
 
   private async removePendingAttachment(index: number): Promise<void> {
@@ -566,16 +677,61 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
   }
 
   private requireWorkspace(): string {
-    const root = workspaceRoot();
-    if (!root) throw new Error('Abrí una carpeta antes de crear una sesión.');
+    const root = this.currentWorkspaceRoot();
+    if (!root) throw new Error('Elegí una carpeta de trabajo antes de crear una sesión.');
     if (!vscode.workspace.isTrusted) throw new Error('Autorizá esta carpeta antes de usar Baldr.');
     return root;
+  }
+
+  private async openChangedFile(rawPath: unknown): Promise<void> {
+    const root = this.currentWorkspaceRoot();
+    const requestedPath = typeof rawPath === 'string' ? rawPath.trim() : '';
+    if (!root || !requestedPath || path.isAbsolute(requestedPath)) {
+      void vscode.window.showWarningMessage('No pudimos identificar ese archivo dentro del proyecto.');
+      return;
+    }
+
+    const workspaceRoot = path.resolve(root);
+    const target = path.resolve(workspaceRoot, requestedPath);
+    if (!isPathInsideRoot(workspaceRoot, target)) {
+      void vscode.window.showWarningMessage('Ese archivo no pertenece al proyecto abierto.');
+      return;
+    }
+
+    try {
+      const [canonicalRoot, canonicalTarget] = await Promise.all([
+        fs.promises.realpath(workspaceRoot),
+        fs.promises.realpath(target),
+      ]);
+      if (!isPathInsideRoot(canonicalRoot, canonicalTarget)) {
+        void vscode.window.showWarningMessage('Ese archivo no pertenece al proyecto abierto.');
+        return;
+      }
+      const stat = await fs.promises.stat(canonicalTarget);
+      if (!stat.isFile()) {
+        void vscode.window.showWarningMessage('Ese cambio no corresponde a un archivo que se pueda abrir.');
+        return;
+      }
+      const document = await vscode.workspace.openTextDocument(vscode.Uri.file(canonicalTarget));
+      await vscode.window.showTextDocument(document, { preview: true, preserveFocus: false });
+    } catch (error) {
+      const code = typeof error === 'object' && error !== null && 'code' in error
+        ? String(error.code)
+        : '';
+      if (code === 'ENOENT') {
+        void vscode.window.showWarningMessage('El archivo ya no existe; probablemente fue eliminado en este cambio.');
+        return;
+      }
+      this.output.warn('Baldr could not open a changed workspace file.');
+      void vscode.window.showWarningMessage('No pudimos abrir ese archivo.');
+    }
   }
 
   private launchOperation(
     label: string,
     operation: () => Promise<JsonRecord>,
     afterSuccess?: () => Promise<void>,
+    allowAttentionPause = true,
   ): void {
     this.operationCount += 1;
     this.resetPolling();
@@ -584,10 +740,16 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
       .then(async (result) => {
         const item = record(result.work_item);
         if (item.id) {
-          this.selectedItemId = String(item.id);
-          await this.context.workspaceState.update('baldr.console.selectedItemId', this.selectedItemId);
+          await this.rememberSelectedItem(String(item.id));
         }
-        if (result.ok === false && !await this.handlePolicyBlock(result)) {
+        const resultStatus = text(result.status).toLowerCase();
+        const itemStatus = text(item.status).toLowerCase();
+        const expectedPause = resultStatus === 'cancelled'
+          || (allowAttentionPause && (
+            resultStatus === 'awaiting_reconciliation'
+            || itemStatus === 'needs_attention'
+          ));
+        if (result.ok === false && !expectedPause && !await this.handlePolicyBlock(result)) {
           const reason = text(result.reason, text(record(result.error).message, 'Baldr no pudo completar la operación.'));
           void vscode.window.showErrorMessage(reason);
         }
@@ -610,9 +772,9 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
 
     const item = record(result.work_item);
     const choice = await vscode.window.showWarningMessage(
-      'La sesión quedó guardada, pero esta opción necesita un repositorio Git. Podés volver a la protección automática, abrir otra carpeta o trabajar sin protección.',
+      'La sesión quedó guardada, pero esta opción necesita un repositorio Git. Podés pedir autorización antes de cambiar esta carpeta, abrir otra carpeta o trabajar sin protección.',
       { modal: true },
-      'Protección automática',
+      'Pedir autorización',
       'Sin protección',
       'Abrir otra carpeta…',
     );
@@ -620,10 +782,10 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
       await vscode.commands.executeCommand('workbench.action.files.openFolder');
       return true;
     }
-    if (choice === 'Protección automática') {
+    if (choice === 'Pedir autorización') {
       const configured = await this.setSafetyMode('automatic');
       if (configured && item.id) {
-        this.launchOperation('Iniciando la sesión con protección automática…', () => this.runtime.startWorkItem(
+        this.launchOperation('Iniciando la sesión con autorización previa…', () => this.runtime.startWorkItem(
           this.requireWorkspace(),
           String(item.id),
         ));
@@ -704,6 +866,20 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
     }
     if (action === 'reconcile') {
       await this.chooseReconciliation(itemId);
+      return;
+    }
+    if (RECONCILIATION_ACTIONS.has(action)) {
+      const label = action === 'authorize_changes'
+        ? 'Autorizando los cambios y retomando la sesión…'
+        : action === 'decline_changes'
+          ? 'Cerrando la sesión sin modificar archivos…'
+          : 'Recuperando la sesión…';
+      this.launchOperation(
+        label,
+        () => this.runtime.reconcileWorkItem(root, itemId, action),
+        undefined,
+        false,
+      );
       return;
     }
   }
@@ -833,14 +1009,14 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
       ignoreFocusOut: true,
     });
     if (!value?.trim()) return;
-    const pending = this.consumePendingContext();
+    const pending = this.requestContext(root, this.consumePendingContext());
     const result = await this.withProgress('Guardando la sesión…', () => this.runtime.createWorkItem(
       root,
       value.trim(),
       { extraContext: pending.extraContext, attachments: pending.attachments },
     ));
     const item = record(result.work_item);
-    if (item.id) this.selectedItemId = String(item.id);
+    if (item.id) await this.rememberSelectedItem(String(item.id));
     await this.post({ type: 'clearInput' });
     await this.refresh();
   }
@@ -851,6 +1027,7 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
       { id: 'file', label: '$(file) Agregar el archivo abierto', description: 'Usarlo como referencia para el pedido' },
       { id: 'selection', label: '$(selection) Agregar el texto seleccionado', description: 'Usar solamente la parte marcada' },
       { id: 'path', label: '$(folder-opened) Agregar archivos o carpetas', description: 'Sumar material útil para el pedido' },
+      { id: 'workspace', label: '$(root-folder) Carpeta de trabajo', description: 'Elegir el proyecto activo en un workspace con varias carpetas' },
       { id: 'git', label: '$(shield) Protección de cambios', description: 'Elegir cómo guardar y recuperar el trabajo' },
       { id: 'preset', label: '$(dashboard) Nivel de detalle', description: 'Rápido, estándar, detallado o a medida' },
       { id: 'roles', label: '$(organization) Equipo de Baldr', description: 'Elegir cómo se reparte el trabajo' },
@@ -872,6 +1049,7 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
       case 'file': await this.attachCurrentFile(); break;
       case 'selection': await this.attachSelection(); break;
       case 'path': await this.attachFileOrFolder(); break;
+      case 'workspace': await this.chooseWorkspace(); break;
       case 'git': await this.chooseSafetyMode(); break;
       case 'preset': await this.choosePreset(); break;
       case 'roles': await this.chooseRoleProfiles(); break;
@@ -894,8 +1072,8 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
     const preference = record(record(this.lastStatus.workbench).preferences);
     const current = text(preference.safety_mode, 'automatic');
     const selected = await vscode.window.showQuickPick([
-      { id: 'automatic', label: '$(shield) Protección automática', description: 'Recomendada y predeterminada: trabaja en una copia protegida y recuperable' },
-      { id: 'current', label: 'Trabajar directamente', description: 'Modifica esta carpeta y usa su repositorio Git para revisar los cambios' },
+      { id: 'automatic', label: '$(shield) Pedir autorización', description: 'Recomendada: planifica en solo lectura y pregunta antes de modificar esta carpeta' },
+      { id: 'current', label: 'Trabajar directamente', description: 'Permite cambios directos sin una pausa de autorización por tarea' },
       { id: 'non-git', label: 'Sin protección', description: 'Trabaja directamente, sin exigir Git y sin recuperación automática' },
     ], { title: 'Protección de cambios', placeHolder: `Actual: ${safetyModeLabel(current)}`, ignoreFocusOut: true });
     if (selected) await this.setSafetyMode(selected.id as SafetyMode);
@@ -1300,7 +1478,7 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
       ignoreFocusOut: true,
     });
     if (effort === undefined) return;
-    await this.withProgress('Guardando la configuración…', () => this.runtime.upsertExecutionProfile(workspaceRoot(), {
+    await this.withProgress('Guardando la configuración…', () => this.runtime.upsertExecutionProfile(this.currentWorkspaceRoot(), {
       name,
       provider,
       model: provider === 'kiro-cli' ? '' : modelOrAgent ?? '',
@@ -1324,6 +1502,8 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
     const actions = allowedActions(item);
     const nonGit = text(item?.safety_mode) === 'non-git';
     const options = [
+      { id: 'authorize_changes', label: 'Autorizar cambios y reintentar', description: 'Permitir que Baldr cree o modifique los archivos necesarios y continúe' },
+      { id: 'decline_changes', label: 'No autorizar', description: 'Cerrar la sesión sin crear ni modificar archivos' },
       { id: 'inspect_shadow', label: 'Ver la copia protegida', description: 'Revisar el trabajo guardado por Baldr sin cambiar tus archivos' },
       { id: 'continue_from_shadow', label: 'Continuar desde la copia protegida', description: 'Retomar desde el último punto que Baldr verificó' },
       { id: 'apply_shadow_changes', label: 'Aplicar los cambios protegidos', description: 'Comprobar de nuevo la carpeta y copiar sólo los cambios de Baldr' },
@@ -1344,7 +1524,7 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
       return;
     }
     const selected = await vscode.window.showQuickPick(options, {
-      title: 'Recuperar la sesión',
+      title: actions.includes('authorize_changes') ? 'Autorizar cambios' : 'Recuperar la sesión',
       ignoreFocusOut: true,
     });
     if (!selected) return;
@@ -1366,7 +1546,12 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
       });
       return;
     }
-    this.launchOperation('Recuperando la sesión…', () => this.runtime.reconcileWorkItem(root, itemId, selected.id));
+    this.launchOperation(
+      'Recuperando la sesión…',
+      () => this.runtime.reconcileWorkItem(root, itemId, selected.id),
+      undefined,
+      false,
+    );
   }
 
   private async attachCurrentFile(): Promise<void> {
@@ -1424,7 +1609,7 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
       return;
     }
     const selected = editor.document.getText(editor.selection).slice(0, MAX_SELECTION_CHARS);
-    const root = workspaceRoot();
+    const root = this.currentWorkspaceRoot();
     const relative = root ? path.relative(root, editor.document.uri.fsPath) : editor.document.uri.fsPath;
     const range = {
       startLine: editor.selection.start.line + 1,
@@ -1518,6 +1703,9 @@ button:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-off
 .item-title { font-size: 16px; font-weight: 650; margin: 0 0 4px; line-height: 1.3; }
 .item-meta { display: flex; flex-wrap: wrap; gap: 6px; font-size: 11px; color: var(--vscode-descriptionForeground); }
 .task-body { margin: 12px 0; white-space: pre-wrap; line-height: 1.45; overflow-wrap: anywhere; }
+.conversation-turn { padding: 8px 0; border-bottom: 1px solid var(--vscode-widget-border); }
+.conversation-turn:last-child { border-bottom: 0; }
+.conversation-turn-label { margin-bottom: 4px; color: var(--vscode-descriptionForeground); font-size: 10px; font-weight: 600; text-transform: uppercase; }
 .session-section { margin-top: 12px; border: 1px solid var(--vscode-widget-border); border-radius: 9px; background: var(--baldr-surface); }
 .session-section > summary { padding: 9px 11px; color: var(--vscode-foreground); cursor: pointer; font-size: 11px; font-weight: 600; }
 .session-section[open] > summary { border-bottom: 1px solid var(--vscode-widget-border); }
@@ -1606,7 +1794,23 @@ button:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-off
 .technical-grid { display: grid; gap: 7px; margin-top: 8px; }
 .technical-label { color: var(--vscode-descriptionForeground); font-size: 10px; font-weight: 600; text-transform: capitalize; }
 .result-card .facts { margin-bottom: 4px; }
-.attention-action { display: flex; justify-content: center; margin-top: 10px; }
+.file-changes { margin-top: 12px; border: 1px solid var(--vscode-widget-border); border-radius: 9px; overflow: hidden; background: color-mix(in srgb, var(--vscode-sideBar-background) 72%, var(--vscode-input-background)); }
+.file-changes-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 10px; border-bottom: 1px solid var(--vscode-widget-border); }
+.file-changes-title { font-size: 11px; font-weight: 650; }
+.file-changes-total, .file-change-stat { display: flex; flex: none; gap: 6px; font-variant-numeric: tabular-nums; font-size: 10px; }
+.file-change-additions { color: var(--vscode-gitDecoration-addedResourceForeground, var(--vscode-testing-iconPassed)); }
+.file-change-deletions { color: var(--vscode-gitDecoration-deletedResourceForeground, var(--vscode-testing-iconFailed)); }
+.file-change-row { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: center; gap: 7px; width: 100%; min-width: 0; margin: 0; padding: 7px 10px; border: 0; border-top: 1px solid color-mix(in srgb, var(--vscode-widget-border) 55%, transparent); color: inherit; background: transparent; font: inherit; text-align: left; cursor: pointer; }
+.file-changes-header + .file-change-row { border-top: 0; }
+.file-change-row:hover { background: var(--vscode-list-hoverBackground); }
+.file-change-row:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -2px; }
+.file-change-kind { display: grid; place-items: center; width: 17px; height: 17px; border-radius: 4px; color: var(--vscode-descriptionForeground); background: var(--vscode-badge-background); font-size: 9px; font-weight: 700; }
+.file-change-kind.added { color: var(--vscode-gitDecoration-addedResourceForeground, var(--vscode-testing-iconPassed)); }
+.file-change-kind.deleted { color: var(--vscode-gitDecoration-deletedResourceForeground, var(--vscode-testing-iconFailed)); }
+.file-change-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
+.file-changes-more { border-top: 1px solid var(--vscode-widget-border); }
+.file-changes-more summary { padding: 7px 10px; color: var(--vscode-textLink-foreground); font-size: 10px; cursor: pointer; }
+.attention-action { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 10px; }
 .timeline { border-left: 1px solid var(--vscode-widget-border); margin: 14px 0 10px 6px; padding-left: 14px; }
 .phase { position: relative; padding: 0 0 14px; }
 .phase::before { content: ''; position: absolute; width: 8px; height: 8px; border-radius: 50%; left: -19px; top: 3px; background: var(--vscode-descriptionForeground); }
@@ -1638,6 +1842,8 @@ textarea::placeholder { color: var(--vscode-input-placeholderForeground); opacit
 .chip-icon { width: 14px; height: 14px; fill: currentColor; color: var(--vscode-descriptionForeground); }
 .attachments { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 3px 9px; }
 .attachments:empty { display: none; }
+.active-context { min-height: 0; padding: 0 8px 6px; overflow: hidden; color: var(--vscode-descriptionForeground); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.active-context:empty { display: none; }
 .attachment { position: relative; display: grid; grid-template-columns: 30px minmax(0, 1fr); align-items: center; width: min(170px, calc(50% - 4px)); min-width: 120px; min-height: 48px; gap: 8px; padding: 7px 24px 7px 8px; border: 1px solid var(--vscode-widget-border); border-radius: 10px; background: color-mix(in srgb, var(--vscode-sideBar-background) 58%, var(--vscode-input-background)); }
 .attachment-icon { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 7px; background: var(--vscode-toolbar-hoverBackground); color: var(--vscode-descriptionForeground); font-size: 15px; }
 .attachment-label { min-width: 0; overflow: hidden; color: var(--vscode-foreground); font-size: 11px; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; }
@@ -1724,11 +1930,12 @@ textarea::placeholder { color: var(--vscode-input-placeholderForeground); opacit
   <section class="composer" id="composer">
     <div class="input-shell">
       <div class="attachments" id="attachments"></div>
+      <div class="active-context" id="activeContext"></div>
       <textarea id="input" rows="2" placeholder="Escribí qué necesitás…" aria-label="Nuevo pedido para Baldr"></textarea>
       <div class="composer-row">
         <button type="button" class="plus" id="plus" title="Agregar archivos u opciones" aria-label="Agregar archivos u opciones" aria-expanded="false" aria-controls="plusMenu"><svg class="button-icon" viewBox="0 0 16 16" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" d="M8 3v10M3 8h10"/></svg></button>
         <div class="chips" aria-label="Opciones de la sesión">
-          <button type="button" class="chip" data-chip="git" id="gitChip"><svg class="chip-icon" viewBox="0 0 16 16" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.15" stroke-linejoin="round" d="M8 1.8 12.8 3.4v3.45c0 3.15-1.9 5.65-4.8 7.35-2.9-1.7-4.8-4.2-4.8-7.35V3.4L8 1.8Z"/></svg><span id="gitChipLabel">Protección automática</span></button>
+          <button type="button" class="chip" data-chip="git" id="gitChip"><svg class="chip-icon" viewBox="0 0 16 16" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.15" stroke-linejoin="round" d="M8 1.8 12.8 3.4v3.45c0 3.15-1.9 5.65-4.8 7.35-2.9-1.7-4.8-4.2-4.8-7.35V3.4L8 1.8Z"/></svg><span id="gitChipLabel">Pedir autorización</span></button>
           <button type="button" class="chip" data-chip="preset" id="presetChip"><svg class="chip-icon" viewBox="0 0 16 16" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.15" stroke-linecap="round" d="M3 4h10M3 8h10M3 12h10M6 2.8v2.4M10 6.8v2.4M7 10.8v2.4"/></svg><span id="presetChipLabel">Estándar</span></button>
           <button type="button" class="chip" data-chip="roles" id="rolesChip"><svg class="chip-icon" viewBox="0 0 16 16" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.15" stroke-linecap="round" stroke-linejoin="round" d="M6.2 7a2.2 2.2 0 1 0 0-4.4A2.2 2.2 0 0 0 6.2 7ZM2.5 13.2c.25-2.55 1.5-3.8 3.7-3.8s3.45 1.25 3.7 3.8M10.2 3.2a2 2 0 0 1 0 3.8M10.9 9.5c1.55.25 2.4 1.45 2.6 3.4"/></svg><span id="rolesChipLabel">Equipo estándar</span></button>
           <button type="button" class="chip" data-chip="context" id="contextChip"><svg class="chip-icon" viewBox="0 0 16 16" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.15" stroke-linecap="round" stroke-linejoin="round" d="M8 1.8c.35 2.65 1.55 3.85 4.2 4.2C9.55 6.35 8.35 7.55 8 10.2 7.65 7.55 6.45 6.35 3.8 6 6.45 5.65 7.65 4.45 8 1.8ZM12.2 10.2c.18 1.35.85 2.02 2.2 2.2-1.35.18-2.02.85-2.2 2.2-.18-1.35-.85-2.02-2.2-2.2 1.35-.18 2.02-.85 2.2-2.2Z"/></svg><span id="contextChipLabel">Ayuda automática</span></button>
@@ -1740,6 +1947,7 @@ textarea::placeholder { color: var(--vscode-input-placeholderForeground); opacit
     <div class="plus-menu" id="plusMenu" role="dialog" aria-label="Agregar detalles u opciones de Baldr" aria-hidden="true">
       <div class="plus-menu-heading" data-plus-heading="add">Agregar</div>
       <button type="button" class="plus-option" data-plus-action="path" data-plus-group="add"><span class="plus-option-icon">⌕</span><span><span class="plus-option-label">Archivos y carpetas</span><span class="plus-option-detail">Sumá material útil para el pedido</span></span></button>
+      <button type="button" class="plus-option" data-plus-action="workspace" data-plus-group="add"><span class="plus-option-icon">◇</span><span><span class="plus-option-label">Carpeta de trabajo</span><span class="plus-option-detail">Elegí el proyecto activo</span></span></button>
       <button type="button" class="plus-option" data-plus-action="file" data-plus-group="add"><span class="plus-option-icon">▣</span><span><span class="plus-option-label">Archivo abierto</span><span class="plus-option-detail">Usalo como referencia</span></span></button>
       <button type="button" class="plus-option" data-plus-action="selection" data-plus-group="add"><span class="plus-option-icon">≡</span><span><span class="plus-option-label">Texto seleccionado</span><span class="plus-option-detail">Sumá solo la parte marcada</span></span></button>
       <button type="button" class="plus-option" data-plus-action="draft" data-plus-group="add"><span class="plus-option-icon">＋</span><span><span class="plus-option-label">Guardar para después</span><span class="plus-option-detail">Creá una sesión sin empezarla todavía</span></span></button>
@@ -1755,7 +1963,7 @@ textarea::placeholder { color: var(--vscode-input-placeholderForeground); opacit
 </div>
 <script nonce="${nonce}">
 const vscode = acquireVsCodeApi();
-const els = Object.fromEntries(['header','historyPanel','historyToggle','historyStatus','tasks','content','composer','input','send','plus','configure','refresh','gitChip','gitChipLabel','presetChip','presetChipLabel','rolesChip','rolesChipLabel','contextChip','contextChipLabel','attachments','slash','plusMenu','plusFilter','plusEmpty','historySearch','loading','liveStatus'].map(id => [id, document.getElementById(id)]));
+const els = Object.fromEntries(['header','historyPanel','historyToggle','historyStatus','tasks','content','composer','input','send','plus','configure','refresh','gitChip','gitChipLabel','presetChip','presetChipLabel','rolesChip','rolesChipLabel','contextChip','contextChipLabel','attachments','activeContext','slash','plusMenu','plusFilter','plusEmpty','historySearch','loading','liveStatus'].map(id => [id, document.getElementById(id)]));
 const persistedView = vscode.getState() || {};
 let expandedByItem = persistedView.expandedByItem || {};
 let activeStageByItem = persistedView.activeStageByItem || {};
@@ -1771,7 +1979,7 @@ const commands = () => ((workbench().options || {}).slash_commands || [
 function statusClass(status){ return String(status || 'draft').replace(/[^a-z_]/g,'_'); }
 function statusLabel(status){ const labels={draft:'Pendiente',queued:'En espera',running:'En curso',cancelling:'Cancelando',completed:'Lista',archived:'Archivada',failed:'Necesita atención',cancelled:'Cancelada',needs_attention:'Necesita atención'}; return labels[String(status || 'draft')] || String(status || 'Pendiente'); }
 function presetLabel(value){ return ({fast:'Rápido',balanced:'Estándar',deep:'Detallado',custom:'A medida'}[value]||'Estándar'); }
-function safetyLabel(value){ return ({automatic:'Protección automática',worktree:'Protección automática',current:'Trabajar directamente','non-git':'Sin protección'}[value]||'Protección automática'); }
+function safetyLabel(value){ return ({automatic:'Pedir autorización',worktree:'Copia aislada',current:'Trabajar directamente','non-git':'Sin protección'}[value]||'Pedir autorización'); }
 function contextLabel(value){ return ({auto:'Ayuda automática',on:'Ayuda activa',off:'Ayuda desactivada'}[value]||'Ayuda automática'); }
 function itemErrorMessage(item){ if(item.error_code==='workspace_reconciliation_required'&&item.safety_mode==='non-git')return 'La sesión se detuvo al intentar crear un respaldo Git que esta carpeta no usa. Tus archivos siguen en la carpeta: revisá las opciones para continuar con ellos.'; return item.error_reason||item.error_code||''; }
 function phaseLabel(value){ return ({architecture:'Planificación',architect:'Planificación',implementation:'Ejecución',implementer:'Ejecución',review:'Revisión',reviewer:'Revisión'}[String(value||'').toLowerCase()]||String(value||'Etapa')); }
@@ -1804,6 +2012,9 @@ function stageIcon(stageState){ return stageState==='complete'?'✓':stageState=
 function formatWhen(value){ if(!value)return '';const date=new Date(value);if(Number.isNaN(date.getTime()))return '';return 'Actualizado a las '+date.toLocaleTimeString('es',{hour:'2-digit',minute:'2-digit'}); }
 function factsHtml(facts){ return (facts||[]).length?'<div class="facts">'+facts.map(fact=>'<span class="fact '+escapeHtml(fact.tone||'neutral')+'">'+escapeHtml(fact.label)+'</span>').join('')+'</div>':''; }
 function sectionsHtml(sections){ return (sections||[]).map(section=>'<section class="report-section '+escapeHtml(section.tone||'neutral')+'"><h4 class="report-section-title">'+escapeHtml(section.title)+'</h4><ul>'+((section.items||[]).map(item=>'<li>'+escapeHtml(item)+'</li>').join(''))+'</ul></section>').join(''); }
+function fileChangeStats(change){const additions=Number.isInteger(change?.additions)?change.additions:null;const deletions=Number.isInteger(change?.deletions)?change.deletions:null;return additions===null||deletions===null?'':'<span class="file-change-stat"><span class="file-change-additions">+'+escapeHtml(additions)+'</span><span class="file-change-deletions">-'+escapeHtml(deletions)+'</span></span>';}
+function fileChangeRow(change){const kind=String(change?.kind||'modified');const marker=({added:'A',modified:'M',deleted:'D'}[kind]||'M');const filePath=String(change?.path||'');return '<button type="button" class="file-change-row" data-open-changed-file="'+escapeHtml(filePath)+'" aria-label="'+escapeHtml('Abrir '+filePath)+'"><span class="file-change-kind '+escapeHtml(kind)+'" aria-label="'+escapeHtml(({added:'Agregado',modified:'Modificado',deleted:'Eliminado'}[kind]||'Modificado')+'')+'">'+marker+'</span><span class="file-change-path" title="'+escapeHtml(filePath)+'">'+escapeHtml(filePath)+'</span>'+fileChangeStats(change)+'</button>';}
+function fileChangesHtml(changes){const values=Array.isArray(changes)?changes:[];if(!values.length)return '';const complete=values.every(change=>Number.isInteger(change?.additions)&&Number.isInteger(change?.deletions));const additions=complete?values.reduce((total,change)=>total+change.additions,0):null;const deletions=complete?values.reduce((total,change)=>total+change.deletions,0):null;const title=values.length===1?'1 archivo cambiado':values.length+' archivos cambiados';const totals=complete?'<span class="file-changes-total"><span class="file-change-additions">+'+escapeHtml(additions)+'</span><span class="file-change-deletions">-'+escapeHtml(deletions)+'</span></span>':'';const visible=values.slice(0,5).map(fileChangeRow).join('');const remaining=values.slice(5);const more=remaining.length?'<details class="file-changes-more"><summary>Ver '+remaining.length+' '+(remaining.length===1?'archivo más':'archivos más')+'</summary>'+remaining.map(fileChangeRow).join('')+'</details>':'';return '<section class="file-changes" aria-label="Cambios en archivos"><div class="file-changes-header"><span class="file-changes-title">'+escapeHtml(title)+'</span>'+totals+'</div>'+visible+more+'</section>';}
 function technicalRowsHtml(rows){ return (rows||[]).map(row=>'<div><div class="technical-label">'+escapeHtml(row.label)+'</div><div class="technical-value">'+escapeHtml(row.value)+'</div></div>').join(''); }
 function milestoneIcon(entry){return entry?.state==='complete'&&entry?.evidence==='verified'?'✓':entry?.state==='attention'?'!':entry?.state==='cancelled'?'×':'•';}
 function evidenceLabel(value){return value==='verified'?'Comprobado por Baldr':value==='reported'?'Informado por el equipo':'Registrado por Baldr';}
@@ -1815,7 +2026,7 @@ function stageMilestonesHtml(stage){const values=stage.milestones||[];if(!values
 		function stageDeliverableValues(stage){const values=[...(stage.deliverables||[])];if(deliverableIndexView.itemId===String(selected()?.id||''))values.push(...deliverableIndexView.items.filter(entry=>entry.stage===stage.id));const unique=new Map();values.forEach(entry=>unique.set(deliverableDescriptorKey(entry),entry));return [...unique.values()].sort((left,right)=>deliverableRunOrdinal(left)-deliverableRunOrdinal(right)||Number(left.round||0)-Number(right.round||0));}
 		function stageDeliverablesHtml(stage){const values=stageDeliverableValues(stage);if(!values.length)return '';return '<section class="stage-deliverables" aria-label="Entregas de '+escapeHtml(stage.title)+'"><h4 class="stage-deliverables-title">Entregas</h4>'+values.map(entry=>{const key='deliverable-'+stage.id+'-'+entry.runOrdinal+'-'+entry.round;const preview=deliverablePreview(entry);const label=entry.availability==='available'?'Ver entrega completa':entry.availability==='summary_only'?(preview?'Ver resumen disponible':'Ver información disponible'):'No disponible';return '<div class="stage-deliverable-row"><span class="stage-deliverable-copy"><span class="stage-deliverable-name">'+escapeHtml(deliverableLabel(entry))+'</span>'+(preview?'<span class="stage-deliverable-preview">'+escapeHtml(preview)+'</span>':'')+(entry.reason?'<span class="stage-deliverable-note">'+escapeHtml(entry.reason)+'</span>':'')+'</span>'+(entry.availability==='unavailable'?'<span class="stage-deliverable-status">'+label+'</span>':'<button type="button" class="action" data-deliverable-stage="'+escapeHtml(stage.id)+'" data-deliverable-round="'+escapeHtml(entry.round)+'" data-deliverable-run="'+escapeHtml(entry.runOrdinal)+'" data-focus-key="'+escapeHtml(key)+'">'+label+'</button>')+'</div>';}).join('')+'</section>';}
 		function deliverableIndexHtml(presentation){const index=presentation?.deliverableIndex||{};if(index.truncated!==true)return '';if(deliverableIndexView.error)return '<section class="deliverable-index" role="alert"><span class="deliverable-index-note">'+escapeHtml(deliverableIndexView.error)+'</span><button type="button" class="action" data-deliverable-index data-focus-key="deliverable-index">Reintentar entregas anteriores</button></section>';if(deliverableIndexView.loading)return '<section class="deliverable-index" role="status" aria-live="polite"><button type="button" class="action" data-focus-key="deliverable-index" disabled>Cargando entregas anteriores…</button></section>';if(!deliverableIndexView.nextCursor)return '<section class="deliverable-index"><span class="deliverable-index-note">Ya estás viendo todas las entregas de esta sesión.</span></section>';return '<section class="deliverable-index"><button type="button" class="action" data-deliverable-index data-focus-key="deliverable-index">Ver entregas anteriores</button>'+(Number(index.total)>0?'<span class="deliverable-index-note">Hay '+escapeHtml(index.total)+' entregas guardadas.</span>':'')+'</section>';}
-function deliverableSectionTitle(value){return ({summary:'Resumen',interpretation:'Lo que entendió Baldr',scope:'Alcance',approach:'Enfoque',plan_steps:'Plan acordado',decisions:'Decisiones',acceptance_criteria:'Cómo sabremos que está listo',assumptions:'Supuestos',work_completed:'Trabajo completado',work_next:'Qué sigue',files_modified:'Cambios informados',tests_run:'Comprobaciones informadas',verification_evidence:'Evidencia de comprobación',verification_needed:'Qué falta comprobar',findings:'Hallazgos',corrections:'Correcciones',risks:'A tener en cuenta',follow_up:'Próximos pasos',blockers:'Qué impide avanzar',review_decision:'Veredicto',commands_run:'Comandos ejecutados',constraints:'Límites considerados',alternatives_rejected:'Opciones descartadas'}[value]||String(value||'Detalle').replace(/_/g,' '));}
+function deliverableSectionTitle(value){return ({summary:'Resumen',interpretation:'Lo que entendió Baldr',scope:'Alcance',approach:'Enfoque',plan_steps:'Plan acordado',decisions:'Decisiones',acceptance_criteria:'Cómo sabremos que está listo',assumptions:'Supuestos',work_completed:'Trabajo completado',work_next:'Qué sigue',changes_added:'Qué agregó',changes_modified:'Qué modificó',changes_removed:'Qué quitó',files_added:'Archivos agregados',files_modified:'Archivos modificados',files_deleted:'Archivos eliminados',tests_run:'Comprobaciones informadas',verification_evidence:'Evidencia de comprobación',verification_needed:'Qué falta comprobar',findings:'Hallazgos',corrections:'Correcciones',risks:'A tener en cuenta',follow_up:'Próximos pasos',blockers:'Qué impide avanzar',review_decision:'Veredicto',commands_run:'Comandos ejecutados',constraints:'Límites considerados',alternatives_rejected:'Opciones descartadas'}[value]||String(value||'Detalle').replace(/_/g,' '));}
 	function deliverableEntryValue(entry){const value=entry?.value;if(value&&typeof value==='object'&&!Array.isArray(value)){const key=String(value.key??value.title??'');const detail=String(value.value??value.detail??'');return key&&detail?key+': '+detail:key||detail;}return String(value??'');}
 	function deliverableEntriesHtml(entries){const visible=(entries||[]).filter(entry=>!entry.technical);const technical=(entries||[]).filter(entry=>entry.technical);const groups=values=>{const by={};values.forEach(entry=>{const key=String(entry.section||'summary');(by[key]||(by[key]=[])).push(entry);});return Object.entries(by).map(([key,items])=>'<section class="deliverable-section"><h4 class="deliverable-section-title">'+escapeHtml(deliverableSectionTitle(key))+'</h4><ul class="deliverable-entries">'+items.map(entry=>'<li class="deliverable-entry">'+escapeHtml(deliverableEntryValue(entry))+'</li>').join('')+'</ul></section>').join('');};return groups(visible)+(technical.length?'<details class="disclosure" data-deliverable-technical'+(deliverableTechnicalOpen?' open':'')+'><summary data-focus-key="deliverable-technical">Detalles técnicos de la entrega</summary>'+groups(technical)+'</details>':'');}
 		function deliverableViewHtml(){if(!deliverableView.open)return '';const data=deliverableView.data||{};const descriptor=deliverableView.descriptor||data;const page=data.page||{};const title=({planning:'Plan completo',execution:'Entrega de ejecución',review:'Informe de revisión'}[descriptor.stage]||'Entrega completa');const preview=deliverablePreview(data)||deliverablePreview(descriptor);const safeReason=descriptor.reason||'Esta entrega completa no está disponible.';const body=deliverableView.error?'<div class="refresh-error" role="alert"><div class="refresh-error-title">No pudimos abrir la entrega</div><p class="refresh-error-copy">'+escapeHtml(deliverableView.error)+'</p><button type="button" class="action" data-deliverable-retry data-focus-key="deliverable-retry">Reintentar</button></div>':deliverableView.loading&&!deliverableView.data?'<div role="status" aria-live="polite">Cargando la entrega…</div>':data.availability==='unavailable'?'<p>'+escapeHtml(safeReason)+'</p>':data.availability==='summary_only'?'<p class="deliverable-note">'+escapeHtml(safeReason)+'</p>'+(preview?'<section class="deliverable-section"><h4 class="deliverable-section-title">Resumen disponible</h4><p>'+escapeHtml(preview)+'</p></section>':'<p>No se conservaron más detalles de esta entrega.</p>'):'<p class="deliverable-note">Contenido estructurado y protegido. No incluye prompts, razonamiento ni salida cruda del proveedor.</p>'+((page.entries||[]).length?deliverableEntriesHtml(page.entries||[]):'<p>Esta entrega no agregó detalles adicionales.</p>');return '<section class="deliverable-panel" role="dialog" aria-modal="true" aria-labelledby="deliverable-title"><div class="deliverable-header"><div><h3 class="deliverable-title" id="deliverable-title">'+escapeHtml(title)+'</h3><div class="deliverable-subtitle">'+escapeHtml(deliverableLabel(descriptor))+'</div></div><button type="button" class="icon-button" data-deliverable-close data-focus-key="deliverable-close" aria-label="Cerrar entrega">×</button></div><div class="deliverable-body">'+body+'</div>'+(!deliverableView.error&&page.has_more?'<div class="deliverable-footer"><button type="button" class="action" data-deliverable-more data-focus-key="deliverable-more"'+(deliverableView.loading?' disabled':'')+'>'+(deliverableView.loading?'Cargando…':'Cargar más')+'</button></div>':'')+'</section>';}
@@ -1828,13 +2039,14 @@ function setStageExpanded(itemId,stageId,open){ const values=new Set(Array.isArr
 function stageHtml(stage,open){ const label=stage.title+': '+stage.statusLabel+'. '+(open?'Contraer':'Expandir');return '<article class="stage-card '+escapeHtml(stage.state)+'"><button type="button" class="stage-toggle" data-stage-toggle="'+escapeHtml(stage.id)+'" data-stage-title="'+escapeHtml(stage.title)+'" data-stage-status="'+escapeHtml(stage.statusLabel)+'" data-focus-key="stage-'+escapeHtml(stage.id)+'" aria-label="'+escapeHtml(label)+'" aria-expanded="'+String(open)+'" aria-controls="stage-body-'+escapeHtml(stage.id)+'"><span class="stage-state-icon" aria-hidden="true">'+stageIcon(stage.state)+'</span><span class="stage-heading"><span class="stage-title">'+escapeHtml(stage.title)+'</span><span class="stage-subtitle">'+escapeHtml(stage.subtitle)+'</span></span><span class="stage-chevron" aria-hidden="true">›</span></button><div class="stage-body" id="stage-body-'+escapeHtml(stage.id)+'"'+(open?'':' hidden')+'><div class="stage-status">'+escapeHtml(stage.statusLabel)+'</div><div class="stage-duration" data-stage-duration="'+escapeHtml(stage.id)+'">'+escapeHtml(stage.durationLabel||'')+'</div><p class="stage-purpose">'+escapeHtml(stage.purpose)+'</p>'+(stage.summary?'<div class="report-summary">'+escapeHtml(stage.summary)+'</div>':'')+factsHtml(stage.facts)+sectionsHtml(stage.sections)+stageMilestonesHtml(stage)+stageDeliverablesHtml(stage)+historyHtml(stage)+stageTechnicalHtml(stage)+'</div></article>'; }
 function stageStripHtml(stages){ return '<div class="stage-strip" aria-label="Avance de la sesión">'+(stages||[]).map(stage=>'<div class="stage-strip-item '+escapeHtml(stage.state)+'"'+(stage.state==='active'?' aria-current="step"':'')+'><span class="stage-strip-icon" aria-hidden="true">'+stageIcon(stage.state)+'</span>'+escapeHtml(stage.title)+'<span class="sr-only">: '+escapeHtml(stage.statusLabel)+'</span></div>').join('')+'</div>'; }
 function nowCardHtml(presentation){ const latest=(presentation.milestones||[]).slice(-1)[0];return '<section class="now-card" aria-labelledby="now-title"><div class="card-eyebrow">Ahora</div><h3 class="card-title" id="now-title">'+escapeHtml(presentation.headline)+'</h3><p class="card-copy">'+escapeHtml(presentation.explanation)+'</p>'+stageStripHtml(presentation.stages)+(latest?'<div class="recent-milestone"><span aria-hidden="true">'+milestoneIcon(latest)+'</span><span>'+escapeHtml(latest.label)+'</span></div>':'')+(presentation.lastEventAt?'<div class="last-update">'+escapeHtml(formatWhen(presentation.lastEventAt))+'</div>':'')+'</section>'; }
-function outcomeHtml(outcome){if(!outcome)return '';const sections=outcome.sections||[];const technical=outcome.technicalSections||[];const fallback=outcome.tone==='positive'?'Baldr completó y revisó el trabajo.':'Este es el resultado disponible hasta el momento.';const id='result-details';const details=sections.length||technical.length?'<details class="disclosure"'+disclosureAttributes(id)+'><summary data-focus-key="disclosure-'+id+'">Ver resultado completo</summary>'+sectionsHtml(sections)+(technical.length?'<section class="report-section"><h4 class="report-section-title">Detalles técnicos</h4></section>'+sectionsHtml(technical):'')+'</details>':'';return '<section class="result-card '+escapeHtml(outcome.tone||'neutral')+'" aria-labelledby="result-title"><div class="card-eyebrow">Resultado</div><h3 class="card-title" id="result-title">'+escapeHtml(outcome.title||'Resultado hasta ahora')+'</h3><p class="card-copy">'+escapeHtml(outcome.summary||fallback)+'</p>'+factsHtml(outcome.facts)+details+'</section>';}
-function hasReconciliation(item){ return (item.allowed_actions||[]).some(action=>['inspect_shadow','continue_from_shadow','apply_shadow_changes','discard_shadow','resume_from_checkpoint','accept_existing_changes','discard_worktree','mark_failed'].includes(action)); }
-function attentionPrimaryAction(item,attention){ if(!attention)return null;if(hasReconciliation(item))return {id:'reconcile',label:attention.actionLabel||'Elegir cómo continuar'};if(attention.retryable===true&&(item.allowed_actions||[]).includes('start'))return {id:'start',label:attention.actionLabel||'Volver a intentar'};return null; }
-function attentionHtml(item,attention){ if(!attention)return '';const primary=attentionPrimaryAction(item,attention);const blockers=attention.blockers||[];const disabled=state.busy?' disabled':'';return '<section class="attention-card" role="alert" aria-labelledby="attention-title"><div class="card-eyebrow">Necesita tu atención</div><h3 class="card-title" id="attention-title">'+escapeHtml(attention.title)+'</h3><p class="card-copy">'+escapeHtml(attention.message)+'</p>'+(blockers.length?'<section class="report-section danger"><h4 class="report-section-title">Qué necesita resolverse</h4><ul>'+blockers.map(blocker=>'<li>'+escapeHtml(blocker)+'</li>').join('')+'</ul></section>':'')+(primary?'<div class="attention-action"><button class="action primary" data-action="'+escapeHtml(primary.id)+'" data-focus-key="action-'+escapeHtml(primary.id)+'"'+disabled+'>'+escapeHtml(primary.label)+'</button></div>':'')+'</section>'; }
+function outcomeHtml(outcome,isFinal=false){if(!outcome)return '';const sections=outcome.sections||[];const technical=outcome.technicalSections||[];const fallback=outcome.tone==='positive'?'Baldr completó y revisó el trabajo.':'Este es el resultado disponible hasta el momento.';const eyebrow=isFinal?'Resultado final':'Resultado hasta ahora';const id='result-technical';const technicalDetails=technical.length?'<details class="disclosure"'+disclosureAttributes(id)+'><summary data-focus-key="disclosure-'+id+'">Detalles técnicos del resultado</summary>'+sectionsHtml(technical)+'</details>':'';return '<section class="result-card '+escapeHtml(outcome.tone||'neutral')+'" aria-labelledby="result-title"><div class="card-eyebrow">'+eyebrow+'</div><h3 class="card-title" id="result-title">'+escapeHtml(outcome.title||'Resultado hasta ahora')+'</h3><p class="card-copy">'+escapeHtml(outcome.summary||fallback)+'</p>'+factsHtml(outcome.facts)+fileChangesHtml(outcome.fileChanges)+sectionsHtml(sections)+technicalDetails+'</section>';}
+function hasReconciliation(item){ return (item.allowed_actions||[]).some(action=>['authorize_changes','decline_changes','inspect_shadow','continue_from_shadow','apply_shadow_changes','discard_shadow','resume_from_checkpoint','accept_existing_changes','discard_worktree','mark_failed'].includes(action)); }
+function authorizationActions(item,attention){if(attention?.kind!=='authorization')return null;const actions=item.allowed_actions||[];if(!actions.includes('authorize_changes')||!actions.includes('decline_changes'))return null;return {approve:'authorize_changes',decline:'decline_changes'};}
+function attentionPrimaryAction(item,attention){ if(!attention||authorizationActions(item,attention))return null;if(hasReconciliation(item))return {id:'reconcile',label:attention.actionLabel||'Elegir cómo continuar'};if(attention.retryable===true&&(item.allowed_actions||[]).includes('start'))return {id:'start',label:attention.actionLabel||'Volver a intentar'};return null; }
+function attentionHtml(item,attention){ if(!attention)return '';const authorization=authorizationActions(item,attention);const primary=attentionPrimaryAction(item,attention);const blockers=attention.blockers||[];const disabled=state.busy?' disabled':'';const authorizationHtml=authorization?'<div class="attention-action"><button class="action primary" data-action="'+authorization.approve+'" data-focus-key="action-'+authorization.approve+'"'+disabled+'>Autorizar cambios y reintentar</button><button class="action" data-action="'+authorization.decline+'" data-focus-key="action-'+authorization.decline+'"'+disabled+'>No autorizar</button></div>':'';return '<section class="attention-card" role="alert" aria-labelledby="attention-title"><div class="card-eyebrow">Necesita tu atención</div><h3 class="card-title" id="attention-title">'+escapeHtml(attention.title)+'</h3><p class="card-copy">'+escapeHtml(attention.message)+'</p>'+(blockers.length?'<section class="report-section danger"><h4 class="report-section-title">Qué necesita resolverse</h4><ul>'+blockers.map(blocker=>'<li>'+escapeHtml(blocker)+'</li>').join('')+'</ul></section>':'')+authorizationHtml+(primary?'<div class="attention-action"><button class="action primary" data-action="'+escapeHtml(primary.id)+'" data-focus-key="action-'+escapeHtml(primary.id)+'"'+disabled+'>'+escapeHtml(primary.label)+'</button></div>':'')+'</section>'; }
 function refreshErrorHtml(hasItemAttention){ if(!state.error||hasItemAttention)return '';return '<section class="refresh-error" role="alert"><div class="refresh-error-title">No pudimos actualizar esta vista</div><p class="refresh-error-copy">Tu sesión sigue guardada. Probá nuevamente.</p><button type="button" class="action" data-refresh-action data-focus-key="refresh-error">Reintentar</button></section>'; }
 function globalTechnicalHtml(presentation){ const rows=presentation.technicalRows||[];const id='technical-session';return '<details class="disclosure"'+disclosureAttributes(id)+'><summary data-focus-key="disclosure-'+id+'">Detalles técnicos de la sesión</summary>'+(rows.length?'<div class="technical-grid">'+technicalRowsHtml(rows)+'</div>':'')+'<p><button class="action" data-action="logs" data-focus-key="action-logs">Abrir registro técnico</button></p></details>'; }
-function sessionRequestHtml(item){const task=String(item?.task||'').trim();if(!task)return '';const id='session-request';return '<details class="session-section"'+disclosureAttributes(id)+'><summary data-focus-key="disclosure-'+id+'">Pedido original</summary><div class="session-section-body"><div class="task-body">'+escapeHtml(task)+'</div></div></details>';}
+function sessionRequestHtml(item){const turns=Array.isArray(item?.turns)&&item.turns.length?item.turns:[{ordinal:1,request:String(item?.task||'')}];const visible=turns.filter(turn=>String(turn?.request||'').trim());if(!visible.length)return '';const id='session-request';const title=visible.length===1?'Pedido original':'Conversación ('+visible.length+' pedidos)';return '<details class="session-section"'+disclosureAttributes(id)+'><summary data-focus-key="disclosure-'+id+'">'+title+'</summary><div class="session-section-body">'+visible.map((turn,index)=>'<article class="conversation-turn"><div class="conversation-turn-label">'+(index===0?'Pedido original':'Continuación '+String(index))+'</div><div class="task-body">'+escapeHtml(turn.request)+'</div></article>').join('')+'</div></details>';}
 function sessionProgressHtml(stages,presentation,expanded){if(!stages.length)return '';const id='session-progress';return '<details class="session-section"'+disclosureAttributes(id)+'><summary data-focus-key="disclosure-'+id+'">Etapas y entregas</summary><div class="session-section-body"><section class="stage-list" aria-label="Etapas de la sesión">'+stages.map(stage=>stageHtml(stage,expanded.has(stage.id))).join('')+'</section>'+deliverableIndexHtml(presentation)+'</div></details>';}
 	function actionButtons(item,attention,attentionActionShown){ const actions = item.allowed_actions || []; const rows=[];
  const disabled=state.busy?' disabled':'';
@@ -1866,20 +2078,21 @@ function sessionProgressHtml(stages,presentation,expanded){if(!stages.length)ret
 	function trapDeliverableFocus(event,panel){if(event.key!=='Tab')return;const focusable=[...panel.querySelectorAll('button:not([disabled]), summary, [href], input:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')];if(!focusable.length)return;const first=focusable[0];const last=focusable[focusable.length-1];if(event.shiftKey&&(document.activeElement===first||!panel.contains(document.activeElement))){event.preventDefault();last.focus();}else if(!event.shiftKey&&(document.activeElement===last||!panel.contains(document.activeElement))){event.preventDefault();first.focus();}}
 	function renderContent(){
 	 const item=selected();
-	 const presentation=item?.presentation||null;const contentKey=(state.emptyWorkspace?'empty':state.trusted===false?'untrusted':!item?'none':String(item.id)+'|'+String(presentation?.revision||item.updated_at||'')+'|'+String(item.status||'')+'|'+JSON.stringify(item.allowed_actions||[])+'|'+String(Boolean(state.busy)))+'|error:'+String(Boolean(state.error))+'|deliverable:'+deliverableFingerprint()+'|deliverable-index:'+[deliverableIndexView.itemId,deliverableIndexView.loading,deliverableIndexView.error,deliverableIndexView.nextCursor,deliverableIndexView.items.length].join('|');
+	 const presentation=item?.presentation||null;const attentionKey=[presentation?.attention?.kind,presentation?.attention?.retryable,presentation?.attention?.actionLabel,presentation?.attention?.message].map(value=>String(value??'')).join(':');const contentKey=(state.emptyWorkspace?'empty':state.trusted===false?'untrusted':!item?'none':String(item.id)+'|'+String(presentation?.revision||item.updated_at||'')+'|'+String(item.status||'')+'|'+JSON.stringify(item.allowed_actions||[])+'|attention:'+attentionKey+'|'+String(Boolean(state.busy)))+'|error:'+String(Boolean(state.error))+'|deliverable:'+deliverableFingerprint()+'|deliverable-index:'+[deliverableIndexView.itemId,deliverableIndexView.loading,deliverableIndexView.error,deliverableIndexView.nextCursor,deliverableIndexView.items.length].join('|');
  if(contentKey===lastContentKey)return;lastContentKey=contentKey;
  els.content.setAttribute('aria-busy',String(Boolean(state.busy)));
  const currentDeliverableBody=els.content.querySelector('.deliverable-body');if(currentDeliverableBody)deliverableScrollTop=currentDeliverableBody.scrollTop;const previousScroll=els.content.scrollTop;const activeElement=document.activeElement;const focusKey=els.content.contains(activeElement)?String(activeElement?.dataset?.focusKey||''):'';
- if(state.emptyWorkspace){ els.content.innerHTML='<div class="empty"><div class="empty-inner">'+emptyMark()+'<div class="empty-title">Abrí una carpeta para empezar</div><div class="empty-detail">Baldr necesita una carpeta donde guardar el trabajo.</div></div></div>'; return; }
+ if(state.emptyWorkspace){const choose=state.workspaceChoiceRequired?'<p><button type="button" class="action primary" data-choose-workspace>Elegir carpeta</button></p>':'';els.content.innerHTML='<div class="empty"><div class="empty-inner">'+emptyMark()+'<div class="empty-title">'+(state.workspaceChoiceRequired?'Elegí el proyecto activo':'Abrí una carpeta para empezar')+'</div><div class="empty-detail">'+(state.workspaceChoiceRequired?'Hay varias carpetas abiertas. Baldr no elegirá una en silencio.':'Baldr necesita una carpeta donde guardar el trabajo.')+'</div>'+choose+'</div></div>';els.content.querySelector('[data-choose-workspace]')?.addEventListener('click',()=>post({type:'chooseWorkspace'}));return; }
  if(state.trusted===false){ els.content.innerHTML='<div class="empty"><div class="empty-inner">'+emptyMark()+'<div class="empty-title">Falta tu permiso</div><div class="empty-detail">Autorizá esta carpeta para que Baldr pueda trabajar.</div><p><button type="button" class="action primary" id="trust">Revisar permisos</button></p></div></div>'; document.getElementById('trust')?.addEventListener('click',()=>post({type:'requestTrust'})); return; }
  if(!item){ els.content.innerHTML=refreshErrorHtml(false)+'<div class="empty"><div class="empty-inner">'+emptyMark()+'<div class="empty-title">¿Qué querés hacer?</div><div class="empty-detail">Escribí lo que necesitás. Baldr lo organiza y te muestra el avance.</div><p><button type="button" class="action primary" data-start-request>Escribir un pedido</button></p></div></div>';els.content.querySelector('[data-refresh-action]')?.addEventListener('click',()=>post({type:'refresh'}));els.content.querySelector('[data-start-request]')?.addEventListener('click',()=>els.input.focus());return; }
  const error = itemErrorMessage(item);const expanded=expandedStages(item);const stages=presentation?.stages||[];
  const activeStagePresentation=(presentation?.stages||[]).find(stage=>stage.id===presentation?.activeStage);const announcementDetail=presentation?.attention?.message||activeStagePresentation?.summary||presentation?.outcome?.summary||'';
  const announcementKey=presentation?String(item.id||'selected')+'|'+String(presentation.revision||'')+'|'+String(presentation.headline||'')+'|'+String(presentation.activeStage||'')+'|'+String(announcementDetail):'';
  if(presentation&&presentation.headline&&announcementKey!==lastAnnouncement){lastAnnouncement=announcementKey;els.liveStatus.textContent=presentation.headline+'. '+presentation.explanation+(announcementDetail?' '+announcementDetail:'');}
- const attentionActionShown=Boolean(attentionPrimaryAction(item,presentation?.attention));const availableActions=actionButtons(item,presentation?.attention,attentionActionShown);
-		 els.content.innerHTML=deliverableViewHtml()+'<div class="content-background" data-deliverable-background'+(deliverableView.open?' inert aria-hidden="true"':'')+'><h2 class="item-title">'+escapeHtml(item.title || 'Sin título')+'</h2><div class="item-meta"><span>'+escapeHtml(statusLabel(item.status))+'</span><span>'+escapeHtml(presetLabel(item.preset))+'</span><span>'+escapeHtml(safetyLabel(item.safety_mode))+'</span></div>'+refreshErrorHtml(Boolean(presentation?.attention))+(error&&!presentation?.attention?'<div class="notice">'+escapeHtml(error)+'</div>':'')+(presentation?nowCardHtml(presentation):'')+attentionHtml(item,presentation?.attention)+(availableActions?'<div class="actions">'+availableActions+'</div>':'')+outcomeHtml(presentation?.outcome)+sessionRequestHtml(item)+sessionProgressHtml(stages,presentation,expanded)+globalTechnicalHtml(presentation||{technicalRows:[]})+'<div class="loading '+(state.busy?'visible':'')+'" id="loading" role="status" aria-live="polite"><span class="sr-only">'+escapeHtml(state.operationLabel||'')+'</span></div></div>';
+ const attentionActionShown=Boolean(attentionPrimaryAction(item,presentation?.attention)||authorizationActions(item,presentation?.attention));const availableActions=actionButtons(item,presentation?.attention,attentionActionShown);
+	 const completed=Boolean(presentation?.overallState==='complete'&&presentation?.outcome);const primary=completed?outcomeHtml(presentation.outcome,true):(presentation?nowCardHtml(presentation):'')+attentionHtml(item,presentation?.attention)+outcomeHtml(presentation?.outcome,false);els.content.innerHTML=deliverableViewHtml()+'<div class="content-background" data-deliverable-background'+(deliverableView.open?' inert aria-hidden="true"':'')+'><h2 class="item-title">'+escapeHtml(item.title || 'Sin título')+'</h2><div class="item-meta"><span>'+escapeHtml(statusLabel(item.status))+'</span><span>'+escapeHtml(presetLabel(item.preset))+'</span><span>'+escapeHtml(safetyLabel(item.safety_mode))+'</span></div>'+refreshErrorHtml(Boolean(presentation?.attention))+(error&&!presentation?.attention?'<div class="notice">'+escapeHtml(error)+'</div>':'')+primary+(availableActions?'<div class="actions">'+availableActions+'</div>':'')+sessionRequestHtml(item)+sessionProgressHtml(stages,presentation,expanded)+globalTechnicalHtml(presentation||{technicalRows:[]})+'<div class="loading '+(state.busy?'visible':'')+'" id="loading" role="status" aria-live="polite"><span class="sr-only">'+escapeHtml(state.operationLabel||'')+'</span></div></div>';
 	 els.content.querySelectorAll('[data-stage-toggle]').forEach(node=>node.addEventListener('click',()=>setStageExpanded(String(item.id||'selected'),node.dataset.stageToggle,node.getAttribute('aria-expanded')!=='true')));
+	 els.content.querySelectorAll('[data-open-changed-file]').forEach(node=>node.addEventListener('click',()=>post({type:'openChangedFile',path:node.dataset.openChangedFile})));
 	 els.content.querySelectorAll('[data-deliverable-stage]').forEach(node=>node.addEventListener('click',()=>openDeliverable(node)));
 		 els.content.querySelector('[data-deliverable-close]')?.addEventListener('click',()=>closeDeliverable(true));
 	 els.content.querySelector('[data-deliverable-more]')?.addEventListener('click',loadMoreDeliverable);
@@ -1897,10 +2110,11 @@ function effortChipLabel(value){ return ({minimal:'Mínimo',low:'Bajo',medium:'M
 function configuredRole(role){ const wb=workbench(); const pref=wb.preferences||{}; const profiles=wb.profiles||{}; const selected=(((pref.role_profiles||{})[role]||[])[0]); if(selected&&profiles.execution_profiles&&profiles.execution_profiles[selected])return profiles.execution_profiles[selected]; return (((profiles.resolved_roles||{})[role]||[])[0])||{}; }
 function renderChips(){ const pref=workbench().preferences||{}; const safety=safetyLabel(pref.safety_mode); const preset=presetLabel(pref.preset); const context=contextLabel(pref.context_mode); const roleNames={architect:'Planificación',implementer:'Ejecución',reviewer:'Revisión'}; const roleConfigurations=['architect','implementer','reviewer'].map(role=>{const config=configuredRole(role);const raw=config.model||config.agent||config.provider||'';return {role,label:shortModelLabel(raw),effort:effortChipLabel(config.reasoning_effort||config.effort)};}); const modelNames=[...new Set(roleConfigurations.map(item=>item.label).filter(Boolean))]; const team=modelNames.length?modelNames.join(' · '):'Equipo estándar'; const teamDetail=roleConfigurations.filter(item=>item.label).map(item=>roleNames[item.role]+': '+item.label+(item.effort?' ('+item.effort+')':'')).join(' · '); els.gitChipLabel.textContent=safety; els.gitChip.title='Uso de Git y protección: '+safety; els.gitChip.setAttribute('aria-label',els.gitChip.title); els.presetChipLabel.textContent=preset; els.presetChip.title='Nivel de detalle: '+preset; els.presetChip.setAttribute('aria-label',els.presetChip.title); els.rolesChipLabel.textContent=team; els.rolesChip.title='Equipo de Baldr: '+(teamDetail||team); els.rolesChip.setAttribute('aria-label',els.rolesChip.title); els.contextChipLabel.textContent=context; els.contextChip.title='Ayuda adicional: '+context; els.contextChip.setAttribute('aria-label',els.contextChip.title); }
 function renderPending(){ const items=(state.pending||{}).attachments||[];const key=items.map(item=>[item.kind,item.label].join(':')).join('|');if(key===lastPendingKey)return;lastPendingKey=key;const focusedIndex=els.attachments.contains(document.activeElement)?String(document.activeElement?.dataset?.removePending||''):''; const kindLabels={file:'Archivo',folder:'Carpeta',selection:'Selección'}; els.attachments.innerHTML=items.map((item,index)=>'<div class="attachment"><div class="attachment-icon" aria-hidden="true">'+({file:'▤',folder:'◇',selection:'≡'}[item.kind]||'▤')+'</div><div><div class="attachment-label" title="'+escapeHtml(item.label||'Archivo')+'">'+escapeHtml(item.label||'Archivo')+'</div><div class="attachment-kind">'+escapeHtml(kindLabels[item.kind]||'Archivo')+'</div></div><button type="button" class="remove-attachment" data-remove-pending="'+index+'" title="Quitar" aria-label="Quitar '+escapeHtml(item.label||'archivo')+'">×</button></div>').join(''); els.attachments.querySelectorAll('[data-remove-pending]').forEach(node=>node.addEventListener('click',()=>post({type:'removePending',index:Number(node.dataset.removePending)})));if(focusedIndex){const focusTarget=[...els.attachments.querySelectorAll('[data-remove-pending]')].find(node=>node.dataset.removePending===focusedIndex);focusTarget?.focus({preventScroll:true});} }
+function renderComposerContext(){const item=selected();const continuing=Boolean(item&&(item.allowed_actions||[]).includes('continue'));els.input.placeholder=continuing?'Continuar esta conversación…':'Escribí qué necesitás…';els.input.setAttribute('aria-label',continuing?'Continuar conversación con Baldr':'Nuevo pedido para Baldr');const active=String(state.activeContext||'');els.activeContext.textContent=active?'Contexto actual: '+active:'';els.activeContext.title=active?'Baldr incluirá este archivo o selección al enviar':'';}
 function updateDurations(){ const stages=selected()?.presentation?.stages||[];stages.forEach(stage=>{const node=els.content.querySelector('[data-stage-duration="'+stage.id+'"]');if(node)node.textContent=stage.durationLabel||'';}); }
 function resizeComposer(){els.input.style.height='auto';els.input.style.height=Math.min(150,els.input.scrollHeight)+'px';}
 function updateSendState(){ const blocked=Boolean(state.busy)||Boolean(deliverableView.open);els.send.disabled=blocked||!els.input.value.trim();for(const control of [els.plus,els.configure,els.refresh,els.gitChip,els.presetChip,els.rolesChip,els.contextChip])control.disabled=blocked; }
-function render(){ renderHistoryVisibility();renderTasks(); renderContent(); updateDurations(); renderChips(); renderPending(); syncDeliverableModality(); updateSendState(); }
+function render(){ renderHistoryVisibility();renderTasks(); renderContent(); updateDurations(); renderChips(); renderPending();renderComposerContext(); syncDeliverableModality(); updateSendState(); }
 function updateState(next){const incoming={...(next||{}),error:''};const incomingItemId=String(incoming?.workbench?.selected?.id||'');if(deliverableView.open&&incomingItemId!==deliverableView.itemId){++deliverableRequestSequence;deliverableView=blankDeliverableView();deliverableReturnFocusKey='';deliverableScrollTop=0;deliverableTechnicalOpen=false;pendingFocusKey='';lastContentKey='';}state=incoming;syncDeliverableIndexForItem(selected());render(); }
 function setPlusMenu(open){ plusMenuOpen=open; els.plusMenu.classList.toggle('visible',open); els.plusMenu.setAttribute('aria-hidden',String(!open)); els.plus.setAttribute('aria-expanded',String(open)); if(open){els.plusFilter.value='';filterPlusActions();els.plusMenu.scrollTop=0;} }
 function normalizeSearch(value){ return String(value||'').normalize('NFD').replace(/[̀-ͯ]/g,'').toLowerCase(); }

@@ -20,6 +20,14 @@ export interface PresentationFact {
   tone: 'neutral' | 'positive' | 'warning' | 'danger';
 }
 
+export interface FileChangePresentation {
+  path: string;
+  kind: 'added' | 'modified' | 'deleted';
+  additions: number | null;
+  deletions: number | null;
+  evidence: 'reported' | 'observed' | 'verified';
+}
+
 export interface TechnicalRow {
   label: string;
   value: string;
@@ -81,11 +89,13 @@ export interface ReportPresentation {
   reviewDecision: string;
   summary: string;
   facts: PresentationFact[];
+  fileChanges: FileChangePresentation[];
   sections: PresentationSection[];
   technicalSections: PresentationSection[];
 }
 
 export interface AttentionPresentation {
+  kind: string;
   title: string;
   message: string;
   actionLabel: string;
@@ -172,6 +182,53 @@ function stringList(value: unknown): string[] {
 function positiveInteger(value: unknown, fallback = 0): number {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function nullableLineCount(value: unknown): number | null {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function fileChangePresentation(
+  value: unknown,
+  fallback: Array<{ path: string; kind: FileChangePresentation['kind'] }>,
+): FileChangePresentation[] {
+  const source = records(value);
+  const candidates = source.length
+    ? source.map((entry) => ({
+      path: cleanText(entry.path, 320),
+      kind: cleanText(entry.kind, 40).toLowerCase(),
+      additions: nullableLineCount(entry.additions),
+      deletions: nullableLineCount(entry.deletions),
+      evidence: cleanText(entry.evidence, 40).toLowerCase(),
+    }))
+    : fallback.map((entry) => ({
+      ...entry,
+      additions: null,
+      deletions: null,
+      evidence: 'reported',
+    }));
+  const result: FileChangePresentation[] = [];
+  const seen = new Set<string>();
+  for (const candidate of candidates) {
+    if (
+      !candidate.path
+      || seen.has(candidate.path)
+      || !['added', 'modified', 'deleted'].includes(candidate.kind)
+    ) continue;
+    seen.add(candidate.path);
+    result.push({
+      path: candidate.path,
+      kind: candidate.kind as FileChangePresentation['kind'],
+      additions: candidate.additions,
+      deletions: candidate.deletions,
+      evidence: ['observed', 'verified'].includes(candidate.evidence)
+        ? candidate.evidence as 'observed' | 'verified'
+        : 'reported',
+    });
+    if (result.length >= 100) break;
+  }
+  return result;
 }
 
 function deliverableReason(
@@ -469,7 +526,19 @@ function reportPresentation(
   const report = record(value);
   const status = cleanText(report.status, 120).toLowerCase();
   const reviewDecision = cleanText(report.review_decision, 120).toLowerCase();
-  const files = stringList(report.files_modified);
+  const changesAdded = stringList(report.changes_added);
+  const changesModified = stringList(report.changes_modified);
+  const changesRemoved = stringList(report.changes_removed);
+  const hasChangeSummary = Boolean(changesAdded.length || changesModified.length || changesRemoved.length);
+  const filesAdded = stringList(report.files_added);
+  const filesModified = stringList(report.files_modified);
+  const filesDeleted = stringList(report.files_deleted);
+  const fileChanges = fileChangePresentation(report.file_changes, [
+    ...filesAdded.map((path) => ({ path, kind: 'added' as const })),
+    ...filesModified.map((path) => ({ path, kind: 'modified' as const })),
+    ...filesDeleted.map((path) => ({ path, kind: 'deleted' as const })),
+  ]);
+  const fileCount = fileChanges.length;
   const tests = stringList(report.tests_run);
   const risks = stringList(report.risks);
   const blockers = stringList(report.blockers);
@@ -488,7 +557,7 @@ function reportPresentation(
   const assumptions = stringList(report.assumptions);
   const reportDecisions = decisions(report.decisions);
   const facts: PresentationFact[] = [];
-  if (files.length) facts.push({ id: 'files', label: plural(files.length, 'archivo', 'archivos'), tone: 'neutral' });
+  if (fileCount) facts.push({ id: 'files', label: plural(fileCount, 'archivo', 'archivos'), tone: 'neutral' });
   if (tests.length) facts.push({ id: 'tests', label: plural(tests.length, 'comprobación informada', 'comprobaciones informadas'), tone: 'neutral' });
   if (risks.length) facts.push({ id: 'risks', label: plural(risks.length, 'punto a tener en cuenta', 'puntos a tener en cuenta'), tone: 'warning' });
   if (blockers.length) facts.push({ id: 'blockers', label: plural(blockers.length, 'pendiente importante', 'pendientes importantes'), tone: 'danger' });
@@ -515,10 +584,15 @@ function reportPresentation(
     push(section('blockers', 'Qué impide avanzar', blockers, 'danger'));
     push(section('risks', 'A tener en cuenta', risks, 'warning'));
   } else if (stage === 'execution') {
-    push(section('work-completed', 'Qué completó', workCompleted, 'positive'));
+    if (!hasChangeSummary) push(section('work-completed', 'Qué completó', workCompleted, 'positive'));
+    push(section('changes-added', 'Qué agregó', changesAdded, 'positive'));
+    push(section('changes-modified', 'Qué modificó', changesModified));
+    push(section('changes-removed', 'Qué quitó', changesRemoved, 'warning'));
     push(section('corrections', 'Correcciones aplicadas', corrections, 'positive'));
     push(section('work-next', 'Qué sigue', workNext));
-    push(section('files', 'Qué cambió', files));
+    push(section('files-added', 'Archivos agregados', filesAdded, 'positive'));
+    push(section('files', 'Archivos modificados', filesModified));
+    push(section('files-deleted', 'Archivos eliminados', filesDeleted, 'warning'));
     push(section('verification-evidence', 'Qué comprobó', verificationEvidence, 'positive'));
     push(section('tests', 'Comprobaciones informadas', tests));
     push(section('verification', 'Qué falta comprobar', verification, 'warning'));
@@ -536,10 +610,12 @@ function reportPresentation(
     push(section('follow-up', 'Próximos pasos', followUp));
     push(section('work-next', 'Qué sigue', workNext));
   } else {
-    push(section('work-completed', 'Trabajo realizado', workCompleted, 'positive'));
+    if (!hasChangeSummary) push(section('work-completed', 'Trabajo realizado', workCompleted, 'positive'));
+    push(section('changes-added', 'Qué agregó', changesAdded, 'positive'));
+    push(section('changes-modified', 'Qué modificó', changesModified));
+    push(section('changes-removed', 'Qué quitó', changesRemoved, 'warning'));
     push(section('corrections', 'Correcciones realizadas', corrections, 'positive'));
     push(section('findings', 'Resultado de la revisión', findings, findings.length ? 'warning' : 'neutral'));
-    push(section('files', 'Cambios realizados', files));
     push(section('verification-evidence', 'Qué se comprobó', verificationEvidence, 'positive'));
     push(section('tests', 'Comprobaciones informadas', tests));
     push(section('blockers', 'Qué queda por resolver', blockers, 'danger'));
@@ -585,6 +661,7 @@ function reportPresentation(
     reviewDecision,
     summary: cleanText(report.summary, MAX_SUMMARY_LENGTH),
     facts,
+    fileChanges,
     sections,
     technicalSections,
   };
@@ -847,16 +924,65 @@ function milestones(value: unknown): MilestonePresentation[] {
   }).filter((entry): entry is MilestonePresentation => Boolean(entry?.label)).slice(-40);
 }
 
-function attentionPresentation(raw: unknown, overall: WorkItemOverallState): AttentionPresentation | null {
+function attentionPresentation(
+  raw: unknown,
+  overall: WorkItemOverallState,
+  activeStage: CanonicalStageId | '',
+  progressTechnical: JsonRecord,
+  allowedActions: unknown,
+): AttentionPresentation | null {
   const value = record(raw);
   if (!Object.keys(value).length && overall !== 'attention') return null;
   const retryable = typeof value.retryable === 'boolean' ? value.retryable : null;
+  const blockers = stringList(value.blockers);
+  const rawKind = cleanText(value.kind, 120).toLowerCase();
+  const errorCodes = stringList(progressTechnical.error_codes).map((code) => code.toLowerCase());
+  const isLegacyPhaseFailure = Boolean(activeStage && blockers.length && errorCodes.some((code) => [
+    'workflow_phase_failed', 'phase_report_blocked', 'phase_min_successes_not_met', 'architecture_conflict',
+  ].includes(code)));
+  const stageName = ({
+    planning: 'La planificación',
+    execution: 'La etapa de cambios',
+    review: 'La revisión',
+  } as Record<string, string>)[activeStage] ?? '';
+  const fallbackTitle = isLegacyPhaseFailure
+    ? `${stageName} se detuvo`
+    : 'Necesitamos que elijas cómo continuar';
+  const fallbackMessage = isLegacyPhaseFailure
+    ? `${stageName} se detuvo por el motivo que aparece abajo. ${activeStage === 'planning'
+      ? 'No se llegó a modificar ningún archivo.'
+      : 'Las etapas siguientes no se realizaron.'}`
+    : 'El trabajo está preservado. Revisá las opciones disponibles antes de continuar.';
+  const reconciliationActions = stringList(allowedActions).filter((action) => [
+    'authorize_changes', 'decline_changes', 'inspect_shadow', 'continue_from_shadow', 'apply_shadow_changes', 'discard_shadow',
+    'resume_from_checkpoint', 'accept_existing_changes', 'discard_worktree', 'mark_failed',
+  ].includes(action));
+  const isWriteAuthorization = rawKind === 'authorization'
+    || reconciliationActions.includes('authorize_changes');
+  const onlyCloseAvailable = reconciliationActions.length === 1
+    && reconciliationActions[0] === 'mark_failed';
   return {
-    title: cleanText(value.title, 240) || 'Necesitamos que elijas cómo continuar',
-    message: cleanText(value.user_message ?? value.message ?? value.summary, MAX_SUMMARY_LENGTH)
-      || 'El trabajo está preservado. Revisá las opciones disponibles antes de continuar.',
-    actionLabel: cleanText(value.action_label, 120) || (retryable ? 'Volver a intentar' : 'Elegir cómo continuar'),
-    blockers: stringList(value.blockers),
+    kind: isWriteAuthorization ? 'authorization' : rawKind,
+    title: isWriteAuthorization
+      ? 'Baldr necesita permiso para modificar archivos'
+      : cleanText(value.title, 240) || fallbackTitle,
+    message: cleanText(value.user_message ?? value.message, MAX_SUMMARY_LENGTH)
+      || (isWriteAuthorization
+        ? (rawKind === 'authorization' ? cleanText(value.summary, MAX_SUMMARY_LENGTH) : '')
+          || 'El plan está listo. Elegí si Baldr puede crear o modificar los archivos necesarios para completar tu pedido.'
+        : isLegacyPhaseFailure ? fallbackMessage : cleanText(value.summary, MAX_SUMMARY_LENGTH))
+      || fallbackMessage,
+    actionLabel: cleanText(value.action_label, 120)
+      || (isWriteAuthorization
+        ? 'Elegir autorización'
+        : retryable
+        ? 'Volver a intentar'
+        : onlyCloseAvailable
+          ? 'Cerrar esta sesión'
+          : cleanText(value.kind).toLowerCase() === 'reconciliation'
+            ? 'Revisar opciones'
+            : 'Elegir cómo continuar'),
+    blockers,
     retryable,
   };
 }
@@ -970,7 +1096,13 @@ export function buildWorkItemPresentation(value: unknown, nowMs = Date.now()): W
     stages,
     deliverableIndex: deliverableIndex(supportedProgress.deliverable_index),
     outcome: hasFinalReport || overall === 'complete' ? reportPresentation(finalReport, 'final', overall) : null,
-    attention: attentionPresentation(supportedProgress.attention, overall),
+    attention: attentionPresentation(
+      supportedProgress.attention,
+      overall,
+      activeStage,
+      progressTechnical,
+      item.allowed_actions,
+    ),
     milestones: presentedMilestones,
     technicalRows: technicalRows(globalTechnical),
   };

@@ -26,7 +26,12 @@ def _report_with_decisions(decisions: Any) -> dict[str, Any]:
     return {
         "status": "planned",
         "summary": "Plan",
+        "changes_added": [],
+        "changes_modified": [],
+        "changes_removed": [],
+        "files_added": [],
         "files_modified": [],
+        "files_deleted": [],
         "commands_run": [],
         "tests_run": [],
         "verification_needed": [],

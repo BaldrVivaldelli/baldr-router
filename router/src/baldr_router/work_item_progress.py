@@ -49,6 +49,14 @@ _ATTENTION_STATUSES = {
 _COMPLETE_STATUSES = {"succeeded", "approved", "completed"}
 
 _ACTION_COPY: dict[str, tuple[str, str]] = {
+    "authorize_changes": (
+        "Autorizar cambios y reintentar",
+        "Permití que Baldr cree o modifique los archivos necesarios y continúe.",
+    ),
+    "decline_changes": (
+        "No autorizar",
+        "Cerrá la sesión sin crear ni modificar archivos.",
+    ),
     "inspect_shadow": (
         "Inspeccionar la copia protegida",
         "Revisá lo que hizo Baldr sin modificar tus archivos originales.",
@@ -278,6 +286,41 @@ def _safe_files(value: Any) -> list[str]:
     return result
 
 
+def _safe_file_changes(value: Any) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in _items(value)[:100]:
+        change = _record(raw)
+        path = _safe_relative_path(change.get("path"))
+        kind = _token(change.get("kind"))
+        if not path or path in seen or kind not in {"added", "modified", "deleted"}:
+            continue
+        seen.add(path)
+        additions = change.get("additions")
+        deletions = change.get("deletions")
+        evidence = _token(change.get("evidence"))
+        result.append(
+            {
+                "path": path,
+                "kind": kind,
+                "additions": (
+                    min(additions, 1_000_000_000)
+                    if isinstance(additions, int) and not isinstance(additions, bool) and additions >= 0
+                    else None
+                ),
+                "deletions": (
+                    min(deletions, 1_000_000_000)
+                    if isinstance(deletions, int) and not isinstance(deletions, bool) and deletions >= 0
+                    else None
+                ),
+                "evidence": evidence
+                if evidence in {"reported", "observed", "verified"}
+                else "reported",
+            }
+        )
+    return result
+
+
 def _safe_decisions(value: Any) -> list[dict[str, str]]:
     pairs: list[tuple[Any, Any]] = []
     if isinstance(value, Mapping):
@@ -439,10 +482,15 @@ def normalize_public_report(value: Any) -> tuple[dict[str, Any] | None, dict[str
         "verification_evidence": _safe_string_list(
             report.get("verification_evidence")
         ),
+        "changes_added": _safe_string_list(report.get("changes_added")),
+        "changes_modified": _safe_string_list(report.get("changes_modified")),
+        "changes_removed": _safe_string_list(report.get("changes_removed")),
         "decisions": _safe_decisions(report.get("decisions")),
         "acceptance_criteria": _safe_string_list(report.get("acceptance_criteria")),
         "assumptions": _safe_string_list(report.get("assumptions")),
+        "files_added": _safe_files(report.get("files_added")),
         "files_modified": _safe_files(report.get("files_modified")),
+        "files_deleted": _safe_files(report.get("files_deleted")),
         "tests_run": _safe_string_list(report.get("tests_run")),
         "verification_needed": _safe_string_list(report.get("verification_needed")),
         "risks": _safe_string_list(report.get("risks")),
@@ -567,6 +615,27 @@ def _retryability(
         explicit = _explicit_retryable(step)
         if explicit is not None:
             return explicit
+    if _token(run.get("error_code")) == "phase_report_blocked":
+        current_step_id = run.get("current_step_id")
+        current = next(
+            (
+                step
+                for step in reversed(ordered_steps)
+                if step.get("id") == current_step_id
+            ),
+            None,
+        )
+        if (
+            current is not None
+            and _token(current.get("phase")) == "architect"
+            and _token(current.get("status")) == "failed"
+        ):
+            # This failure happened entirely inside the enforced read-only
+            # architect phase. The public snapshot intentionally omits the
+            # redundant can_write/sandbox internals, but the frozen workflow
+            # contract makes this phase read-only. Starting a fresh item
+            # revision therefore cannot repeat an uncertain filesystem effect.
+            return True
     return None
 
 
@@ -1080,7 +1149,21 @@ def _attention(
         kind = "failed"
         fallback = "Baldr no pudo completar la sesión."
     error_code = _token(run.get("error_code") or item.get("error_code"))
-    if kind == "reconciliation" and error_code == "workflow_review_needs_changes":
+    stage_name = {
+        "planning": "La planificación",
+        "execution": "La etapa de cambios",
+        "review": "La revisión",
+    }.get(active_stage)
+    title = "Necesitamos que elijas cómo continuar"
+    if kind == "reconciliation" and error_code == "write_authorization_required":
+        kind = "authorization"
+        title = "Baldr necesita permiso para modificar archivos"
+        summary = (
+            "El plan está listo. Elegí si Baldr puede crear o modificar los archivos "
+            "necesarios para completar tu pedido."
+        )
+    elif kind == "reconciliation" and error_code == "workflow_review_needs_changes":
+        title = "La revisión encontró cambios pendientes"
         summary = (
             "La revisión encontró puntos que todavía necesitan cambios. "
             "El trabajo quedó protegido para que decidas cómo continuar."
@@ -1093,11 +1176,33 @@ def _attention(
         summary = (
             "Tus archivos cambiaron mientras Baldr trabajaba; no los sobrescribimos."
         )
+        title = "Tus archivos cambiaron durante el trabajo"
+    elif error_code in {
+        "workflow_phase_failed",
+        "phase_report_blocked",
+        "architecture_conflict",
+    } and stage_name:
+        title = f"{stage_name} se detuvo"
+        summary = (
+            f"{stage_name} se detuvo por el motivo que aparece abajo. "
+            + (
+                "No se llegó a modificar ningún archivo."
+                if active_stage == "planning"
+                else "Las etapas siguientes no se realizaron."
+            )
+        )
+    elif error_code == "phase_min_successes_not_met" and stage_name:
+        title = f"No se pudo completar {stage_name.lower()}"
+        summary = (
+            f"Ninguna de las configuraciones elegidas pudo completar "
+            f"{stage_name.lower()}. Revisá el equipo configurado o volvé a intentarlo."
+        )
     elif kind == "blocked" and (
         error_code.startswith("provider_")
         or "isolation" in error_code
         or "config" in error_code
     ):
+        title = "La configuración impide continuar"
         summary = (
             "La configuración elegida no permite trabajar de forma segura. "
             "Revisá las opciones del equipo."
@@ -1105,14 +1210,36 @@ def _attention(
     else:
         summary = fallback
     blockers: list[str] = []
-    for stage_id in reversed(_STAGE_IDS):
-        report = _record(stages[stage_id].get("report"))
-        blockers.extend(_safe_string_list(report.get("blockers"), limit=12))
-        if blockers:
-            break
+    if kind != "authorization":
+        for stage_id in reversed(_STAGE_IDS):
+            report = _record(stages[stage_id].get("report"))
+            blockers.extend(_safe_string_list(report.get("blockers"), limit=12))
+            if blockers:
+                break
+    raw_allowed_actions = [_token(action) for action in _items(item.get("allowed_actions"))]
+    legacy_write_authorization = (
+        error_code in {"workflow_phase_failed", "phase_report_blocked"}
+        and "authorize_changes" in raw_allowed_actions
+        and any(
+            marker in " ".join(blockers).lower()
+            for marker in (
+                "regla de no modificar archivos",
+                "bloqueada por la regla de no modificar",
+                "read-only planning boundary",
+                "rule not to modify files",
+            )
+        )
+    )
+    if legacy_write_authorization:
+        kind = "authorization"
+        title = "Baldr necesita permiso para modificar archivos"
+        summary = (
+            "El plan puede retomarse. Elegí si Baldr puede crear o modificar los "
+            "archivos necesarios para completar tu pedido."
+        )
+        blockers = []
     actions: list[dict[str, str]] = []
-    for raw_action in _items(item.get("allowed_actions")):
-        action = _token(raw_action)
+    for action in raw_allowed_actions:
         if action not in _ACTION_COPY:
             continue
         if action == "start" and retryable is not True:
@@ -1122,13 +1249,22 @@ def _attention(
             continue
         label, description = _ACTION_COPY[action]
         actions.append({"id": action, "label": label, "description": description})
+    action_label = "Elegir cómo continuar"
+    if kind == "authorization":
+        action_label = "Elegir autorización"
+    elif [action["id"] for action in actions] == ["mark_failed"]:
+        action_label = "Cerrar esta sesión"
+    elif kind == "reconciliation":
+        action_label = "Revisar opciones"
     return {
         "required": True,
         "kind": kind,
         "stage": active_stage,
+        "title": title,
         "summary": summary,
         "blockers": blockers[:12],
         "actions": actions,
+        "action_label": action_label,
         "retryable": retryable,
     }
 
@@ -1144,6 +1280,19 @@ def _dedupe_strings(values: Sequence[Any], *, limit: int = 40) -> list[str]:
         if len(result) >= limit:
             break
     return result
+
+
+def _execution_file_changes(snapshot: Mapping[str, Any]) -> list[dict[str, Any]]:
+    changes_by_path: dict[str, dict[str, Any]] = {}
+    for raw_step in _items(snapshot.get("steps")):
+        step = _record(raw_step)
+        if _stage_for_step(step) != "execution":
+            continue
+        output = _record(step.get("output"))
+        checkpoint = _record(output.get("checkpoint"))
+        for change in _safe_file_changes(checkpoint.get("file_changes")):
+            changes_by_path[str(change["path"])] = change
+    return list(changes_by_path.values())[:100]
 
 
 def _final_report(
@@ -1171,10 +1320,15 @@ def _final_report(
         "findings": [],
         "corrections": [],
         "verification_evidence": [],
+        "changes_added": [],
+        "changes_modified": [],
+        "changes_removed": [],
         "decisions": [],
         "acceptance_criteria": [],
         "assumptions": [],
+        "files_added": [],
         "files_modified": [],
+        "files_deleted": [],
         "tests_run": [],
         "verification_needed": [],
         "risks": [],
@@ -1240,11 +1394,16 @@ def _final_report(
         "findings": [review, base],
         "corrections": [execution, review, base],
         "verification_evidence": [execution, review, base],
+        "changes_added": [base, execution] if execution else [base],
+        "changes_modified": [base, execution] if execution else [base],
+        "changes_removed": [base, execution] if execution else [base],
         "acceptance_criteria": [base, *reports],
         "assumptions": [base, *reports],
         # Planning may mention likely files. Only implementation is evidence of
         # files actually reported as changed.
+        "files_added": [base, execution] if execution else [base],
         "files_modified": [base, execution] if execution else [base],
+        "files_deleted": [base, execution] if execution else [base],
         "tests_run": [base, execution, review],
         "verification_needed": [base, *reports],
         "risks": [base, *reports],
@@ -1259,8 +1418,28 @@ def _final_report(
                 if report
                 for entry in _items(report.get(field))
             ],
-            limit=100 if field == "files_modified" else 40,
+            limit=100 if field in {"files_added", "files_modified", "files_deleted"} else 40,
         )
+    file_changes = _execution_file_changes(snapshot)
+    if not file_changes:
+        reported: list[dict[str, Any]] = []
+        for field, kind in (
+            ("files_added", "added"),
+            ("files_modified", "modified"),
+            ("files_deleted", "deleted"),
+        ):
+            reported.extend(
+                {
+                    "path": path,
+                    "kind": kind,
+                    "additions": None,
+                    "deletions": None,
+                    "evidence": "reported",
+                }
+                for path in merged[field]
+            )
+        file_changes = _safe_file_changes(reported)
+    merged["file_changes"] = file_changes
     return merged
 
 
@@ -1511,6 +1690,19 @@ def compact_selected_item(item_value: Mapping[str, Any] | None) -> dict[str, Any
         )
     }
     selected["phases"] = compact_phase_summary(item.get("phases"))
+    selected["turns"] = [
+        {
+            "ordinal": _integer(turn.get("ordinal"), maximum=10_000),
+            "item_revision": _integer(turn.get("item_revision"), maximum=10_000),
+            "request": _safe_text(turn.get("request"), limit=65_536),
+            "run_id": _identifier(turn.get("run_id"), limit=128),
+            "source": _token(turn.get("source"), "unknown"),
+            "created_at": _timestamp(turn.get("created_at")),
+            "has_context": bool(turn.get("has_context")),
+        }
+        for raw_turn in _items(item.get("turns"))[-100:]
+        if (turn := _record(raw_turn))
+    ]
     error_code = _token(item.get("error_code"))
     if error_code:
         selected["error_code"] = error_code

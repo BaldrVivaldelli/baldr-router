@@ -254,10 +254,15 @@
         "findings",
         "corrections",
         "verification_evidence",
+        "changes_added",
+        "changes_modified",
+        "changes_removed",
         "decisions",
         "acceptance_criteria",
         "assumptions",
+        "files_added",
         "files_modified",
+        "files_deleted",
         "tests_run",
         "verification_needed",
         "risks",
@@ -304,6 +309,15 @@
         "verification_evidence": {
           "$ref": "#/$defs/stringList"
         },
+        "changes_added": {
+          "$ref": "#/$defs/stringList"
+        },
+        "changes_modified": {
+          "$ref": "#/$defs/stringList"
+        },
+        "changes_removed": {
+          "$ref": "#/$defs/stringList"
+        },
         "decisions": {
           "type": "array",
           "maxItems": 24,
@@ -317,7 +331,13 @@
         "assumptions": {
           "$ref": "#/$defs/stringList"
         },
+        "files_added": {
+          "$ref": "#/$defs/stringList"
+        },
         "files_modified": {
+          "$ref": "#/$defs/stringList"
+        },
+        "files_deleted": {
           "$ref": "#/$defs/stringList"
         },
         "tests_run": {

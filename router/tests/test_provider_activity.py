@@ -17,6 +17,7 @@ from baldr_router.durability.engine import (
     DurableWorkflowEngine,
     _resolved_snapshot,
     _structured_instruction,
+    architect_prompt,
 )
 from baldr_router.durability.evidence import create_workflow_evidence
 from baldr_router.durability.identity import workspace_identity
@@ -68,7 +69,7 @@ def _report(status: str, summary: str) -> dict[str, Any]:
         "verification_needed": [],
         "risks": [],
         "follow_up": [],
-        "decisions": {},
+        "decisions": {"write_authorization": "not_required"},
         "constraints": [],
         "assumptions": [],
         "alternatives_rejected": [],
@@ -692,3 +693,18 @@ def test_structured_instruction_requests_plain_user_language_without_reasoning()
         "verification_evidence",
     ):
         assert f"- {field}:" in instruction
+
+
+def test_architect_prompt_defers_requested_writes_without_blocking_workflow() -> None:
+    prompt = architect_prompt(
+        "Analyze this repository and create analysis.md",
+        "",
+        "",
+    )
+
+    assert "restriction of this planning phase, not a blocker" in prompt
+    assert (
+        "Defer every requested file creation or edit to the implementer" in prompt
+    )
+    assert "return status `planned` with" in prompt
+    assert "an empty `blockers` array" in prompt

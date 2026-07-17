@@ -48,6 +48,7 @@ def _report(status: str, summary: str) -> dict:
         "verification_needed": [],
         "risks": [],
         "follow_up": [],
+        "decisions": {"write_authorization": "not_required"},
     }
 
 

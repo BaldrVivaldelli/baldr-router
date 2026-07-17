@@ -14,6 +14,7 @@ from baldr_router.work_items import (
     WorkItemService,
     _allowed_actions,
     available_execution_profiles,
+    upsert_execution_profile,
     workbench_options,
 )
 from baldr_router.workspace_policy import RUNTIME_ROOTS_ENV, WorkspacePolicyError
@@ -63,6 +64,41 @@ def test_available_profiles_include_resolved_inline_role_models(
     assert profiles["resolved_roles"]["architect"][0]["reasoning_effort"] == "medium"
     assert profiles["resolved_roles"]["reviewer"][0]["model"] == "gpt-5.6-luna"
     assert profiles["resolved_roles"]["reviewer"][0]["reasoning_effort"] == "xhigh"
+
+
+def test_generated_dotted_profile_names_survive_sequential_saves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _isolated_runtime(tmp_path, monkeypatch)
+    repo = _git_repo(tmp_path / "repo")
+    names = {
+        "architect": "baldr-gpt-5.6-sol-xhigh",
+        "implementer": "baldr-gpt-5.6-terra-medium",
+        "reviewer": "baldr-gpt-5.6-luna-medium",
+    }
+
+    for role, name in names.items():
+        upsert_execution_profile(
+            name,
+            provider="codex",
+            model=name.removeprefix("baldr-").rsplit("-", 1)[0],
+            reasoning_effort="xhigh" if role == "architect" else "medium",
+        )
+
+    loaded = load_config()
+    assert set(names.values()) <= loaded.execution_profiles.keys()
+    assert '[execution_profiles."baldr-gpt-5.6-sol-xhigh"]' in (
+        tmp_path / "config" / "baldr-router" / "config.toml"
+    ).read_text(encoding="utf-8")
+
+    preferences = WorkItemService().set_preferences(
+        repo,
+        preset="custom",
+        role_profiles={role: [name] for role, name in names.items()},
+    )
+    assert preferences["role_profiles"] == {
+        role: [name] for role, name in names.items()
+    }
 
 
 def test_work_item_schema_and_private_task_artifact(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -316,7 +352,7 @@ def test_console_options_are_aliases_over_setup_status_run():
         "non-git",
     }
     safety = {entry["id"]: entry for entry in options["safety_modes"]}
-    assert safety["automatic"]["label"] == "Protección automática"
+    assert safety["automatic"]["label"] == "Pedir autorización"
     assert safety["automatic"]["recommended"] is True
     assert safety["automatic"]["default"] is True
     assert safety["current"]["label"] == "Trabajar directamente"
@@ -357,6 +393,39 @@ def test_work_item_actions_do_not_restore_unrecorded_recovery_options():
     }
 
     assert _allowed_actions(item, snapshot) == ["mark_failed", "archive"]
+
+
+def test_legacy_read_only_planning_failure_offers_write_authorization():
+    item = {"status": "needs_attention", "safety_mode": "automatic"}
+    snapshot = {
+        "run": {
+            "status": "awaiting_reconciliation",
+            "error_code": "phase_report_blocked",
+            "reconciliation": {
+                "allowed_actions": ["continue_from_shadow", "mark_failed"]
+            },
+        },
+        "steps": [
+            {
+                "phase": "architect",
+                "output": {
+                    "final_report": {
+                        "blockers": [
+                            "La creación física está bloqueada por la regla de no modificar archivos."
+                        ]
+                    }
+                },
+            }
+        ],
+    }
+
+    assert _allowed_actions(item, snapshot) == [
+        "authorize_changes",
+        "decline_changes",
+        "continue_from_shadow",
+        "mark_failed",
+        "archive",
+    ]
 
 
 def test_automatic_mode_allows_a_trusted_non_git_workspace_without_direct_consent(
@@ -421,6 +490,155 @@ def test_provider_context_includes_only_workspace_scoped_attachments(
     assert "Keep the wording concise." in context
     assert "docs/architecture.md" in context
     assert str(outside) not in context
+
+
+def test_continuation_appends_private_turn_and_carries_only_structured_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _isolated_runtime(tmp_path, monkeypatch)
+    repo = _git_repo(tmp_path / "repo")
+    other = _git_repo(tmp_path / "other")
+    monkeypatch.setenv(RUNTIME_ROOTS_ENV, json.dumps([str(repo), str(other)]))
+    service = WorkItemService()
+    item = service.create(
+        workspace_root=repo,
+        task="Implement token rotation",
+        extra_context="private initial context",
+        source="vscode-extension",
+    )
+
+    run_id = "br-conversation-first"
+    _run, created = service.store.create_run_with_input(
+        run_id=run_id,
+        idempotency_key="conversation-first",
+        request_fingerprint="conversation-first-fingerprint",
+        resume_token="conversation-first-resume",
+        workflow_name="architect-implement-review",
+        workflow_version=1,
+        workspace_root=str(repo),
+        workspace_id=str(item["workspace_id"]),
+        repository_identity={},
+        client_name="test",
+        input_value={"task": "private provider transcript must not be copied"},
+        config_snapshot={},
+        work_item_id=str(item["id"]),
+    )
+    assert created is True
+    final_report = {
+        "status": "approved",
+        "summary": "Token rotation is implemented.",
+        "work_completed": ["Added rotation."],
+        "files_modified": ["src/auth.py"],
+        "tests_run": ["pytest tests/test_auth.py"],
+        "review_decision": "approved",
+    }
+    final_id = service.store.store_artifact(
+        run_id=run_id, kind="final", value=final_report
+    )
+    service.store.transition_run(run_id, "running")
+    service.store.transition_run(run_id, "approved", final_artifact_id=final_id)
+    with service.store.transaction(immediate=True) as connection:
+        service._link_run(connection, str(item["id"]), run_id)  # noqa: SLF001
+        connection.execute(
+            "UPDATE work_items SET current_run_id=?, status='completed' WHERE id=?",
+            (run_id, item["id"]),
+        )
+
+    with pytest.raises(ValueError, match="does not belong"):
+        service.continue_item(
+            str(item["id"]), workspace_root=other, request="Cross workspace"
+        )
+
+    continued = service.continue_item(
+        str(item["id"]),
+        workspace_root=repo,
+        request="Now add expiry tests",
+        extra_context="Active editor: tests/test_auth.py\n" + ("x" * 100_000),
+        attachments=[
+            {
+                "kind": "file",
+                "label": "tests/test_auth.py",
+                "path": str(repo / "tests" / "test_auth.py"),
+                "dirty": True,
+                "version": 7,
+            }
+        ],
+        source="vscode-chat",
+    )
+
+    assert continued["id"] == item["id"]
+    assert continued["revision"] == 2
+    assert continued["status"] == "draft"
+    assert continued["task"] == "Now add expiry tests"
+    assert [turn["request"] for turn in continued["turns"]] == [
+        "Implement token rotation",
+        "Now add expiry tests",
+    ]
+    assert continued["turns"][1]["source"] == "vscode-chat"
+    assert "Token rotation is implemented." in continued["extra_context"]
+    assert "Active editor: tests/test_auth.py" in continued["extra_context"]
+    assert len(continued["extra_context"]) == 64_000
+    assert "private provider transcript must not be copied" not in continued["extra_context"]
+    assert continued["config"]["attachments"][0]["dirty"] is True
+    assert continued["config"]["attachments"][0]["version"] == 7
+
+    public = facade_status_report(
+        str(repo),
+        client="vscode-extension",
+        work_item_id=str(item["id"]),
+        workbench_only=True,
+    )["workbench"]["selected"]
+    assert [turn["request"] for turn in public["turns"]] == [
+        "Implement token rotation",
+        "Now add expiry tests",
+    ]
+    assert all("context" not in turn for turn in public["turns"])
+
+
+def test_frozen_run_continue_action_reuses_the_work_item(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _isolated_runtime(tmp_path, monkeypatch)
+    repo = _git_repo(tmp_path / "repo")
+    monkeypatch.setenv(RUNTIME_ROOTS_ENV, json.dumps([str(repo)]))
+    created = facade_run(
+        str(repo),
+        "Create the first version",
+        client="vscode-extension",
+        work_item_action="create-item",
+    )
+
+    continued = facade_run(
+        str(repo),
+        "Add the follow-up tests",
+        client="vscode-extension",
+        work_item_action="continue-item",
+        work_item_id=created["work_item"]["id"],
+        dry_run=True,
+    )
+
+    assert continued["ok"] is True
+    assert continued["operation"] == "continue-item"
+    assert continued["work_item"]["id"] == created["work_item"]["id"]
+    assert continued["work_item"]["revision"] == 2
+    assert [turn["request"] for turn in continued["work_item"]["turns"]] == [
+        "Create the first version",
+        "Add the follow-up tests",
+    ]
+
+
+def test_follow_up_is_available_for_safe_attention_but_not_reconciliation() -> None:
+    item = {"status": "needs_attention", "safety_mode": "automatic"}
+    blocked = {"run": {"status": "blocked"}}
+    reconciling = {
+        "run": {
+            "status": "awaiting_reconciliation",
+            "reconciliation": {"allowed_actions": ["mark_failed"]},
+        }
+    }
+
+    assert "continue" in _allowed_actions(item, blocked)
+    assert "continue" not in _allowed_actions(item, reconciling)
 
 
 def test_console_command_ids_are_unique():

@@ -46,10 +46,18 @@ def _report(
         "findings": ["No unresolved issue was reported."],
         "corrections": [],
         "verification_evidence": ["The focused test completed successfully."],
-        "decisions": {"approach": "Use the smallest safe change."},
+        "decisions": {
+            "approach": "Use the smallest safe change.",
+            "write_authorization": "not_required",
+        },
         "acceptance_criteria": ["The requested behavior is available."],
         "assumptions": ["The existing public contract remains compatible."],
+        "changes_added": ["A categorized final change summary."],
+        "changes_modified": ["The final result presentation."],
+        "changes_removed": ["The generic mixed change list."],
+        "files_added": ["src/new_feature.py"],
         "files_modified": ["src/feature.py"],
+        "files_deleted": ["src/legacy_feature.py"],
         "tests_run": ["pytest tests/test_feature.py"],
         "verification_needed": [],
         "risks": [],
@@ -201,6 +209,17 @@ def test_projection_groups_rounds_and_exposes_only_whitelisted_reports() -> None
         sequence=20,
         report=_report("implemented", "Initial implementation"),
     )
+    implementation["output"]["checkpoint"] = {  # type: ignore[index]
+        "file_changes": [
+            {
+                "path": "src/feature.py",
+                "kind": "modified",
+                "additions": 8,
+                "deletions": 3,
+                "evidence": "observed",
+            }
+        ]
+    }
     fix = _step(
         "fix",
         "implementer",
@@ -269,6 +288,26 @@ def test_projection_groups_rounds_and_exposes_only_whitelisted_reports() -> None
     assert "private/provider-runner" not in encoded
     assert '"detail"' not in json.dumps(progress["final_report"])
     assert progress["final_report"]["files_modified"] == ["src/feature.py"]  # type: ignore[index]
+    assert progress["final_report"]["changes_added"] == [  # type: ignore[index]
+        "A categorized final change summary."
+    ]
+    assert progress["final_report"]["changes_modified"] == [  # type: ignore[index]
+        "The final result presentation."
+    ]
+    assert progress["final_report"]["changes_removed"] == [  # type: ignore[index]
+        "The generic mixed change list."
+    ]
+    assert progress["final_report"]["files_added"] == ["src/new_feature.py"]  # type: ignore[index]
+    assert progress["final_report"]["files_deleted"] == ["src/legacy_feature.py"]  # type: ignore[index]
+    assert progress["final_report"]["file_changes"] == [  # type: ignore[index]
+        {
+            "path": "src/feature.py",
+            "kind": "modified",
+            "additions": 8,
+            "deletions": 3,
+            "evidence": "observed",
+        }
+    ]
     assert (
         "expected/not-yet-changed.py"
         not in progress["final_report"][  # type: ignore[operator]
@@ -668,6 +707,30 @@ def test_attention_exposes_retry_only_with_explicit_attempt_evidence(
     assert [action["id"] for action in attention["actions"]] == expected_actions  # type: ignore[index]
 
 
+def test_read_only_architecture_report_block_exposes_safe_retry() -> None:
+    planning = _step(
+        "planning",
+        "architect",
+        "failed",
+        sequence=10,
+        report=_report("blocked", "Permission request was misclassified"),
+    )
+    planning["can_write"] = False
+    item = _item("needs_attention")
+    item["allowed_actions"] = ["start", "archive"]
+    snapshot = _snapshot("blocked", [planning], current_step_id="planning")
+    snapshot["run"]["error_code"] = "phase_report_blocked"  # type: ignore[index]
+
+    progress = project_work_item_progress(item, snapshot)
+    attention = progress["attention"]
+
+    assert attention["retryable"] is True  # type: ignore[index]
+    assert [action["id"] for action in attention["actions"]] == [  # type: ignore[index]
+        "start",
+        "archive",
+    ]
+
+
 def test_cancelling_and_cancelled_keep_future_stages_honest() -> None:
     planning = _step(
         "plan",
@@ -801,6 +864,72 @@ def test_review_changes_and_reconciliation_are_attention_with_safe_actions() -> 
         "La revisión encontró puntos que todavía necesitan cambios. "
         "El trabajo quedó protegido para que decidas cómo continuar."
     )
+
+
+def test_phase_failure_attention_explains_where_and_why_work_stopped() -> None:
+    planning = _step(
+        "plan",
+        "architect",
+        "failed",
+        sequence=10,
+        report=_report(
+            "blocked",
+            "Planning stopped",
+            blockers=["A required permission is missing."],
+        ),
+    )
+    item = _item("needs_attention")
+    item["allowed_actions"] = ["mark_failed"]
+    snapshot = _snapshot(
+        "awaiting_reconciliation", [planning], current_step_id="plan"
+    )
+    snapshot["run"]["error_code"] = "workflow_phase_failed"  # type: ignore[index]
+
+    attention = project_work_item_progress(item, snapshot)["attention"]
+
+    assert attention["title"] == "La planificación se detuvo"  # type: ignore[index]
+    assert attention["summary"] == (  # type: ignore[index]
+        "La planificación se detuvo por el motivo que aparece abajo. "
+        "No se llegó a modificar ningún archivo."
+    )
+    assert attention["blockers"] == [  # type: ignore[index]
+        "A required permission is missing."
+    ]
+    assert attention["action_label"] == "Cerrar esta sesión"  # type: ignore[index]
+
+
+def test_write_authorization_is_a_choice_without_a_blocker() -> None:
+    planning = _step(
+        "plan",
+        "architect",
+        "succeeded",
+        sequence=10,
+        report=_report("planned", "The plan is ready"),
+    )
+    item = _item("needs_attention")
+    item["allowed_actions"] = ["authorize_changes", "decline_changes", "archive"]
+    snapshot = _snapshot(
+        "awaiting_reconciliation", [planning], current_step_id="plan"
+    )
+    snapshot["run"]["error_code"] = "write_authorization_required"  # type: ignore[index]
+    snapshot["run"]["reconciliation"] = {  # type: ignore[index]
+        "reason": "write-authorization-required",
+        "allowed_actions": ["authorize_changes", "decline_changes"],
+    }
+
+    attention = project_work_item_progress(item, snapshot)["attention"]
+
+    assert attention["kind"] == "authorization"  # type: ignore[index]
+    assert attention["title"] == (  # type: ignore[index]
+        "Baldr necesita permiso para modificar archivos"
+    )
+    assert "El plan está listo" in attention["summary"]  # type: ignore[index]
+    assert attention["blockers"] == []  # type: ignore[index]
+    assert [action["id"] for action in attention["actions"]] == [  # type: ignore[index]
+        "authorize_changes",
+        "decline_changes",
+        "archive",
+    ]
 
 
 def test_retry_uses_latest_round_instead_of_stale_attention() -> None:
@@ -1171,7 +1300,7 @@ def test_engine_stops_when_a_non_review_phase_reports_blockers(
         implementer_provider=None,
         reviewer_provider=None,
         max_rounds=0,
-        workspace_mode="current",
+        workspace_mode="automatic",
     )
     store = DurableStore(path=tmp_path / f"{blocked_phase}.sqlite3")
     result = DurableWorkflowEngine(store=store, provider_runner=provider).run(
@@ -1187,9 +1316,261 @@ def test_engine_stops_when_a_non_review_phase_reports_blockers(
     assert result["ok"] is False
     assert result["status"] == "blocked"
     assert calls == expected_calls
-    steps = store.snapshot_run(str(result["run_id"]))["steps"]
+    persisted = store.snapshot_run(str(result["run_id"]))
+    assert persisted["run"]["error_code"] == "phase_report_blocked"
+    steps = persisted["steps"]
     assert steps[-1]["phase"] == blocked_phase
     assert steps[-1]["status"] == "failed"
+
+
+@pytest.mark.parametrize(
+    ("action", "expected_status", "expected_calls", "file_created"),
+    [
+        (
+            "authorize_changes",
+            "approved",
+            ["architect", "implementer", "reviewer"],
+            True,
+        ),
+        ("decline_changes", "cancelled", ["architect"], False),
+    ],
+)
+def test_engine_pauses_for_durable_write_authorization_and_honors_the_choice(
+    action: str,
+    expected_status: str,
+    expected_calls: list[str],
+    file_created: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    repo = _git_repo(tmp_path / f"repo-{action}")
+    calls: list[str] = []
+
+    def provider(**kwargs: object) -> dict[str, object]:
+        phase = str(kwargs["role_name"])
+        calls.append(phase)
+        status = {
+            "architect": "planned",
+            "implementer": "implemented",
+            "reviewer": "approved",
+        }[phase]
+        report = _report(
+            status,
+            f"{phase} complete",
+            decision="approved" if phase == "reviewer" else "not_applicable",
+        )
+        if phase == "architect":
+            # The shared schema may yield this neutral reviewer-only value in
+            # a non-review phase; it must not swallow the permission request.
+            report["review_decision"] = "inconclusive"
+            report["decisions"] = {
+                "write_authorization": "required",
+                "write_request": "Create authorized.txt to complete the request.",
+            }
+        elif phase == "implementer":
+            (Path(str(kwargs["cwd"])) / "authorized.txt").write_text(
+                "authorized\n", encoding="utf-8"
+            )
+        return {"ok": True, "final_report": report}
+
+    cfg = AppConfig.defaults()
+    cfg.context7.enabled = False
+    snapshot = _resolved_snapshot(
+        cfg,
+        architect_provider=None,
+        implementer_provider=None,
+        reviewer_provider=None,
+        max_rounds=0,
+        workspace_mode="automatic",
+    )
+    store = DurableStore(path=tmp_path / f"{action}.sqlite3")
+    engine = DurableWorkflowEngine(store=store, provider_runner=provider)
+    paused = engine.run(
+        workspace_root=repo,
+        task="Create an authorized file",
+        extra_context="",
+        config_snapshot=snapshot,
+        context7_libraries=None,
+        client_name="test",
+        idempotency_key=f"authorization-{action}",
+    )
+
+    assert paused["status"] == "awaiting_reconciliation"
+    assert calls == ["architect"]
+    assert not (repo / "authorized.txt").exists()
+    public = store.snapshot_run_public(str(paused["run_id"]))
+    assert public["run"]["reconciliation"] == {
+        "reason": "write-authorization-required",
+        "allowed_actions": ["authorize_changes", "decline_changes"],
+    }
+    assert "write_request" not in json.dumps(public)
+
+    resolved = engine.run(
+        workspace_root=repo,
+        task="",
+        extra_context="",
+        config_snapshot=snapshot,
+        context7_libraries=None,
+        client_name="test",
+        resume_run_id=str(paused["run_id"]),
+        reconciliation_action=action,
+    )
+
+    assert resolved["status"] == expected_status
+    assert calls == expected_calls
+    assert (repo / "authorized.txt").exists() is file_created
+    checkpoint = store.latest_checkpoint(str(paused["run_id"]))
+    assert checkpoint is not None
+    assert checkpoint["mode"] == "in-place"
+
+
+def test_current_mode_uses_persisted_consent_without_a_per_task_pause(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    repo = _git_repo(tmp_path / "repo-current-consent")
+    calls: list[str] = []
+
+    def provider(**kwargs: object) -> dict[str, object]:
+        phase = str(kwargs["role_name"])
+        calls.append(phase)
+        report = _report(
+            {
+                "architect": "planned",
+                "implementer": "implemented",
+                "reviewer": "approved",
+            }[phase],
+            f"{phase} complete",
+            decision="approved" if phase == "reviewer" else "not_applicable",
+        )
+        if phase == "architect":
+            report["decisions"] = {
+                "write_authorization": "required",
+                "write_request": "Create direct.txt.",
+            }
+        elif phase == "implementer":
+            (Path(str(kwargs["cwd"])) / "direct.txt").write_text(
+                "direct\n", encoding="utf-8"
+            )
+        return {"ok": True, "final_report": report}
+
+    cfg = AppConfig.defaults()
+    cfg.context7.enabled = False
+    snapshot = _resolved_snapshot(
+        cfg,
+        architect_provider=None,
+        implementer_provider=None,
+        reviewer_provider=None,
+        max_rounds=0,
+        workspace_mode="current",
+    )
+    store = DurableStore(path=tmp_path / "current-consent.sqlite3")
+    result = DurableWorkflowEngine(store=store, provider_runner=provider).run(
+        workspace_root=repo,
+        task="Create a file with persisted consent",
+        extra_context="",
+        config_snapshot=snapshot,
+        context7_libraries=None,
+        client_name="test",
+        idempotency_key="current-persisted-consent",
+    )
+
+    assert result["status"] == "approved"
+    assert calls == ["architect", "implementer", "reviewer"]
+    assert (repo / "direct.txt").read_text(encoding="utf-8") == "direct\n"
+
+
+def test_legacy_write_policy_authorization_replays_the_architect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    repo = _git_repo(tmp_path / "repo-legacy-authorization")
+    calls: list[str] = []
+
+    def provider(**kwargs: object) -> dict[str, object]:
+        phase = str(kwargs["role_name"])
+        calls.append(phase)
+        if phase == "architect" and calls.count("architect") == 1:
+            return {
+                "ok": True,
+                "final_report": _report(
+                    "blocked",
+                    "Cannot create the requested file yet",
+                    blockers=[
+                        "La creación física está bloqueada por la regla de no modificar archivos."
+                    ],
+                ),
+            }
+        status = {
+            "architect": "planned",
+            "implementer": "implemented",
+            "reviewer": "approved",
+        }[phase]
+        report = _report(
+            status,
+            f"{phase} complete",
+            decision="approved" if phase == "reviewer" else "not_applicable",
+        )
+        if phase == "architect":
+            report["decisions"] = {
+                "write_authorization": "required",
+                "write_request": "Create legacy-authorized.txt.",
+            }
+        elif phase == "implementer":
+            (Path(str(kwargs["cwd"])) / "legacy-authorized.txt").write_text(
+                "authorized\n", encoding="utf-8"
+            )
+        return {"ok": True, "final_report": report}
+
+    cfg = AppConfig.defaults()
+    cfg.context7.enabled = False
+    snapshot = _resolved_snapshot(
+        cfg,
+        architect_provider=None,
+        implementer_provider=None,
+        reviewer_provider=None,
+        max_rounds=0,
+        workspace_mode="worktree",
+    )
+    store = DurableStore(path=tmp_path / "legacy-authorization.sqlite3")
+    engine = DurableWorkflowEngine(store=store, provider_runner=provider)
+    paused = engine.run(
+        workspace_root=repo,
+        task="Create a file from a legacy session",
+        extra_context="",
+        config_snapshot=snapshot,
+        context7_libraries=None,
+        client_name="test",
+        idempotency_key="legacy-write-authorization",
+    )
+
+    assert paused["status"] == "awaiting_reconciliation"
+    assert calls == ["architect"]
+
+    resolved = engine.run(
+        workspace_root=repo,
+        task="",
+        extra_context="",
+        config_snapshot=snapshot,
+        context7_libraries=None,
+        client_name="test",
+        resume_run_id=str(paused["run_id"]),
+        reconciliation_action="authorize_changes",
+    )
+
+    assert resolved["status"] == "approved"
+    assert calls == ["architect", "architect", "implementer", "reviewer"]
+    assert (repo / "legacy-authorized.txt").read_text(encoding="utf-8") == "authorized\n"
+    architect = store.get_step(str(paused["run_id"]), "architect.plan")
+    assert architect is not None
+    participant = store.snapshot_run(str(paused["run_id"]))["steps"][0]["participants"][0]
+    assert participant["attempt_count"] == 2
 
 
 def test_work_item_service_integrates_progress_and_can_hide_internal_snapshot(

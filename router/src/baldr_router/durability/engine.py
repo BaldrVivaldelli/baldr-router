@@ -8,6 +8,7 @@ import os
 import socket
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable
@@ -49,6 +50,8 @@ FaultHook = Callable[[str, dict[str, Any]], None]
 
 TERMINAL_RUN_STATES = {"approved", "needs_changes", "blocked", "failed", "cancelled"}
 RECONCILIATION_ACTIONS = {
+    "authorize_changes",
+    "decline_changes",
     "resume_from_checkpoint",
     "accept_existing_changes",
     "discard_worktree",
@@ -90,6 +93,58 @@ def _extract_summary(result: dict[str, Any]) -> str:
     return _safe_text(result, 5000)
 
 
+def _reported_file_changes(result: Mapping[str, Any]) -> list[dict[str, str]]:
+    """Return the provider's bounded path claims for workspace verification."""
+
+    report = result.get("final_report")
+    if not isinstance(report, Mapping):
+        return []
+    fields = (
+        ("files_added", "added"),
+        ("files_modified", "modified"),
+        ("files_deleted", "deleted"),
+    )
+    changes: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for field, kind in fields:
+        values = report.get(field)
+        if not isinstance(values, list):
+            continue
+        for value in values:
+            if not isinstance(value, str) or not value.strip() or value in seen:
+                continue
+            seen.add(value)
+            changes.append({"path": value, "kind": kind})
+            if len(changes) >= 100:
+                return changes
+    return changes
+
+
+def _write_authorization_request(result: dict[str, Any]) -> str | None:
+    report = result.get("final_report")
+    if not isinstance(report, dict):
+        return "Crear o modificar archivos para completar el pedido."
+    decisions = report.get("decisions")
+    if not isinstance(decisions, dict):
+        return "Crear o modificar archivos para completar el pedido."
+    authorization = str(decisions.get("write_authorization") or "").strip().lower()
+    if authorization == "not_required":
+        return None
+    request = str(decisions.get("write_request") or "").strip()
+    return request or "Crear o modificar archivos para completar el pedido."
+
+
+def _requires_write_authorization(config_snapshot: dict[str, Any]) -> bool:
+    workspace = config_snapshot.get("workspace") or {}
+    requested_value = workspace.get("requested_safety_mode")
+    if requested_value is None:
+        # Runs created before this mode must keep their original isolated or
+        # direct semantics when their immutable snapshot is resumed.
+        return False
+    requested = str(requested_value).strip().lower()
+    return requested in {"", "auto", "automatic"}
+
+
 def _has_blockers(result: dict[str, Any]) -> bool:
     report = result.get("final_report")
     if isinstance(report, dict):
@@ -125,7 +180,12 @@ Required keys (use empty arrays when a section does not apply):
 - findings: string array of review findings; use [] when none
 - corrections: string array of corrections applied; use [] when none
 - verification_evidence: string array of observable checks and their outcomes; do not claim a pass without evidence
-- files_modified: string array
+- changes_added: concise user-facing descriptions of capabilities or content introduced; use [] when none
+- changes_modified: concise user-facing descriptions of existing behavior or content adjusted; use [] when none
+- changes_removed: concise user-facing descriptions of behavior or content removed; use [] when none
+- files_added: paths of files actually created; use [] when none
+- files_modified: paths of existing files actually changed; use [] when none
+- files_deleted: paths of files actually removed; use [] when none
 - commands_run: string array
 - tests_run: string array
 - verification_needed: string array
@@ -166,10 +226,18 @@ def architect_prompt(task: str, extra_context: str, context7_note: str) -> str:
 You are an architecture participant in a Baldr-controlled durable workflow.
 
 Hard rules:
-- Do not modify files.
+- Planning starts without permission to change files. When the requested outcome
+  needs file creation, editing, deletion, or commands with workspace side effects,
+  request the person's authorization instead of treating that need as a failure.
 - Do not delegate to Baldr or other agents.
 - Produce a concise implementation plan.
 - Identify risks, likely files, tests, and acceptance criteria.
+- In `decisions`, always include `write_authorization`: use `required` when the
+  plan needs workspace changes and `not_required` when the result is read-only.
+- When authorization is required, also include `write_request` with one concise,
+  user-facing sentence describing the changes that will be allowed.
+- A pending authorization is not a blocker. Return status `planned` with an empty
+  `blockers` array unless an external condition prevents the plan from proceeding.
 
 Task:
 {task}
@@ -361,7 +429,11 @@ def _resolved_snapshot(
     selected_workspace_mode = str(workspace_mode or "").strip().lower()
     requested_safety_mode = selected_workspace_mode or "auto"
     allow_non_git = selected_workspace_mode == "non-git"
-    protected_automatic = selected_workspace_mode in {"", "auto", "automatic"}
+    permission_gated_automatic = selected_workspace_mode in {
+        "",
+        "auto",
+        "automatic",
+    }
     workspace_snapshot.update(
         {
             "requested_safety_mode": requested_safety_mode,
@@ -369,7 +441,7 @@ def _resolved_snapshot(
             "effective_require_git_repository": bool(
                 cfg.workspace.require_git_repository
                 and not allow_non_git
-                and not protected_automatic
+                and not permission_gated_automatic
             ),
         }
     )
@@ -377,10 +449,10 @@ def _resolved_snapshot(
         workspace_snapshot["write_isolation"] = "worktree"
         workspace_snapshot["dirty_workspace_policy"] = "reject"
         workspace_snapshot["publish_worktree_changes"] = True
-    elif protected_automatic:
-        workspace_snapshot["write_isolation"] = "auto"
-        workspace_snapshot["dirty_workspace_policy"] = "reject"
-        workspace_snapshot["publish_worktree_changes"] = True
+    elif permission_gated_automatic:
+        workspace_snapshot["write_isolation"] = "in-place"
+        workspace_snapshot["dirty_workspace_policy"] = "in-place"
+        workspace_snapshot["publish_worktree_changes"] = False
     elif selected_workspace_mode in {"current", "non-git"}:
         workspace_snapshot["write_isolation"] = "in-place"
         workspace_snapshot["dirty_workspace_policy"] = "in-place"
@@ -787,9 +859,28 @@ class DurableWorkflowEngine:
                     "Architecture phase failed.",
                     architecture,
                     lease,
+                    error_code=str(
+                        architecture.get("error_code") or "workflow_phase_failed"
+                    ),
                     execution=execution,
                 )
             plan_summary = _extract_summary(architecture)
+            write_request = _write_authorization_request(architecture)
+            current_run = self.store.get_run(run_id) or {}
+            authorization = str(
+                (current_run.get("reconciliation") or {}).get("authorization") or ""
+            ).lower()
+            if (
+                write_request
+                and authorization != "granted"
+                and _requires_write_authorization(config_snapshot)
+            ):
+                return self._pause_for_write_authorization(
+                    run_id=run_id,
+                    request=write_request,
+                    execution=execution,
+                    lease=lease,
+                )
 
             implementation = self._execute_phase(
                 run_id=run_id,
@@ -805,8 +896,12 @@ class DurableWorkflowEngine:
                 report_kind="implementation",
                 lease=lease,
                 config_snapshot=config_snapshot,
-                post_success=lambda step_id: self.workspace_manager.checkpoint(
-                    execution, step_id=step_id, label="implementer.implement", lease=lease
+                post_success=lambda step_id, reported: self.workspace_manager.checkpoint(
+                    execution,
+                    step_id=step_id,
+                    label="implementer.implement",
+                    reported_file_changes=reported,
+                    lease=lease,
                 ),
             )
             if not implementation.get("ok"):
@@ -817,6 +912,9 @@ class DurableWorkflowEngine:
                     "Implementation phase failed.",
                     implementation,
                     lease,
+                    error_code=str(
+                        implementation.get("error_code") or "workflow_phase_failed"
+                    ),
                     execution=execution,
                 )
             implementation_summary = _extract_summary(implementation)
@@ -854,6 +952,10 @@ class DurableWorkflowEngine:
                         "Review phase failed.",
                         review_result,
                         lease,
+                        error_code=str(
+                            review_result.get("error_code")
+                            or "workflow_phase_failed"
+                        ),
                         execution=execution,
                     )
                 if not _has_blockers(review_result):
@@ -877,8 +979,12 @@ class DurableWorkflowEngine:
                     report_kind="implementation",
                     lease=lease,
                     config_snapshot=config_snapshot,
-                    post_success=lambda step_id, key=fix_key: self.workspace_manager.checkpoint(
-                        execution, step_id=step_id, label=key, lease=lease
+                    post_success=lambda step_id, reported, key=fix_key: self.workspace_manager.checkpoint(
+                        execution,
+                        step_id=step_id,
+                        label=key,
+                        reported_file_changes=reported,
+                        lease=lease,
                     ),
                 )
                 if not fix_result.get("ok"):
@@ -889,6 +995,9 @@ class DurableWorkflowEngine:
                         "Fix phase failed.",
                         fix_result,
                         lease,
+                        error_code=str(
+                            fix_result.get("error_code") or "workflow_phase_failed"
+                        ),
                         execution=execution,
                     )
                 implementation_summary = _extract_summary(fix_result)
@@ -1143,6 +1252,111 @@ class DurableWorkflowEngine:
         lease: LeaseToken,
     ) -> dict[str, Any]:
         run_id = str(run["id"])
+        recorded_reconciliation = run.get("reconciliation") or {}
+        if recorded_reconciliation.get("reason") == "write-authorization-required":
+            allowed_actions = {"authorize_changes", "decline_changes"}
+            if not action:
+                result = self._result_from_snapshot(self.store.snapshot_run(run_id))
+                result.update(
+                    {
+                        "ok": False,
+                        "status": "awaiting_reconciliation",
+                        "reason": "Baldr necesita autorización para modificar archivos.",
+                        "reconciliation": {
+                            "reason": "write-authorization-required",
+                            "allowed_actions": sorted(allowed_actions),
+                        },
+                    }
+                )
+                return {"continue": False, "result": result}
+            action = action.strip().lower()
+            if action not in allowed_actions:
+                result = self._result_from_snapshot(self.store.snapshot_run(run_id))
+                result.update(
+                    {
+                        "ok": False,
+                        "status": "awaiting_reconciliation",
+                        "error": {"code": "invalid_write_authorization_action"},
+                        "reason": "Elegí si Baldr puede modificar archivos.",
+                        "reconciliation": {
+                            "reason": "write-authorization-required",
+                            "allowed_actions": sorted(allowed_actions),
+                        },
+                    }
+                )
+                return {"continue": False, "result": result}
+            if action == "decline_changes":
+                self.store.transition_run(
+                    run_id,
+                    "cancelled",
+                    event_type="workflow.write_authorization_declined",
+                    error_code="write_authorization_declined",
+                    error_reason="The person declined workspace changes.",
+                    reconciliation={
+                        "reason": "write-authorization-resolved",
+                        "authorization": "declined",
+                        "resolved_by": action,
+                        "resolved_at": utc_now_iso(),
+                    },
+                    lease=lease,
+                )
+                return {
+                    "continue": False,
+                    "result": self._result_from_snapshot(
+                        self.store.snapshot_run(run_id)
+                    ),
+                }
+            resolved = {
+                "reason": "write-authorization-resolved",
+                "authorization": "granted",
+                "resolved_by": action,
+                "resolved_at": utc_now_iso(),
+            }
+            self.store.transition_run(
+                run_id,
+                "recovering",
+                event_type="workflow.write_authorization_granted",
+                reconciliation=resolved,
+                lease=lease,
+            )
+            self.store.transition_run(
+                run_id,
+                "running",
+                reconciliation=resolved,
+                lease=lease,
+            )
+            return {"continue": True}
+
+        legacy_write_authorization = self._legacy_write_policy_failure(run_id, run)
+        authorization_granted = False
+        if legacy_write_authorization and action in {
+            "authorize_changes",
+            "decline_changes",
+        }:
+            if action == "decline_changes":
+                self.store.transition_run(
+                    run_id,
+                    "cancelled",
+                    event_type="workflow.write_authorization_declined",
+                    error_code="write_authorization_declined",
+                    error_reason="The person declined workspace changes.",
+                    reconciliation={
+                        "reason": "write-authorization-resolved",
+                        "authorization": "declined",
+                        "resolved_by": action,
+                        "resolved_at": utc_now_iso(),
+                    },
+                    lease=lease,
+                )
+                return {
+                    "continue": False,
+                    "result": self._result_from_snapshot(
+                        self.store.snapshot_run(run_id)
+                    ),
+                }
+            authorization_granted = True
+            action = "continue_from_shadow"
+
         checkpoint = self.store.latest_checkpoint(run_id)
         execution = self.workspace_manager.from_checkpoint(checkpoint) if checkpoint else None
         workspace_config = (run.get("config_snapshot") or {}).get("workspace") or {}
@@ -1251,6 +1465,12 @@ class DurableWorkflowEngine:
 
         snapshot = self.store.snapshot_run(run_id, include_events=False)
         unknown_steps = [step for step in snapshot["steps"] if step["status"] == "unknown"]
+        legacy_architect_step = (
+            self.store.get_step(run_id, "architect.plan")
+            if authorization_granted
+            else None
+        )
+        legacy_architect_step_id = str((legacy_architect_step or {}).get("id") or "")
 
         if action in {
             "resume_from_checkpoint",
@@ -1262,7 +1482,13 @@ class DurableWorkflowEngine:
             self.workspace_manager.restore_checkpoint(execution, lease=lease)
             for step in unknown_steps:
                 self.store.reset_step_for_retry(
-                    str(step["id"]), reason=f"operator:{action}", lease=lease
+                    str(step["id"]),
+                    reason=f"operator:{action}",
+                    lease=lease,
+                    retry_successful_participants=(
+                        authorization_granted
+                        and str(step["id"]) == legacy_architect_step_id
+                    ),
                 )
         elif action == "apply_shadow_changes":
             if execution is None or execution.mode != "shadow":
@@ -1353,7 +1579,12 @@ class DurableWorkflowEngine:
                     "final_report": {
                         "status": "implemented",
                         "summary": "The operator accepted the existing workspace changes after reconciliation.",
+                        "changes_added": [],
+                        "changes_modified": [],
+                        "changes_removed": [],
+                        "files_added": [],
                         "files_modified": [],
+                        "files_deleted": [],
                         "commands_run": [],
                         "tests_run": [],
                         "verification_needed": ["Review the reconciled diff before approval."],
@@ -1380,16 +1611,69 @@ class DurableWorkflowEngine:
                     lease=lease,
                 )
 
+        if authorization_granted:
+            architect_step = self.store.get_step(run_id, "architect.plan")
+            if architect_step and str(architect_step.get("status") or "") in {
+                "unknown",
+                "interrupted",
+                "failed",
+            }:
+                self.store.reset_step_for_retry(
+                    str(architect_step["id"]),
+                    reason="operator:authorize_changes:legacy-write-policy",
+                    lease=lease,
+                    retry_successful_participants=True,
+                )
+
+        resolved_reconciliation = {
+            "resolved_by": "authorize_changes" if authorization_granted else action,
+            "resolved_at": utc_now_iso(),
+        }
+        if authorization_granted:
+            resolved_reconciliation.update(
+                {
+                    "reason": "write-authorization-resolved",
+                    "authorization": "granted",
+                }
+            )
         self.store.transition_run(
             run_id,
             "recovering",
             event_type="workflow.reconciliation_resolved",
             payload={"action": action},
-            reconciliation={"resolved_by": action, "resolved_at": utc_now_iso()},
+            reconciliation=resolved_reconciliation,
             lease=lease,
         )
-        self.store.transition_run(run_id, "running", lease=lease)
+        self.store.transition_run(
+            run_id,
+            "running",
+            reconciliation=resolved_reconciliation,
+            lease=lease,
+        )
         return {"continue": True, "execution": execution}
+
+    def _legacy_write_policy_failure(
+        self, run_id: str, run: dict[str, Any]
+    ) -> bool:
+        if str(run.get("error_code") or "") not in {
+            "workflow_phase_failed",
+            "phase_report_blocked",
+        }:
+            return False
+        step = self.store.get_step(run_id, "architect.plan")
+        if not step:
+            return False
+        output = self.store.load_artifact(step.get("output_artifact_id")) or {}
+        text = json.dumps(output, ensure_ascii=False).lower()
+        return any(
+            marker in text
+            for marker in (
+                "regla de no modificar archivos",
+                "bloqueada por la regla de no modificar",
+                "read-only planning boundary",
+                "rule not to modify files",
+            )
+        )
 
     def _restore_or_prepare_workspace(
         self,
@@ -1430,7 +1714,8 @@ class DurableWorkflowEngine:
         report_kind: str,
         lease: LeaseToken,
         config_snapshot: dict[str, Any],
-        post_success: Callable[[str], dict[str, Any]] | None = None,
+        post_success: Callable[[str, list[dict[str, str]]], dict[str, Any]]
+        | None = None,
     ) -> dict[str, Any]:
         if self.store.is_cancel_requested(run_id):
             raise WorkflowCancelled(f"Workflow {run_id} was cancelled before {step_key}.")
@@ -1719,6 +2004,7 @@ class DurableWorkflowEngine:
             output = {
                 "ok": False,
                 "status": "blocked",
+                "error_code": "phase_min_successes_not_met",
                 "reason": (
                     f"Phase {phase!r} produced {len(successes)} successful participant(s); "
                     f"{required} required."
@@ -1776,7 +2062,7 @@ class DurableWorkflowEngine:
             )
             return output
         if post_success:
-            checkpoint = post_success(step_id)
+            checkpoint = post_success(step_id, _reported_file_changes(output))
             output = {**output, "checkpoint": checkpoint}
         self.store.assert_lease(lease)
         artifact = self.store.store_artifact(
@@ -1835,6 +2121,36 @@ class DurableWorkflowEngine:
             final_artifact_id=artifact,
             error_code=error_code,
             error_reason=summary,
+            lease=lease,
+        )
+        result = self._result_from_snapshot(self.store.snapshot_run(run_id))
+        result["evidence"] = create_workflow_evidence(self.store, run_id)
+        self._append_telemetry(result)
+        return result
+
+    def _pause_for_write_authorization(
+        self,
+        *,
+        run_id: str,
+        request: str,
+        execution: WorkspaceExecution,
+        lease: LeaseToken,
+    ) -> dict[str, Any]:
+        details = self.workspace_manager.reconciliation_status(execution)
+        self.store.transition_run(
+            run_id,
+            "awaiting_reconciliation",
+            event_type="workflow.write_authorization_requested",
+            error_code="write_authorization_required",
+            error_reason="Baldr necesita autorización para modificar archivos.",
+            reconciliation={
+                **details,
+                "reason": "write-authorization-required",
+                "message": "Baldr necesita autorización para modificar archivos.",
+                "write_request": request,
+                "allowed_actions": ["authorize_changes", "decline_changes"],
+                "authorization": "pending",
+            },
             lease=lease,
         )
         result = self._result_from_snapshot(self.store.snapshot_run(run_id))

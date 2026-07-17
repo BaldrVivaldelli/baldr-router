@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tomllib
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -82,17 +83,18 @@ class WorkspaceConfig:
     allow_home_root: bool = False
     allow_runtime_roots: bool = True
     deny_sensitive_paths: bool = True
-    # auto: an exact Git root uses an isolated worktree; a non-Git directory
-    # uses a durable Baldr-managed shadow workspace. Other values are advanced
-    # compatibility modes: worktree | in-place.
-    write_isolation: str = "auto"
-    publish_worktree_changes: bool = True
+    # The default follows the permission-gated direct model used by coding
+    # agents: architecture is read-only, then an explicit workflow
+    # authorization unlocks writes in the selected workspace. ``auto`` and
+    # ``worktree`` remain available for legacy isolated runs.
+    write_isolation: str = "in-place"
+    publish_worktree_changes: bool = False
     cleanup_successful_worktrees: bool = True
     retain_failed_worktrees: bool = True
-    # Compatibility policy for explicit worktree/in-place flows. Automatic
-    # protection snapshots a dirty Git root into a shadow instead of writing
-    # directly or requiring the user to stash existing work.
-    dirty_workspace_policy: str = "reject"
+    # Direct authorized work preserves the current Git state instead of
+    # requiring stash/commit. Same-path safety remains the provider/workflow
+    # responsibility, as in the native Codex/Kiro workspace model.
+    dirty_workspace_policy: str = "in-place"
 
     # Durable shadow workspace policy. Manifests and content-addressed blobs are
     # the portable source of truth; the private Git repository is auxiliary.
@@ -443,6 +445,12 @@ def _toml_bool(value: bool) -> str:
     return str(bool(value)).lower()
 
 
+def _toml_key(value: str) -> str:
+    """Render one TOML key segment without turning literal dots into nesting."""
+
+    return value if re.fullmatch(r"[A-Za-z0-9_-]+", value) else _toml_str(value)
+
+
 def _dump_dataclass_table(title: str, values: Any) -> list[str]:
     lines = [f"[{title}]"]
     for key, value in asdict(values).items():
@@ -479,15 +487,18 @@ def dump_config(cfg: AppConfig) -> str:
 
     for profile_name in sorted(cfg.execution_profiles):
         lines += _dump_dataclass_table(
-            f"execution_profiles.{profile_name}", cfg.execution_profiles[profile_name]
+            f"execution_profiles.{_toml_key(profile_name)}",
+            cfg.execution_profiles[profile_name],
         )
 
     for role_name in sorted(cfg.roles):
-        lines += _dump_dataclass_table(f"roles.{role_name}", cfg.roles[role_name])
+        lines += _dump_dataclass_table(
+            f"roles.{_toml_key(role_name)}", cfg.roles[role_name]
+        )
 
     for workflow_name in sorted(cfg.workflows):
         lines += _dump_dataclass_table(
-            f"workflows.{workflow_name}", cfg.workflows[workflow_name]
+            f"workflows.{_toml_key(workflow_name)}", cfg.workflows[workflow_name]
         )
 
     return "\n".join(lines)

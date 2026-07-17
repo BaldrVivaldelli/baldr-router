@@ -30,6 +30,20 @@ Corregí el refresh de tokens y agregá tests
 
 Baldr crea un work item durable y lo inicia con la configuración del workspace. El item sigue disponible después de cerrar VS Code, reiniciar el MCP o actualizar la extensión.
 
+Cuando el item seleccionado ya terminó, el siguiente texto enviado continúa
+esa misma conversación: Baldr agrega un turno durable, conserva el
+`work_item_id` y ejecuta una nueva revisión del pedido. Sólo arrastra un resumen
+estructurado y acotado del resultado anterior; no copia transcripts, razonamiento
+ni salida cruda. `/resume` queda reservado para recuperar una ejecución
+interrumpida.
+
+En un workspace con varias carpetas, la consola sigue el editor activo o la
+carpeta elegida explícitamente desde `+ -> Carpeta de trabajo`. Si no puede
+resolver una carpeta sin ambigüedad, pide elegirla y no usa la primera por
+defecto. Cada pedido puede sumar, con límites estrictos, el archivo activo, la
+selección, la versión y estado dirty del documento, un snapshot no guardado y
+los diagnósticos visibles.
+
 El chat `@baldr` sigue disponible como shortcut opcional, pero Baldr Console es la experiencia principal.
 
 ## Menú `+`
@@ -40,6 +54,7 @@ El botón `+` usa Quick Picks pequeños, no un formulario:
 Nueva tarea para después
 Archivo abierto
 Texto seleccionado
+Carpeta de trabajo
 Protección de cambios
 Nivel de detalle
 Equipo de Baldr
@@ -77,7 +92,7 @@ Son aliases de `setup`, `status` y `run`; no amplían el contrato público.
 Los chips debajo del composer reflejan la configuración persistida del workspace:
 
 ```text
-Protección automática
+Pedir autorización
 Estándar
 Equipo estándar
 Ayuda automática
@@ -88,17 +103,17 @@ Cada chip abre un Quick Pick y guarda la selección a través del core.
 ## Protección de cambios
 
 ```text
-Protección automática
-  recomendada y predeterminada; trabaja sobre una copia protegida y recuperable.
+Pedir autorización
+  recomendada y predeterminada; planifica en solo lectura y pregunta antes de modificar archivos.
 
 Trabajar directamente
-  modifica la carpeta elegida y usa su repositorio Git para revisar los cambios.
+  modifica la carpeta elegida sin una pausa de autorización por tarea.
 
 Sin protección
   modifica la carpeta directamente, sin exigir Git ni ofrecer recuperación automática.
 ```
 
-Con **Protección automática**, una raíz Git exacta y limpia usa un worktree; una raíz sucia o sin primer commit, una carpeta sin Git y una subcarpeta seleccionada dentro de otro repositorio usan un workspace sombra durable. Los agentes trabajan únicamente en esa copia. La carpeta original no cambia mientras Baldr planifica, implementa y revisa; después de una revisión aprobada, Baldr vuelve a comprobar los hashes y publica solamente el diff calculado. Si el equipo elegido no ofrece un límite de workspace verificable, Baldr lo informa sin ejecutar ese provider.
+Con **Pedir autorización**, arquitectura trabaja en solo lectura. Si el plan necesita crear o modificar archivos, la sesión muestra **Autorizar cambios y reintentar** y **No autorizar**. La primera opción registra el consentimiento y permite que implementación escriba directamente en la carpeta seleccionada; la segunda cierra el run sin escribir. No existe una publicación posterior desde una copia completa, por lo que otros cambios del workspace pueden convivir como en Codex/Kiro.
 
 **Sin protección** requiere confirmación modal explícita. Después se recuerda para ese workspace como `intentional_non_git`; la excepción se aplica sólo a esa carpeta y no desactiva la política global. El texto de la tarea se conserva si la persona cancela la confirmación.
 
@@ -136,6 +151,12 @@ Revisión
 Resultado
   cambios, comprobaciones, pendientes y próximos pasos
 ```
+
+Al finalizar, **Resultado** pasa a ser la tarjeta principal y muestra de forma
+visible el resumen, trabajo realizado, archivos, pruebas, verificación,
+bloqueos, riesgos y próximos pasos que existan. Sólo los datos técnicos quedan
+en un disclosure cerrado. La sección **Conversación** conserva el pedido
+original y cada continuación en orden.
 
 Las tres etapas son acordeones canónicos. Las rondas de corrección permanecen dentro de Ejecución y Revisión en lugar de duplicar tarjetas. La etapa activa se abre automáticamente; la selección de paneles, el foco y el scroll sobreviven a las actualizaciones. Las duraciones reflejan timestamps observados y nunca se muestran porcentajes o estimaciones inventadas.
 
@@ -192,7 +213,14 @@ Aplicar los cambios protegidos      apply_shadow_changes
 Descartar la copia protegida        discard_shadow
 ```
 
-No siempre aparecen las cuatro. También se ofrecen cuando una fase falla o review pide cambios, siempre sobre el último checkpoint verificado. **Aplicar** publica ese checkpoint por decisión explícita y cierra la tarea como aprobada sólo si review ya había aprobado; en otro caso queda como `needs_changes`. Si la publicación pudo aplicar una parte del plan, **Descartar** se oculta para no abandonar cambios en el original; se puede inspeccionar y reintentar **Aplicar**, que continúa desde el journal idempotente. Si otra persona o proceso cambió el original, Baldr muestra el conflicto y conserva la copia. Las acciones legadas de worktree (`resume_from_checkpoint`, `accept_existing_changes` y `discard_worktree`) siguen disponibles para tareas existentes cuando corresponda. **Marcar como fallida** conserva el journal y la evidencia.
+No siempre aparecen las cuatro. También se ofrecen cuando una fase falla o review pide cambios, siempre sobre el último checkpoint verificado. **Aplicar** publica ese checkpoint por decisión explícita y cierra la tarea como aprobada sólo si review ya había aprobado; en otro caso queda como `needs_changes`. Si la publicación pudo aplicar una parte del plan, **Descartar** se oculta para no abandonar cambios en el original; se puede inspeccionar y reintentar **Aplicar**, que continúa desde el journal idempotente. Los cambios del original en rutas ajenas al delta de Baldr se conservan; si otra persona o proceso cambió una de las mismas rutas, Baldr muestra el conflicto y conserva la copia. Las acciones legadas de worktree (`resume_from_checkpoint`, `accept_existing_changes` y `discard_worktree`) siguen disponibles para tareas existentes cuando corresponda. **Marcar como fallida** conserva el journal y la evidencia.
+
+Cuando el plan requiere crear, modificar o borrar archivos, esa necesidad no se
+presenta como un fallo. La sesión se pausa y muestra dos decisiones directas:
+**Autorizar cambios y reintentar** reanuda la ejecución desde el plan guardado y **No autorizar**
+cancela la sesión sin publicar cambios. La decisión queda persistida y también se
+ofrece a sesiones anteriores que confundieron el límite de planificación con un
+bloqueo.
 
 ## Persistencia
 
@@ -202,16 +230,18 @@ El core agrega estas tablas mediante migraciones SQLite:
 workspace_preferences
 work_items
 work_item_runs
+work_item_turns
 work_item_events
 phase_deliverables
 ```
 
-El texto completo de la task y el contexto privado se guardan como artifacts privados; la fila materializada conserva metadata, estado, referencias y configuración. La extensión nunca accede directamente a la base.
+El texto completo de cada pedido y su contexto se guardan como artifacts privados; `work_item_turns` enlaza los turnos inmutables con la revisión y el run correspondientes. La fila materializada conserva metadata, estado, referencias y configuración. La extensión nunca accede directamente a la base.
 
 ## Seguridad
 
 - VS Code Workspace Trust sigue siendo obligatorio.
-- Protección automática admite carpetas sin Git sin autorizar escrituras directas sobre ellas.
+- La planificación no convierte la falta de permiso de escritura en un error: pide autorización antes de iniciar la ejecución.
+- Pedir autorización admite carpetas confiables sin Git y solicita permiso antes de la primera escritura directa.
 - Sin protección requiere consentimiento explícito.
 - El workspace sombra vive en el estado durable local de Baldr, no en `/tmp`, y se elimina sólo después de publicar y verificar correctamente o de un descarte seguro.
 - `.git`, secretos configurados y artefactos generados se excluyen de la copia; los límites de archivos, bytes, profundidad y enlaces fallan de manera visible.

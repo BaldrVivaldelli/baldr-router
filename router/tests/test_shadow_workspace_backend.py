@@ -600,7 +600,7 @@ def test_checkpoint_fails_closed_when_controlled_git_cannot_be_created(
     assert journal["last_event"]["event"] == "checkpoint_failed"
 
 
-def test_preflight_conflict_performs_no_original_writes(tmp_path: Path) -> None:
+def test_publication_preserves_unrelated_original_edits(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source.mkdir()
     (source / "agent.txt").write_text("base")
@@ -610,21 +610,32 @@ def test_preflight_conflict_performs_no_original_writes(tmp_path: Path) -> None:
     (execution.execution_root / "agent.txt").write_text("agent")
     manager.checkpoint(execution)
     (source / "user.txt").write_text("user edit")
-    before = _managed_snapshot(source)
+    published = manager.publish(execution)
 
-    with pytest.raises(ShadowConflictError) as raised:
-        manager.publish(execution)
-    assert raised.value.code == "shadow_publication_conflict"
-    assert raised.value.details["conflicts"] == [
-        {"path": "user.txt", "reason": "original-changed"}
-    ]
-    assert _managed_snapshot(source) == before
-    assert (source / "agent.txt").read_text() == "base"
-    conflict_state = json.loads((execution.control_root / "state.json").read_text())
-    assert conflict_state["status"] == "conflicted"
-    assert conflict_state["last_conflict"]["conflicts"] == [
-        {"path": "user.txt", "reason": "original-changed"}
-    ]
+    assert published["status"] == "published"
+    assert (source / "agent.txt").read_text() == "agent"
+    assert (source / "user.txt").read_text() == "user edit"
+
+
+def test_publication_accepts_an_already_applied_delta_with_unrelated_edits(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "agent.txt").write_text("base")
+    (source / "user.txt").write_text("base")
+    manager = _manager(tmp_path)
+    execution = manager.prepare(run_id="already-applied-merge", workspace_root=source)
+    (execution.execution_root / "agent.txt").write_text("agent")
+    manager.checkpoint(execution)
+    (source / "agent.txt").write_text("agent")
+    (source / "user.txt").write_text("user edit")
+
+    published = manager.publish(execution)
+
+    assert published["status"] == "already_published"
+    assert (source / "agent.txt").read_text() == "agent"
+    assert (source / "user.txt").read_text() == "user edit"
 
 
 def test_preflight_refuses_directory_deletion_with_excluded_content_before_writes(

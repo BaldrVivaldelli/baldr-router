@@ -138,11 +138,17 @@ export class BaldrRuntime {
     return secret ? [secret] : [];
   }
 
-  private async customEnvironment(): Promise<Record<string, string>> {
+  private async customEnvironment(workspaceRoot?: string): Promise<Record<string, string>> {
     const configuration = vscode.workspace.getConfiguration('baldr');
     let mode = configuration.get<string>('runtime.mode', 'auto');
     let distro = configuration.get<string>('runtime.wslDistro', '').trim();
-    const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    const activeFolder = vscode.window.activeTextEditor
+      ? vscode.workspace.getWorkspaceFolder(vscode.window.activeTextEditor.document.uri)
+      : undefined;
+    const folders = vscode.workspace.workspaceFolders ?? [];
+    const workspacePath = workspaceRoot
+      ?? activeFolder?.uri.fsPath
+      ?? (folders.length === 1 ? folders[0].uri.fsPath : undefined);
     const detectedDistro = process.platform === 'win32' ? wslDistroFromPath(workspacePath) : '';
     if (mode === 'auto' && detectedDistro) mode = 'wsl';
     if (!distro && detectedDistro) distro = detectedDistro;
@@ -164,8 +170,8 @@ export class BaldrRuntime {
     return env;
   }
 
-  private async processEnvironment(): Promise<NodeJS.ProcessEnv> {
-    return { ...process.env, ...(await this.customEnvironment()) };
+  private async processEnvironment(workspaceRoot?: string): Promise<NodeJS.ProcessEnv> {
+    return { ...process.env, ...(await this.customEnvironment(workspaceRoot)) };
   }
 
   async mcpDefinition(): Promise<vscode.McpStdioServerDefinition> {
@@ -207,8 +213,15 @@ export class BaldrRuntime {
     token?: vscode.CancellationToken,
     allowFailure = false,
     quiet = false,
+    workspaceRoot?: string,
   ): Promise<JsonRecord> {
-    return this.invokeBootstrapJson(['exec', '--', ...routerArgs], token, allowFailure, quiet);
+    return this.invokeBootstrapJson(
+      ['exec', '--', ...routerArgs],
+      token,
+      allowFailure,
+      quiet,
+      workspaceRoot,
+    );
   }
 
   async runFacade(
@@ -301,6 +314,7 @@ export class BaldrRuntime {
       token,
       allowFailure,
       intent === 'status' && options.workbenchOnly === true,
+      options.workspaceRoot,
     );
   }
 
@@ -379,6 +393,23 @@ export class BaldrRuntime {
       workspaceRoot,
       workItemId,
       workItemAction: 'start-item',
+    }, token, true);
+  }
+
+  async continueWorkItem(
+    workspaceRoot: string,
+    workItemId: string,
+    task: string,
+    options: { attachments?: JsonRecord[]; extraContext?: string } = {},
+    token?: vscode.CancellationToken,
+  ): Promise<JsonRecord> {
+    return this.runFacade('run', {
+      workspaceRoot,
+      workItemId,
+      task,
+      workItemAction: 'continue-item',
+      attachments: options.attachments,
+      extraContext: options.extraContext,
     }, token, true);
   }
 
@@ -660,9 +691,10 @@ export class BaldrRuntime {
     token?: vscode.CancellationToken,
     allowFailure = false,
     quiet = false,
+    workspaceRoot?: string,
   ): Promise<JsonRecord> {
     await fs.promises.mkdir(this.context.globalStorageUri.fsPath, { recursive: true });
-    const result = await this.spawnCapture(args, token, quiet);
+    const result = await this.spawnCapture(args, token, quiet, workspaceRoot);
     const stdout = result.stdout.trim();
     if (!stdout) throw new Error(result.stderr.trim() || 'Baldr returned no JSON output.');
     let parsed: JsonRecord;
@@ -691,8 +723,9 @@ export class BaldrRuntime {
     bootstrapArgs: string[],
     token?: vscode.CancellationToken,
     quiet = false,
+    workspaceRoot?: string,
   ): Promise<{ stdout: string; stderr: string; code: number }> {
-    const env = await this.processEnvironment();
+    const env = await this.processEnvironment(workspaceRoot);
     const secrets = await this.knownSecrets();
     if (!quiet) this.output.appendLine(describeRuntimeInvocation(bootstrapArgs));
 

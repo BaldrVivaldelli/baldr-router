@@ -57,7 +57,7 @@
           },
           {
             "name": "run",
-            "description": "Create and start a durable Baldr item."
+            "description": "Create or continue a durable Baldr conversation."
           }
         ],
         "disambiguation": [

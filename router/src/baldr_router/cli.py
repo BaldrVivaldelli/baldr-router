@@ -623,6 +623,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--work-item-action",
         choices=[
             "execute", "create", "draft", "create-item", "update", "update-item",
+            "continue", "continue-item",
             "start", "start-item", "cancel", "cancel-item", "reconcile",
             "reconcile-item", "archive", "archive-item", "restore", "restore-item",
             "delete", "delete-item",
@@ -675,6 +676,8 @@ def build_parser() -> argparse.ArgumentParser:
     f.add_argument(
         "--reconciliation-action",
         choices=[
+            "authorize_changes",
+            "decline_changes",
             "resume_from_checkpoint",
             "accept_existing_changes",
             "discard_worktree",
@@ -891,6 +894,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--reconciliation-action",
         choices=[
+            "authorize_changes",
+            "decline_changes",
             "resume_from_checkpoint",
             "accept_existing_changes",
             "discard_worktree",

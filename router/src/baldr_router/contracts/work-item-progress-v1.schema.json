@@ -316,16 +316,62 @@
       },
       "additionalProperties": false
     },
+    "fileChange": {
+      "type": "object",
+      "required": [
+        "path",
+        "kind",
+        "additions",
+        "deletions",
+        "evidence"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "maxLength": 320
+        },
+        "kind": {
+          "enum": [
+            "added",
+            "modified",
+            "deleted"
+          ]
+        },
+        "additions": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "deletions": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidence"
+        }
+      },
+      "additionalProperties": false
+    },
     "report": {
       "type": "object",
       "required": [
         "evidence",
         "status",
         "summary",
+        "changes_added",
+        "changes_modified",
+        "changes_removed",
         "decisions",
         "acceptance_criteria",
         "assumptions",
+        "files_added",
         "files_modified",
+        "files_deleted",
         "tests_run",
         "verification_needed",
         "risks",
@@ -372,6 +418,15 @@
         "verification_evidence": {
           "$ref": "#/$defs/stringList"
         },
+        "changes_added": {
+          "$ref": "#/$defs/stringList"
+        },
+        "changes_modified": {
+          "$ref": "#/$defs/stringList"
+        },
+        "changes_removed": {
+          "$ref": "#/$defs/stringList"
+        },
         "decisions": {
           "type": "array",
           "maxItems": 24,
@@ -385,8 +440,21 @@
         "assumptions": {
           "$ref": "#/$defs/stringList"
         },
+        "files_added": {
+          "$ref": "#/$defs/stringList"
+        },
         "files_modified": {
           "$ref": "#/$defs/stringList"
+        },
+        "files_deleted": {
+          "$ref": "#/$defs/stringList"
+        },
+        "file_changes": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/$defs/fileChange"
+          }
         },
         "tests_run": {
           "$ref": "#/$defs/stringList"

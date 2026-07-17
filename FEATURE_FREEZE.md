@@ -34,6 +34,7 @@ La lista exacta de tools, prompts, providers, roles y workflows está declarada 
 - state machine, request fingerprints, reconciliation, recovery y tests de concurrencia/crash/upgrade;
 - refactors internos sin cambio de comportamiento.
 - read models y proyecciones de presentación aditivas, acotadas y redactadas, sin cambiar la superficie de orquestación congelada.
+- turnos conversacionales durables y acciones internas de `run` para continuar un work item, sin agregar intenciones públicas.
 
 ## Cambios postergados
 

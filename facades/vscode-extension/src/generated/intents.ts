@@ -36,7 +36,7 @@ export const BALDR_INTENTS: readonly BaldrIntentDefinition[] = [
   {
     id: 'run',
     title: 'Run',
-    description: 'Create, resume, or idempotently reuse the configured durable orchestration workflow for a task in the active workspace.',
+    description: 'Create, continue, resume, or idempotently reuse the configured durable orchestration workflow for a task in the active workspace.',
     requiresWorkspace: true,
     requiresTask: true,
     mcpPrompt: 'run',

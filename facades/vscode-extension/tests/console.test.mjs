@@ -58,7 +58,7 @@ test('composer uses stable SVG icons, focus states, and a disabled empty submit'
 });
 
 test('primary and secondary UI use plain Spanish wording', () => {
-  for (const wording of ['Todavía no hay sesiones', 'Baldr lo organiza y te muestra el avance.', 'Protección de cambios', 'Nivel de detalle', 'Equipo de Baldr', 'Ayuda adicional', 'Protección automática', 'Trabajar directamente', 'Sin protección']) {
+  for (const wording of ['Todavía no hay sesiones', 'Baldr lo organiza y te muestra el avance.', 'Protección de cambios', 'Nivel de detalle', 'Equipo de Baldr', 'Ayuda adicional', 'Pedir autorización', 'Trabajar directamente', 'Sin protección']) {
     assert.ok(source.includes(wording), `missing plain-language wording: ${wording}`);
   }
   for (const stale of ['No items yet', 'Git worktree', 'Context7 Auto', 'Baldr execution preset', 'durable draft', 'Con Git y respaldo', 'Con Git, en esta carpeta']) {
@@ -66,15 +66,15 @@ test('primary and secondary UI use plain Spanish wording', () => {
   }
 });
 
-test('automatic protection is the visible default while legacy worktree keeps its alias', () => {
+test('permission-gated direct work is the visible default while legacy worktree stays isolated', () => {
   assert.match(source, /type SafetyMode = 'automatic' \| 'worktree' \| 'current' \| 'non-git'/);
   assert.match(source, /normalized === 'automatic' \|\| normalized === 'auto'/);
-  assert.match(source, /automatic:\s*'Protección automática'/);
-  assert.match(source, /worktree:\s*'Protección automática'/);
+  assert.match(source, /automatic:\s*'Pedir autorización'/);
+  assert.match(source, /worktree:\s*'Copia aislada'/);
   assert.match(source, /current:\s*'Trabajar directamente'/);
   assert.match(source, /'non-git':\s*'Sin protección'/);
   assert.match(source, /text\(preference\.safety_mode, 'automatic'\)/);
-  assert.match(source, /id: 'automatic', label: '\$\(shield\) Protección automática'/);
+  assert.match(source, /id: 'automatic', label: '\$\(shield\) Pedir autorización'/);
 });
 
 test('attachments render inside the composer and can be removed', () => {
@@ -100,8 +100,32 @@ test('work items narrate current activity, canonical stages, outcome, and attent
   assert.doesNotMatch(section(source, 'function stageHtml(', 'function stageStripHtml('), /participant|model|provider/);
 });
 
+test('final results render a Codex-style file change card with line totals', () => {
+  assert.match(source, /function fileChangesHtml\(changes\)/);
+  assert.match(source, /file-changes-title/);
+  assert.match(source, /file-change-additions/);
+  assert.match(source, /file-change-deletions/);
+  assert.match(source, /fileChangesHtml\(outcome\.fileChanges\)/);
+  assert.match(source, /archivos cambiados/);
+});
+
+test('file change rows open only real files contained by the active workspace', () => {
+  const messageHandler = section(source, '  private async handleMessage(', '  private async submit(');
+  const openHandler = section(source, '  private async openChangedFile(', '  private launchOperation(');
+  assert.match(source, /data-open-changed-file/);
+  assert.match(source, /type:'openChangedFile'/);
+  assert.match(messageHandler, /case 'openChangedFile'/);
+  assert.match(messageHandler, /this\.openChangedFile\(message\.path\)/);
+  assert.match(openHandler, /isPathInsideRoot\(workspaceRoot, target\)/);
+  assert.match(openHandler, /fs\.promises\.realpath/);
+  assert.match(openHandler, /isPathInsideRoot\(canonicalRoot, canonicalTarget\)/);
+  assert.match(openHandler, /vscode\.workspace\.openTextDocument/);
+  assert.match(openHandler, /vscode\.window\.showTextDocument/);
+  assert.match(openHandler, /probablemente fue eliminado/);
+});
+
 test('session detail leads with status and actions, then progressively reveals secondary content', () => {
-  for (const marker of ['task-summary', 'task-meta-time', 'formatSessionWhen', 'Pedido original', 'Ver resultado completo']) {
+  for (const marker of ['task-summary', 'task-meta-time', 'formatSessionWhen', 'Pedido original', 'Resultado final', 'Detalles técnicos del resultado']) {
     assert.ok(source.includes(marker), `missing P1 hierarchy marker: ${marker}`);
   }
   const render = section(source, 'function renderContent()', 'function shortModelLabel(');
@@ -111,6 +135,19 @@ test('session detail leads with status and actions, then progressively reveals s
   const progress = render.indexOf('sessionProgressHtml');
   const technical = render.indexOf('globalTechnicalHtml');
   assert.ok(now >= 0 && actions > now && request > actions && progress > request && technical > progress);
+  assert.match(render, /presentation\?\.overallState==='complete'/);
+  assert.match(render, /completed\?outcomeHtml\(presentation\.outcome,true\)/);
+});
+
+test('completed sessions continue as durable conversation turns with automatic editor context', () => {
+  assert.match(source, /allowedActions\(selected\)\.includes\('continue'\)/);
+  assert.match(source, /runtime\.continueWorkItem/);
+  assert.match(source, /captureWorkspaceContext\(root\)/);
+  assert.match(source, /Continuar esta conversación…/);
+  assert.match(source, /Conversación \('/);
+  assert.match(source, /data-plus-action="workspace"/);
+  assert.match(source, /workspaceChoiceRequired/);
+  assert.doesNotMatch(source, /workspaceFolders\?\.\[0\]\?\.uri\.fsPath/);
 });
 
 test('P2 preserves workspace, supports keyboard history, and constrains comfortable reading width', () => {
@@ -293,9 +330,9 @@ test('narrative cards remain single-column at a 240px sidebar width', () => {
 });
 
 
-test('console turns legacy Git policy blocks into automatic, unprotected, or open-folder choices', () => {
+test('console turns legacy Git policy blocks into authorization, unprotected, or open-folder choices', () => {
   assert.match(source, /workspace_git_required/);
-  assert.match(source, /Protección automática/);
+  assert.match(source, /Pedir autorización/);
   assert.match(source, /Sin protección/);
   assert.match(source, /Abrir otra carpeta/);
 });
@@ -306,6 +343,19 @@ test('recovery only shows actions authorized by the durable workspace state', ()
   assert.match(recovery, /filter\(\(option\) => actions\.includes\(option\.id\)\)/);
   assert.match(recovery, /Continuar con los archivos actuales/);
   assert.match(recovery, /no hay un respaldo para volver atrás/);
+});
+
+test('write permission choices resume or close the durable session directly', () => {
+  const handler = section(source, '  private async itemAction(', '  private async inspectDeliverable(');
+  const operation = section(source, '  private launchOperation(', '  private async handlePolicyBlock(');
+  assert.match(handler, /RECONCILIATION_ACTIONS\.has\(action\)/);
+  assert.match(handler, /Autorizando los cambios y retomando la sesión/);
+  assert.match(handler, /Cerrando la sesión sin modificar archivos/);
+  assert.match(source, /Autorizar cambios y reintentar<\/button>/);
+  assert.match(source, /No autorizar<\/button>/);
+  assert.match(operation, /resultStatus === 'awaiting_reconciliation'/);
+  assert.match(operation, /allowAttentionPause/);
+  assert.match(handler, /undefined,\s*false/);
 });
 
 test('Codex models are loaded lazily through the provider catalog and cached only on success', () => {

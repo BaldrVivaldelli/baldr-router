@@ -215,9 +215,24 @@ implementation report
 review report
 ```
 
-## Protección automática: worktree o workspace sombra
+## Escritura autorizada y aislamiento compatible
 
-`Protección automática` es el modo recomendado y predeterminado. Baldr conserva exactamente el alcance que eligió la persona:
+`Pedir autorización` (`automatic`) es el modo recomendado y predeterminado. Baldr conserva exactamente el alcance que eligió la persona:
+
+```text
+arquitectura en solo lectura sobre la carpeta seleccionada
+  -> si el plan necesita escribir, persiste una decisión del operador
+  -> autorizar: implementación directa con workspace-write
+  -> no autorizar: cierre durable sin modificar archivos
+```
+
+No hay una publicación posterior desde una copia completa. Una vez concedido el permiso, cada cambio aparece directamente en el workspace activo, como en Codex/Kiro. Los cambios independientes de la persona pueden convivir con la ejecución; Git, los checkpoints y el journal registran los efectos observados. Si un intento de escritura se interrumpe antes de confirmar su resultado, Baldr lo deja `unknown` y exige reconciliación en vez de repetirlo.
+
+`current` ofrece el mismo camino directo con consentimiento persistente, sin una pausa por tarea. `non-git` permite escritura directa en una carpeta confiable sin exigir Git y conserva su confirmación explícita. Arquitectura continúa con sandbox `read-only`; implementación y fixes reciben `workspace-write` únicamente cuando el modo ya lo autoriza.
+
+### Worktrees y workspaces sombra compatibles
+
+Las sesiones aisladas creadas con versiones anteriores conservan su snapshot y se reanudan con la semántica original:
 
 ```text
 raíz exacta de un repositorio Git limpio y con commit
@@ -227,7 +242,7 @@ Git sucio/sin commit, carpeta sin Git o subcarpeta dentro de otro repo
   -> workspace sombra durable administrado por Baldr
 ```
 
-Baldr no amplía una subcarpeta seleccionada hasta la raíz Git de un directorio padre. Una raíz Git debe tener un commit y estar limpia para obtener el aislamiento por worktree; si está sucia o todavía no tiene commit, automatic captura ese estado como baseline de un shadow en vez de bloquear, hacer stash o escribir directamente.
+Baldr no amplía una subcarpeta seleccionada hasta la raíz Git de un directorio padre. En estos runs aislados, una raíz Git debe tener un commit y estar limpia para obtener el aislamiento por worktree; si está sucia o todavía no tiene commit, el snapshot legado `auto` captura ese estado como baseline de un shadow en vez de bloquear, hacer stash o escribir directamente.
 
 ### Raíz Git exacta
 
@@ -253,7 +268,7 @@ La publicación es idempotente: si Baldr se cae después de aplicar el patch per
 
 ### Carpeta sin Git o alcance parcial
 
-Para una carpeta sin Git —o una subcarpeta elegida dentro de un repositorio padre— el modo automático crea:
+Para una carpeta sin Git —o una subcarpeta elegida dentro de un repositorio padre— un snapshot aislado legado crea:
 
 ```text
 <estado-local-de-baldr>/shadow-workspaces/<run-id>/
@@ -270,7 +285,7 @@ Esta ubicación pertenece al estado durable de Baldr; no usa `/tmp` y puede abri
 
 Baldr toma un manifest inicial, materializa la copia, vuelve a escanear el origen y comprueba que ambos hashes coincidan antes de ejecutar un provider. Arquitectura, implementación, revisión y correcciones reciben `tree/` como workspace. Un adapter `advisory`, un Codex SDK que no demuestre cwd o un sandbox irrestricto se bloquean antes de invocarse; el usuario puede elegir explícitamente un modo directo si acepta esa garantía reducida. La carpeta original queda intacta hasta que la revisión aprueba el resultado o la persona decide aplicar el checkpoint verificado.
 
-Después de cada fase con escritura se crea otro manifest. El delta incluye archivos nuevos, modificados y eliminados, cambios de tipo y modos. Antes de tocar el original, Baldr vuelve a calcular sus hashes. Cada ruta que Baldr modificó debe seguir igual al manifest inicial o coincidir ya con el resultado esperado; una ruta ajena al delta tampoco puede haber cambiado. Si alguna condición falla, la publicación se detiene con un conflicto sin empezar a aplicar el plan.
+Después de cada fase con escritura se crea otro manifest. El delta incluye archivos nuevos, modificados y eliminados, cambios de tipo y modos. Antes de tocar el original, Baldr vuelve a calcular sus hashes. Cada ruta que Baldr modificó debe seguir igual al manifest inicial o coincidir ya con el resultado esperado. Las rutas ajenas al delta se conservan con su estado actual, por lo que el trabajo independiente puede continuar mientras Baldr opera en la copia protegida. Si una misma ruta cambió de ambos lados, la publicación se detiene con un conflicto sin empezar a aplicar el plan.
 
 La publicación guarda primero su plan y su cursor en SQLite y en el journal del workspace sombra. Cada operación de borrar, crear, reemplazar o cambiar modo se registra antes y después del efecto junto con un guard del contenido/identidad del target y sus padres. El guard se vuelve a validar después de registrar el intent y justo antes del efecto, cerrando cambios posteriores al preflight. Por eso un reintento puede omitir rutas ya aplicadas y continuar las restantes sin duplicar cambios. Si un crash ocurre durante una operación, el estado se clasifica como publicación parcial: se conserva la copia y no se ofrece un descarte que pueda dejar efectos sin reconciliar.
 
@@ -291,7 +306,7 @@ El snapshot nunca sigue enlaces simbólicos. Sólo admite enlaces relativos cuyo
 
 Las reglas duras excluyen metadatos `.git`, `.hg` y `.svn` en cualquier profundidad. Así, un repositorio anidado se copia como contenido normal, pero nunca se expone su metadata de control. Por defecto también se excluyen directorios generados como `node_modules`, `.venv`, caches, `dist`, `build` y `target`, además de patrones de binarios intermedios. Existe un piso no reemplazable para `.ssh`, `.aws`, `.gnupg`, `.npmrc`, `.netrc`, claves privadas, `.env` y credenciales; la configuración sólo agrega patrones, salvo una inclusión explícita. Si un agente intenta crear una ruta sensible equivalente, el checkpoint falla de forma visible. Las plantillas como `.env.example` están permitidas. Contenido excluido nunca se infiere como borrado y bloquea la eliminación de un padre si pudiera perderse.
 
-La política queda congelada en el run y expone estos campos de `[workspace]`:
+La política aislada queda congelada en esos runs y conserva estos campos de `[workspace]`:
 
 ```toml
 write_isolation = "auto"
@@ -323,7 +338,7 @@ shadow_conflict_retention_days = 90
 
 Maintenance valida ownership y estado terminal antes de eliminar una copia; nunca borra un shadow todavía recuperable por inferencia de edad solamente. `cleanup_successful_shadow_workspaces=false` conserva también los aprobados, independientemente de la retención de éxito.
 
-Los work items nuevos usan `automatic`. Los valores guardados existentes conservan su semántica: `worktree` sigue siendo el modo Git aislado legado, `current` trabaja directamente sobre un repositorio Git y `non-git` es la opción explícita **Sin protección**, con confirmación y sin rollback automático. El alias de core `auto` equivale a `automatic`; `in-place` permanece como configuración avanzada de bajo nivel.
+Los work items nuevos usan `automatic`, que se resuelve a escritura `in-place` sólo después de la autorización por tarea. Los valores guardados existentes conservan su semántica: `worktree` sigue siendo el modo Git aislado legado; un snapshot histórico con `write_isolation = "auto"` puede resolver a worktree o shadow; `current` trabaja directamente sobre un repositorio Git y `non-git` es la opción explícita **Sin protección**, con confirmación y sin rollback automático.
 
 ## Idempotencia
 
@@ -350,6 +365,7 @@ Baldr persiste timestamp/reason, termina el process tree del run y marca attempt
 Un write attempt con efectos inciertos queda `unknown` y el workflow pasa a `awaiting_reconciliation`. El operador puede continuar usando la misma intención `run` con una acción que el core haya habilitado para ese estado:
 
 ```text
+authorization: authorize_changes | decline_changes
 shadow:   inspect_shadow | continue_from_shadow | apply_shadow_changes | discard_shadow
 worktree: resume_from_checkpoint | accept_existing_changes | discard_worktree
 mark_failed

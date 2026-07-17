@@ -60,9 +60,14 @@ _REPORT_LIST_LIMITS = {
     "findings": 24,
     "corrections": 24,
     "verification_evidence": 24,
+    "changes_added": 24,
+    "changes_modified": 24,
+    "changes_removed": 24,
     "acceptance_criteria": 24,
     "assumptions": 24,
+    "files_added": 100,
     "files_modified": 100,
+    "files_deleted": 100,
     "tests_run": 24,
     "verification_needed": 24,
     "risks": 24,
@@ -84,10 +89,15 @@ _PUBLIC_REPORT_ORDER = (
     "findings",
     "corrections",
     "verification_evidence",
+    "changes_added",
+    "changes_modified",
+    "changes_removed",
     "decisions",
     "acceptance_criteria",
     "assumptions",
+    "files_added",
     "files_modified",
+    "files_deleted",
     "tests_run",
     "verification_needed",
     "risks",
@@ -240,7 +250,13 @@ def _representable(report: Mapping[str, Any]) -> tuple[bool, str | None]:
             return False, "report_invalid"
         if len(value) > limit:
             return False, "report_too_large"
-        text_limit = 700 if key == "commands_run" else 1_024 if key == "files_modified" else 500
+        text_limit = (
+            700
+            if key == "commands_run"
+            else 1_024
+            if key in {"files_added", "files_modified", "files_deleted"}
+            else 500
+        )
         if any(len(entry) > text_limit for entry in value):
             return False, "report_too_large"
     if len(_canonical(report)) > DELIVERABLE_MAX_BYTES:

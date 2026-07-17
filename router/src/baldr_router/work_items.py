@@ -56,6 +56,8 @@ EXECUTION_PRESETS = {"fast", "balanced", "deep", "custom"}
 CONTEXT_MODES = {"auto", "on", "off"}
 ROLE_NAMES = ("architect", "implementer", "reviewer")
 RECONCILIATION_ACTION_ORDER = (
+    "authorize_changes",
+    "decline_changes",
     "inspect_shadow",
     "continue_from_shadow",
     "apply_shadow_changes",
@@ -136,8 +138,61 @@ def _normalize_attachments(value: Any) -> list[dict[str, Any]]:
             item["language"] = str(raw["language"])[:64]
         if raw.get("range"):
             item["range"] = raw["range"]
+        if isinstance(raw.get("dirty"), bool):
+            item["dirty"] = raw["dirty"]
+        if isinstance(raw.get("version"), int):
+            item["version"] = max(0, raw["version"])
         result.append(item)
     return result
+
+
+_CONTINUATION_REPORT_FIELDS = (
+    "status",
+    "summary",
+    "work_completed",
+    "work_next",
+    "changes_added",
+    "changes_modified",
+    "changes_removed",
+    "files_added",
+    "files_modified",
+    "files_deleted",
+    "tests_run",
+    "verification_evidence",
+    "verification_needed",
+    "findings",
+    "corrections",
+    "risks",
+    "follow_up",
+    "blockers",
+    "review_decision",
+)
+
+
+def _continuation_context(item: dict[str, Any], extra_context: str) -> str:
+    """Carry a bounded public result forward without copying private transcripts."""
+
+    progress = item.get("progress") if isinstance(item.get("progress"), dict) else {}
+    report = progress.get("final_report") if isinstance(progress, dict) else None
+    previous: dict[str, Any] = {}
+    if isinstance(report, dict):
+        previous = {
+            field: report[field]
+            for field in _CONTINUATION_REPORT_FIELDS
+            if report.get(field) not in (None, "", [])
+        }
+    parts: list[str] = []
+    if previous:
+        serialized = json.dumps(
+            previous, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+        parts.append(
+            "Previous durable Baldr result (bounded structured summary; treat the "
+            f"new user turn as authoritative):\n{serialized[:24_000]}"
+        )
+    if extra_context.strip():
+        parts.append(extra_context.strip())
+    return "\n\n".join(parts)[:64_000]
 
 
 def _run_to_item_status(status: str | None) -> str:
@@ -266,14 +321,50 @@ def _allowed_actions(item: dict[str, Any], snapshot: dict[str, Any] | None) -> l
             recorded = {"accept_existing_changes", "mark_failed"}
         else:
             recorded = {"mark_failed"}
+        if _legacy_write_policy_failure(snapshot):
+            # Runs created before write authorization existed reported the
+            # architect's read-only boundary as a blocker.  Offer the equivalent
+            # durable decision so those sessions can resume without being lost.
+            recorded.update({"authorize_changes", "decline_changes"})
         actions.extend(
             action for action in RECONCILIATION_ACTION_ORDER if action in recorded
         )
     elif status == "needs_attention":
         actions.append("start")
+    if status in {"completed", "failed", "cancelled"} or (
+        status == "needs_attention"
+        and bool(snapshot)
+        and run_status != "awaiting_reconciliation"
+    ):
+        actions.append("continue")
     if status not in {"running", "cancelling", "archived"}:
         actions.append("archive")
     return list(dict.fromkeys(actions))
+
+
+def _legacy_write_policy_failure(snapshot: dict[str, Any] | None) -> bool:
+    run = (snapshot or {}).get("run") or {}
+    if str(run.get("error_code") or "") not in {
+        "workflow_phase_failed",
+        "phase_report_blocked",
+    }:
+        return False
+    for step in (snapshot or {}).get("steps") or []:
+        if str(step.get("phase") or "") != "architect":
+            continue
+        output = step.get("output") or {}
+        text = _json(output).lower()
+        if any(
+            marker in text
+            for marker in (
+                "regla de no modificar archivos",
+                "bloqueada por la regla de no modificar",
+                "read-only planning boundary",
+                "rule not to modify files",
+            )
+        ):
+            return True
+    return False
 
 
 def workbench_options() -> dict[str, Any]:
@@ -281,15 +372,15 @@ def workbench_options() -> dict[str, Any]:
         "safety_modes": [
             {
                 "id": "automatic",
-                "label": "Protección automática",
-                "description": "Recomendada y predeterminada: Baldr trabaja en una copia protegida y recuperable.",
+                "label": "Pedir autorización",
+                "description": "Recomendada y predeterminada: Baldr planifica en solo lectura y te pregunta antes de modificar esta carpeta.",
                 "recommended": True,
                 "default": True,
             },
             {
                 "id": "current",
                 "label": "Trabajar directamente",
-                "description": "Modifica esta carpeta directamente y usa su repositorio Git para revisar los cambios.",
+                "description": "Permite cambios directos sin una pausa de autorización por tarea y usa Git para revisarlos.",
             },
             {
                 "id": "non-git",
@@ -348,6 +439,70 @@ class WorkItemService:
             """,
             (item_id, event_type, _json(payload or {}), utc_now_iso()),
         )
+
+    def _insert_turn(
+        self,
+        connection: Any,
+        *,
+        item_id: str,
+        ordinal: int,
+        item_revision: int,
+        request_artifact_id: str,
+        context_artifact_id: str | None,
+        source: str,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO work_item_turns(
+                id, item_id, ordinal, item_revision, request_artifact_id,
+                context_artifact_id, source, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                f"wit-{uuid.uuid4().hex}",
+                item_id,
+                ordinal,
+                item_revision,
+                request_artifact_id,
+                context_artifact_id,
+                (source.strip() or "unknown")[:64],
+                utc_now_iso(),
+            ),
+        )
+
+    def _load_turns(
+        self, item_id: str, *, include_internal: bool
+    ) -> list[dict[str, Any]]:
+        limit = 500 if include_internal else 100
+        rows = self.store.connect().execute(
+            """
+            SELECT id, ordinal, item_revision, request_artifact_id,
+                   context_artifact_id, run_id, source, created_at
+            FROM work_item_turns WHERE item_id=?
+            ORDER BY ordinal DESC LIMIT ?
+            """,
+            (item_id, limit),
+        ).fetchall()
+        turns: list[dict[str, Any]] = []
+        for row in reversed(rows):
+            value = dict(row)
+            request_artifact_id = value.pop("request_artifact_id", None)
+            context_artifact_id = value.pop("context_artifact_id", None)
+            request = (
+                self.store.load_artifact(request_artifact_id)
+                if include_internal
+                else self.store.load_public_text_artifact(request_artifact_id)
+            )
+            value["request"] = str(request or "")
+            value["has_context"] = bool(context_artifact_id)
+            if include_internal:
+                value["context"] = str(
+                    self.store.load_artifact(context_artifact_id) or ""
+                )
+                value["request_artifact_id"] = request_artifact_id
+                value["context_artifact_id"] = context_artifact_id
+            turns.append(value)
+        return turns
 
     def _load_item(
         self,
@@ -527,6 +682,7 @@ class WorkItemService:
         role_profiles: dict[str, list[str]] | None = None,
         config: dict[str, Any] | None = None,
         allow_non_git: bool = False,
+        source: str = "create",
     ) -> dict[str, Any]:
         clean_task = task.strip()
         if not clean_task:
@@ -616,6 +772,15 @@ class WorkItemService:
                     now,
                 ),
             )
+            self._insert_turn(
+                connection,
+                item_id=item_id,
+                ordinal=1,
+                item_revision=revision,
+                request_artifact_id=task_artifact_id,
+                context_artifact_id=extra_artifact_id,
+                source=source,
+            )
             self._event(
                 connection,
                 item_id,
@@ -626,6 +791,113 @@ class WorkItemService:
                     "preset": selected_preset,
                     "context_mode": context,
                 },
+            )
+        return self.get(item_id)
+
+    def continue_item(
+        self,
+        item_id: str,
+        *,
+        workspace_root: str | Path,
+        request: str,
+        extra_context: str = "",
+        attachments: list[dict[str, Any]] | None = None,
+        source: str = "generic-mcp",
+    ) -> dict[str, Any]:
+        """Append one immutable user turn and prepare a new run revision."""
+
+        current = self.get(item_id, include_timeline=False)
+        _root, identity = _workspace(workspace_root)
+        if str(current.get("workspace_id")) != str(identity["workspace_id"]):
+            raise ValueError("The work item does not belong to this workspace.")
+        if current["status"] in {"running", "cancelling", "archived"}:
+            raise ValueError(f"A {current['status']} work item cannot be continued.")
+        run_status = str((current.get("run") or {}).get("status") or "")
+        if run_status == "awaiting_reconciliation":
+            raise ValueError(
+                "This item requires reconciliation before the conversation can continue."
+            )
+        clean_request = request.strip()
+        if not clean_request:
+            raise ValueError("A continuation request must not be empty.")
+
+        revision = int(current["revision"]) + 1
+        context = _continuation_context(current, extra_context)
+        metadata = dict(current.get("config") or {})
+        metadata["attachments"] = _normalize_attachments(attachments)
+        now = utc_now_iso()
+        with self.store.transaction(immediate=True) as connection:
+            # Legacy work items predate the turn table. Preserve their original
+            # immutable task before appending the first real continuation.
+            turn_count = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM work_item_turns WHERE item_id=?", (item_id,)
+                ).fetchone()[0]
+            )
+            if turn_count == 0:
+                self._insert_turn(
+                    connection,
+                    item_id=item_id,
+                    ordinal=1,
+                    item_revision=int(current["revision"]),
+                    request_artifact_id=str(current["task_artifact_id"]),
+                    context_artifact_id=current.get("extra_context_artifact_id"),
+                    source="legacy",
+                )
+                turn_count = 1
+            request_artifact_id = self.store._insert_artifact(
+                connection,
+                run_id=None,
+                kind="work-item-turn-private",
+                value=clean_request,
+                media_type="text/plain",
+                redaction_level="private",
+                redact=False,
+            )
+            context_artifact_id = None
+            if context:
+                context_artifact_id = self.store._insert_artifact(
+                    connection,
+                    run_id=None,
+                    kind="work-item-turn-context-private",
+                    value=context,
+                    media_type="text/plain",
+                    redaction_level="private",
+                    redact=False,
+                )
+            connection.execute(
+                """
+                UPDATE work_items
+                SET task_artifact_id=?, extra_context_artifact_id=?, config_json=?,
+                    revision=?, idempotency_key=?, status='draft', current_run_id=NULL,
+                    error_code=NULL, error_reason=NULL, completed_at=NULL,
+                    archived_at=NULL, updated_at=?
+                WHERE id=?
+                """,
+                (
+                    request_artifact_id,
+                    context_artifact_id,
+                    _json(metadata),
+                    revision,
+                    f"work-item:{item_id}:r{revision}",
+                    now,
+                    item_id,
+                ),
+            )
+            self._insert_turn(
+                connection,
+                item_id=item_id,
+                ordinal=turn_count + 1,
+                item_revision=revision,
+                request_artifact_id=request_artifact_id,
+                context_artifact_id=context_artifact_id,
+                source=source,
+            )
+            self._event(
+                connection,
+                item_id,
+                "work_item.turn_appended",
+                {"ordinal": turn_count + 1, "revision": revision, "source": source[:64]},
             )
         return self.get(item_id)
 
@@ -775,6 +1047,14 @@ class WorkItemService:
             (item_id, run_id),
         ).fetchone()
         if existing is None:
+            item_row = connection.execute(
+                "SELECT revision FROM work_items WHERE id=?", (item_id,)
+            ).fetchone()
+            turn_count = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM work_item_turns WHERE item_id=?", (item_id,)
+                ).fetchone()[0]
+            )
             ordinal = int(
                 connection.execute(
                     """
@@ -790,10 +1070,24 @@ class WorkItemService:
             connection.execute(
                 """
                 INSERT INTO work_item_runs(item_id, run_id, ordinal, relation, created_at)
-                VALUES (?, ?, ?, 'primary', ?)
+                VALUES (?, ?, ?, ?, ?)
                 """,
-                (item_id, run_id, ordinal, utc_now_iso()),
+                (
+                    item_id,
+                    run_id,
+                    ordinal,
+                    "follow-up" if turn_count > 1 else "primary",
+                    utc_now_iso(),
+                ),
             )
+            if item_row is not None:
+                connection.execute(
+                    """
+                    UPDATE work_item_turns SET run_id=?
+                    WHERE item_id=? AND item_revision=? AND run_id IS NULL
+                    """,
+                    (run_id, item_id, int(item_row["revision"])),
+                )
 
     def _sync(
         self, item: dict[str, Any], *, include_internal: bool = True
@@ -988,6 +1282,9 @@ class WorkItemService:
         )
         item["progress"] = project_work_item_progress(item, snapshot)
         item["progress_summary"] = progress_summary(item, item["progress"])
+        item["turns"] = self._load_turns(
+            item_id, include_internal=include_internal
+        )
         if snapshot and include_internal:
             item["workflow"] = {
                 "run": snapshot.get("run"),
@@ -1412,6 +1709,19 @@ class WorkItemService:
             )
             if value
         }
+        private_artifact_ids.update(
+            str(row["artifact_id"])
+            for row in connection.execute(
+                """
+                SELECT request_artifact_id AS artifact_id FROM work_item_turns WHERE item_id=?
+                UNION
+                SELECT context_artifact_id AS artifact_id FROM work_item_turns
+                WHERE item_id=? AND context_artifact_id IS NOT NULL
+                """,
+                (item_id, item_id),
+            ).fetchall()
+            if row["artifact_id"]
+        )
 
         clauses: list[str] = []
         params: list[str] = []

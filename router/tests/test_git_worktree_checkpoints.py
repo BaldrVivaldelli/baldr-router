@@ -52,9 +52,23 @@ def test_clean_git_workspace_uses_worktree_checkpoint_and_publishes(tmp_path: Pa
     assert execution.execution_root != repo
 
     (execution.execution_root / "new.txt").write_text("new\n", encoding="utf-8")
-    checkpoint = manager.checkpoint(execution, step_id="step", label="implement")
+    checkpoint = manager.checkpoint(
+        execution,
+        step_id="step",
+        label="implement",
+        reported_file_changes=[{"path": "new.txt", "kind": "added"}],
+    )
     assert checkpoint["checkpoint_commit"]
     assert checkpoint["patch_bytes"] > 0
+    assert checkpoint["file_changes"] == [
+        {
+            "path": "new.txt",
+            "kind": "added",
+            "additions": 1,
+            "deletions": 0,
+            "evidence": "observed",
+        }
+    ]
 
     published = manager.publish(execution)
     assert published["ok"] is True
@@ -131,7 +145,10 @@ def test_non_git_workspace_records_observation_without_claiming_recoverable_chec
     (workspace / "generated.txt").write_text("generated\n", encoding="utf-8")
 
     observation = manager.checkpoint(
-        execution, step_id="step-non-git", label="implement"
+        execution,
+        step_id="step-non-git",
+        label="implement",
+        reported_file_changes=[{"path": "generated.txt", "kind": "added"}],
     )
 
     assert observation["ok"] is True
@@ -140,6 +157,15 @@ def test_non_git_workspace_records_observation_without_claiming_recoverable_chec
     assert observation["checkpoint_commit"] is None
     assert observation["patch_artifact_id"] is None
     assert observation["patch_bytes"] == 0
+    assert observation["file_changes"] == [
+        {
+            "path": "generated.txt",
+            "kind": "added",
+            "additions": 1,
+            "deletions": 0,
+            "evidence": "observed",
+        }
+    ]
 
     # The observation is returned to the phase, but it is deliberately not
     # persisted as a workspace checkpoint because it cannot restore files.

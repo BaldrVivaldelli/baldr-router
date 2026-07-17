@@ -16,7 +16,7 @@ Baldr
   -> Git / preset / role / Context7 chips
 ```
 
-There is no mandatory setup form. Type a task and press Enter; Baldr creates a durable work item and runs it using the active workspace preferences.
+There is no mandatory setup form. Type a task and press Enter; Baldr creates a durable work item and runs it using the active workspace preferences. After it finishes, another plain prompt continues the selected durable conversation instead of creating a disconnected item.
 
 ### Slash commands
 
@@ -41,7 +41,7 @@ The commands are aliases over the existing `setup`, `status`, and `run` facade c
 
 ### `+` menu
 
-Use `+` to create an item, attach the active file or selection, choose a file/folder, switch preset or Git mode, configure Context7, choose role profiles, or open logs.
+Use `+` to create an item, attach the active file or selection, choose a file/folder or active workspace root, switch preset or Git mode, configure Context7, choose role profiles, or open logs.
 
 ### Git modes
 
@@ -57,6 +57,11 @@ The extension never silently disables Git safety.
 
 Tasks are persisted by the core in SQLite, not in the webview. Closing VS Code or restarting Baldr does not erase the work-item list. The selected item displays architecture, implementation, review, durable cancellation, and reconciliation state.
 
+Each normal follow-up appends an immutable turn to the same work item and
+starts a new durable run. Only a bounded structured result from the previous
+run is carried forward; private provider transcripts are not. `/resume` is for
+recovery, not normal conversation continuity.
+
 The history separates active, completed, and archived sessions. Archive is reversible; archived sessions can be restored or permanently deleted after a confirmation. Permanent deletion removes Baldr's durable session data and never modifies files in the workspace.
 
 The webview never opens SQLite directly. It only invokes the shared facade and renders the result.
@@ -71,6 +76,10 @@ The webview never opens SQLite directly. It only invokes the shared facade and r
 ```
 
 Chat-created tasks appear as the same durable items in Baldr Console.
+Further prompts in the same Chat thread reuse the work-item identity. Chat and
+Console capture bounded context from explicit references, the active editor,
+selection, dirty buffer, and diagnostics. Multi-root workspaces resolve from
+those signals or an explicit picker and never silently use folder zero.
 
 ## Installation A UN SOLO clic with automatic bootstrap
 

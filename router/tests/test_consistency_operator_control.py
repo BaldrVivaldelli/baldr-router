@@ -72,6 +72,7 @@ def _report(status: str, summary: str) -> dict:
         "verification_needed": [],
         "risks": [],
         "follow_up": [],
+        "decisions": {"write_authorization": "not_required"},
     }
 
 
@@ -700,6 +701,34 @@ def test_deterministic_phase_reducers_handle_conflicts_and_quorum() -> None:
     )
     assert quorum["status"] == "approved"
     assert quorum["resolution"]["blocking_participants"] == 1
+
+
+def test_non_review_inconclusive_decision_does_not_block_write_authorization() -> None:
+    report = _report("planned", "Permission is required before implementation")
+    report.update(
+        {
+            "review_decision": "inconclusive",
+            "blockers": [],
+            "decisions": {
+                "write_authorization": "required",
+                "write_request": "Create or update analizis_ia.md.",
+            },
+        }
+    )
+
+    architecture = reduce_phase(
+        phase="architect",
+        participants=[{"ok": True, "final_report": report}],
+        policy="primary-with-advisors",
+    )
+
+    assert architecture["ok"] is True
+    assert architecture["status"] == "planned"
+    assert architecture["resolution"]["blocking_participants"] == 0
+    assert architecture["final_report"]["decisions"] == {
+        "write_authorization": "required",
+        "write_request": "Create or update analizis_ia.md.",
+    }
 
 
 def test_state_machine_random_walk_never_resurrects_terminal_runs() -> None:

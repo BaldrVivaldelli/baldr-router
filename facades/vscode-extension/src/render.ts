@@ -145,21 +145,36 @@ export function renderQualification(result: JsonRecord): string {
 
 export function renderRun(result: JsonRecord): string {
   const report = record(result.final_report ?? result.report);
+  const status = text(report.status, text(result.status, boolean(result.ok) ? 'completed' : 'failed'));
+  const statusLabel = ({
+    approved: 'Trabajo listo y aprobado',
+    completed: 'Trabajo completado',
+    needs_changes: 'Hay cambios pendientes',
+    blocked: 'El trabajo está bloqueado',
+    failed: 'La ejecución necesita atención',
+    cancelled: 'La ejecución fue cancelada',
+  } as Record<string, string>)[status] ?? status;
   const lines = [
-    '# Baldr Run',
+    '# Resultado de Baldr',
     '',
-    `**${boolean(result.ok) ? '✅' : '⚠️'} ${text(report.status, text(result.status, boolean(result.ok) ? 'completed' : 'failed'))}**`,
+    `**${boolean(result.ok) ? '✅' : '⚠️'} ${statusLabel}**`,
     '',
-    truncate(text(report.summary, text(result.reason, 'Workflow completed.'))),
-    '',
-    `- **Run ID:** \`${text(result.run_id, 'n/a')}\``,
-    `- **Workflow:** ${text(result.workflow, 'architect-implement-review')}`,
+    truncate(text(report.summary, text(result.reason, 'Baldr terminó la ejecución.'))),
   ];
   for (const [label, key] of [
-    ['Files modified', 'files_modified'],
-    ['Tests', 'tests_run'],
-    ['Risks', 'risks'],
-    ['Follow-up', 'follow_up'],
+    ['Trabajo realizado', 'work_completed'],
+    ['Qué agregó', 'changes_added'],
+    ['Qué modificó', 'changes_modified'],
+    ['Qué quitó', 'changes_removed'],
+    ['Archivos agregados', 'files_added'],
+    ['Archivos modificados', 'files_modified'],
+    ['Archivos eliminados', 'files_deleted'],
+    ['Verificación', 'verification_evidence'],
+    ['Pruebas ejecutadas', 'tests_run'],
+    ['Pendientes', 'blockers'],
+    ['Qué falta verificar', 'verification_needed'],
+    ['Riesgos', 'risks'],
+    ['Próximos pasos', 'follow_up'],
   ] as const) {
     const values = list(report[key]);
     if (values.length) {
@@ -167,6 +182,10 @@ export function renderRun(result: JsonRecord): string {
       for (const value of values.slice(0, 20)) lines.push(`- ${truncate(value, 700)}`);
     }
   }
+  lines.push(
+    '',
+    `Run: \`${text(result.run_id, 'n/a')}\` · Workflow: ${text(result.workflow, 'architect-implement-review')}`,
+  );
   if (result.dry_run === true) lines.push('', '_Dry run: no provider was executed and no files were modified._');
   return lines.join('\n');
 }

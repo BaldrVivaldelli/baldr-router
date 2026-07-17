@@ -26,6 +26,7 @@ def _report(status: str, summary: str) -> dict[str, object]:
         "verification_needed": [],
         "risks": [],
         "follow_up": [],
+        "decisions": {"write_authorization": "not_required"},
     }
 
 
@@ -98,14 +99,24 @@ def _workflow_snapshot(*, cleanup_shadow: bool = True) -> dict[str, object]:
     config.roles["architect"].profiles = ["architecture"]
     config.roles["implementer"].profiles = ["implementation"]
     config.roles["reviewer"].profiles = ["review"]
-    return _resolved_snapshot(
+    snapshot = _resolved_snapshot(
         config,
         architect_provider=None,
         implementer_provider=None,
         reviewer_provider=None,
         max_rounds=0,
-        workspace_mode="auto",
+        workspace_mode="current",
     )
+    workspace = snapshot["workspace"]
+    assert isinstance(workspace, dict)
+    workspace.update(
+        {
+            "write_isolation": "auto",
+            "dirty_workspace_policy": "reject",
+            "publish_worktree_changes": True,
+        }
+    )
+    return snapshot
 
 
 @pytest.fixture

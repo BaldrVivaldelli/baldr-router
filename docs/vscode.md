@@ -11,6 +11,9 @@ The native extension in `facades/vscode-extension/` provides **Instalación A UN
 - stores an optional Context7 key in VS Code SecretStorage;
 - contributes a dedicated Baldr Activity Bar console with durable work items;
 - exposes one Command Palette entry and keeps chat as an optional shortcut;
+- continues follow-up prompts in the same durable item from Chat or Console;
+- resolves the active folder in multi-root workspaces from references, the editor, or an explicit picker;
+- includes bounded active-file, selection, dirty-buffer, and diagnostic context;
 - renders workflow phases, cancellation, reconciliation, evidence, and resolved execution profiles.
 
 Install the generated artifact:
@@ -37,6 +40,16 @@ Baldr: Open
 @baldr /run <task>
 @baldr <task>
 ```
+
+After a task finishes, the next plain prompt in the same `@baldr` chat or the
+selected Console session appends a durable conversation turn and runs it on the
+same work item. `/resume` remains recovery for an interrupted run; it is not
+required for a normal follow-up. Final Chat responses and the Console result
+card show the structured outcome first, with technical details kept secondary.
+
+With one folder, Baldr uses it directly. With multiple folders, an explicit
+reference or the active editor chooses the folder; otherwise Baldr asks. It
+never silently falls back to the first workspace folder.
 
 No workspace `mcp.json`, global npm launcher, manual Python package installation, or configuration form is needed for this path. See [`baldr-console.md`](baldr-console.md).
 

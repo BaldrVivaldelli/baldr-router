@@ -62,7 +62,12 @@ Required keys (use empty arrays when a section does not apply):
 - findings: string array of review findings; use [] when none
 - corrections: string array of corrections applied; use [] when none
 - verification_evidence: string array of observable checks and their outcomes; do not claim a pass without evidence
-- files_modified: string array
+- changes_added: concise user-facing descriptions of capabilities or content introduced; use [] when none
+- changes_modified: concise user-facing descriptions of existing behavior or content adjusted; use [] when none
+- changes_removed: concise user-facing descriptions of behavior or content removed; use [] when none
+- files_added: paths of files actually created; use [] when none
+- files_modified: paths of existing files actually changed; use [] when none
+- files_deleted: paths of files actually removed; use [] when none
 - commands_run: string array
 - tests_run: string array
 - verification_needed: string array

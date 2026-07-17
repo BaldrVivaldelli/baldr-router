@@ -31,6 +31,12 @@ It defines three stable user intents:
 - `status`: compact health and recent-run report;
 - `run`: execute the frozen orchestration workflow.
 
+Conversation continuation is an internal action of `run`, not a fourth facade
+intent. A durable work item owns immutable request turns; each continuation
+increments the item revision, starts a related run, and carries forward only a
+bounded allowlist from the previous structured final report plus the new
+private client context.
+
 Generated facade files are synchronized by `scripts/generate_facades.py`. CI-style validation uses `--check`.
 
 The console hot path uses the additive `baldr-work-item-progress` v1 contract in `contracts/work-item-progress-v1.schema.json`. The projector derives a bounded public narrative from durable steps, structured reports, checkpoints, publications, and allowlisted activity events. Structured reports can carry explicit interpretation, scope, approach, plan steps, completed/next work, findings, corrections, and verification evidence; legacy reports remain valid when those additive fields are absent. Provider and command start events are projected as generic `working`, while `changing` and `verifying` require typed evidence. It is a presentation boundary: prompts, provider wire events, sessions, leases, private roots, raw stderr/stdout, and reasoning never cross it. Existing `phases`, `workflow`, and `timeline` remain available to compatible full-status clients; `status --workbench-only` returns the compact projection without health probes or internal workflow payloads.
@@ -78,6 +84,12 @@ VS Code extension
 
 The extension invokes the same core CLI facade and also registers the same MCP server for the general VS Code agent.
 
+The VS Code facade resolves workspace identity from explicit Chat references,
+the active editor, a previously pinned root, or an explicit multi-root picker.
+It captures bounded editor/selection/dirty-buffer/diagnostic context into
+private artifacts. The public workbench exposes ordered request turns and a
+context-presence flag, never the private context body.
+
 ## Kiro facade
 
 ```text
@@ -99,7 +111,7 @@ v0.16 keeps orchestration deterministic in Baldr and treats provider output as e
 
 ```text
 control plane   -> SQLite state machine + append-only event journal
-code plane      -> Git worktree o shadow/manifests + publicación idempotente
+code plane      -> autorización + escritura puntual + checkpoints durables
 artifact plane  -> content-addressed reports, patches, telemetry and evidence
 ```
 
@@ -107,19 +119,19 @@ The workflow snapshot freezes the resolved execution profiles, provider/model se
 
 Each phase references one or many named execution profiles. A single shared profile can back all phases, or architecture/implementation/review can independently use n/m/l profiles. Provider sessions are keyed by scope, workspace/run, role, provider, model/agent, and profile.
 
-El code plane usa **Protección automática** por defecto sin cambiar el alcance elegido por el usuario:
+El code plane usa **Pedir autorización** por defecto sin cambiar el alcance elegido por el usuario:
 
 ```text
-raíz Git exacta y limpia
-  -> worktree detached + checkpoints Git + patch
+arquitectura
+  -> sandbox de solo lectura sobre el workspace elegido
 
-Git sucio/sin commit, carpeta sin Git o subcarpeta de un repo padre
-  -> workspace sombra durable + manifests/blobs SHA-256 + Git privado auxiliar
+autorización concedida
+  -> sandbox workspace-write sobre ese mismo workspace + journal durable
 ```
 
-Todos los providers reciben sólo la ruta aislada. El core bloquea modos protegidos cuando el adapter/runner declara límites `advisory`, usa un runner SDK sin cwd demostrable o solicita un sandbox irrestricto. En shadow, el Git privado facilita checkpoints e inspección, pero los manifests son la autoridad para recuperar y publicar. El plan de publicación se registra de forma durable, verifica nuevamente el original y aplica por ruta únicamente el delta aprobado. Cada efecto conserva un guard de contenido/identidad de la ruta y sus padres, además del cursor antes/después, para detectar cambios posteriores al preflight y continuar después de un crash; si pudo existir una aplicación parcial, el core conserva la copia y no ofrece un descarte inseguro.
+Todos los providers reciben sólo la ruta seleccionada. La arquitectura no puede escribir; cuando el plan requiere archivos, el run se pausa y persiste una decisión explícita. Después de autorizar, la implementación escribe directamente y el reviewer comprueba el estado visible en la misma carpeta. Los attempts, leases, checkpoints y eventos permanecen durables; una escritura interrumpida con efectos desconocidos exige reconciliación y nunca se repite automáticamente.
 
-Los shadows viven bajo el estado local de Baldr (`shadow-workspaces/<run-id>`), no en `/tmp`. Las políticas de copia excluyen metadata VCS, secretos configurados y artefactos generados; aplican límites explícitos y validan modos, symlinks y nombres portables antes de ejecutar agentes. La limpieza ocurre después de una publicación verificada, con retención configurable para fallos y conflictos.
+Los worktrees y shadows siguen disponibles para runs aislados existentes o configuraciones avanzadas. En esos modos, los manifests, blobs y journals conservan sus garantías de publicación y recuperación, pero no forman parte del camino predeterminado autorizado.
 
 See [`durable-orchestration.md`](durable-orchestration.md) and [`consistency-operator-control.md`](consistency-operator-control.md).
 

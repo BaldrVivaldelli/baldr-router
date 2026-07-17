@@ -86,6 +86,230 @@ def _head(root: Path) -> str | None:
     return _text(result) if result.returncode == 0 else None
 
 
+def _reported_change_candidates(value: Any) -> list[tuple[str, str]]:
+    if not isinstance(value, list):
+        return []
+    result: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for entry in value[:100]:
+        if not isinstance(entry, dict):
+            continue
+        raw_path = entry.get("path")
+        kind = str(entry.get("kind") or "modified").strip().lower()
+        if not isinstance(raw_path, str) or kind not in {"added", "modified", "deleted"}:
+            continue
+        normalized = raw_path.strip().strip("`\"'").replace("\\", "/")
+        if (
+            not normalized
+            or len(normalized) > 1_024
+            or normalized.startswith(("/", "~"))
+            or ":" in normalized
+            or any(part in {"", ".", ".."} for part in normalized.split("/"))
+            or normalized in seen
+        ):
+            continue
+        seen.add(normalized)
+        result.append((normalized, kind))
+    return result
+
+
+def _text_line_count(path: Path, *, max_bytes: int = 16 * 1024 * 1024) -> int | None:
+    try:
+        if not path.is_file() or path.stat().st_size > max_bytes:
+            return None
+        data = path.read_bytes()
+    except OSError:
+        return None
+    if b"\x00" in data[:8_192]:
+        return None
+    return len(data.splitlines())
+
+
+def _diff_status(value: bytes) -> str | None:
+    token = value.split(b"\0", 1)[0].decode("utf-8", errors="replace").strip()
+    if not token:
+        return None
+    code = token[0].upper()
+    if code == "A":
+        return "added"
+    if code == "D":
+        return "deleted"
+    return "modified"
+
+
+def _numstat(value: bytes) -> tuple[int | None, int | None]:
+    record = value.split(b"\0", 1)[0]
+    fields = record.split(b"\t", 2)
+    if len(fields) < 2 or fields[0] == b"-" or fields[1] == b"-":
+        return None, None
+    try:
+        return int(fields[0]), int(fields[1])
+    except ValueError:
+        return None, None
+
+
+def _git_file_change(
+    execution: "WorkspaceExecution",
+    display_path: str,
+    claimed_kind: str,
+    *,
+    checkpoint_commit: str | None,
+) -> dict[str, Any] | None:
+    root = execution.execution_root.resolve()
+    target = (root / display_path).resolve(strict=False)
+    try:
+        target.relative_to(root)
+    except ValueError:
+        return None
+    repository = _git_root(root)
+    if repository is None:
+        additions = _text_line_count(target) if claimed_kind == "added" else None
+        return {
+            "path": display_path,
+            "kind": claimed_kind,
+            "additions": additions,
+            "deletions": 0 if additions is not None else None,
+            "evidence": "observed" if target.exists() else "reported",
+        }
+    try:
+        repository_path = target.relative_to(repository).as_posix()
+    except ValueError:
+        return None
+
+    diff_args: list[str] = ["diff", "--no-renames"]
+    if execution.base_commit:
+        diff_args.append(str(execution.base_commit))
+        if execution.mode == "worktree" and checkpoint_commit:
+            diff_args.append(str(checkpoint_commit))
+    status_result = _run_git(
+        repository,
+        *diff_args,
+        "--name-status",
+        "-z",
+        "--",
+        repository_path,
+        check=False,
+    )
+    kind = _diff_status(status_result.stdout) if status_result.returncode == 0 else None
+    additions: int | None = None
+    deletions: int | None = None
+    if kind is not None:
+        stat_result = _run_git(
+            repository,
+            *diff_args,
+            "--numstat",
+            "-z",
+            "--",
+            repository_path,
+            check=False,
+        )
+        if stat_result.returncode == 0:
+            additions, deletions = _numstat(stat_result.stdout)
+    else:
+        status = _run_git(
+            repository,
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--",
+            repository_path,
+            check=False,
+        ).stdout
+        if status.startswith(b"?? "):
+            kind = "added"
+            additions = _text_line_count(target)
+            deletions = 0 if additions is not None else None
+        elif status:
+            codes = status[:2].decode("ascii", errors="ignore")
+            kind = "added" if "A" in codes else "deleted" if "D" in codes else "modified"
+        else:
+            tracked = _run_git(
+                repository,
+                "ls-files",
+                "--error-unmatch",
+                "--",
+                repository_path,
+                check=False,
+            ).returncode == 0
+            if tracked:
+                return None
+            if target.is_file():
+                kind = claimed_kind
+                if kind == "added":
+                    additions = _text_line_count(target)
+                    deletions = 0 if additions is not None else None
+            elif claimed_kind == "deleted":
+                kind = "deleted"
+            else:
+                return None
+    return {
+        "path": display_path,
+        "kind": kind or claimed_kind,
+        "additions": additions,
+        "deletions": deletions,
+        "evidence": "observed",
+    }
+
+
+def _git_file_changes(
+    execution: "WorkspaceExecution",
+    reported_file_changes: Any,
+    *,
+    checkpoint_commit: str | None,
+) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for path, kind in _reported_change_candidates(reported_file_changes):
+        change = _git_file_change(
+            execution,
+            path,
+            kind,
+            checkpoint_commit=checkpoint_commit,
+        )
+        if change is not None:
+            result.append(change)
+    return result
+
+
+def _shadow_file_changes(
+    execution: "WorkspaceExecution",
+    delta: Any,
+    reported_file_changes: Any,
+) -> list[dict[str, Any]]:
+    delta_value = delta if isinstance(delta, dict) else {}
+    actual: dict[str, str] = {}
+    for field_name, kind in (
+        ("added", "added"),
+        ("modified", "modified"),
+        ("deleted", "deleted"),
+    ):
+        values = delta_value.get(field_name)
+        if isinstance(values, list):
+            actual.update(
+                (str(path), kind) for path in values if isinstance(path, str)
+            )
+    result: list[dict[str, Any]] = []
+    for path, claimed_kind in _reported_change_candidates(reported_file_changes):
+        kind = actual.get(path)
+        if kind is None:
+            continue
+        additions = (
+            _text_line_count(execution.execution_root / path)
+            if kind == "added"
+            else None
+        )
+        result.append(
+            {
+                "path": path,
+                "kind": kind or claimed_kind,
+                "additions": additions,
+                "deletions": 0 if additions is not None else None,
+                "evidence": "observed",
+            }
+        )
+    return result
+
+
 @contextmanager
 def _publication_lock(original_root: Path, *, timeout_seconds: float = 30.0):
     """Serialize publication per original path with a process-owned OS lock."""
@@ -735,6 +959,7 @@ class GitWorkspaceManager:
         *,
         step_id: str,
         label: str,
+        reported_file_changes: list[dict[str, str]] | None = None,
         lease: LeaseToken | None = None,
     ) -> dict[str, Any]:
         if lease:
@@ -761,6 +986,11 @@ class GitWorkspaceManager:
                 redact=False,
             )
             private_git = result.get("private_git") or {}
+            file_changes = _shadow_file_changes(
+                execution,
+                result.get("delta"),
+                reported_file_changes,
+            )
             execution.checkpoint_commit = (
                 str(private_git.get("commit")) if private_git.get("commit") else None
             )
@@ -804,8 +1034,14 @@ class GitWorkspaceManager:
                 "post_diff_hash": manifest,
                 "patch_artifact_id": artifact,
                 "recoverable": True,
+                "file_changes": file_changes,
             }
         if execution.is_non_git:
+            file_changes = _git_file_changes(
+                execution,
+                reported_file_changes,
+                checkpoint_commit=None,
+            )
             return {
                 "ok": True,
                 "mode": execution.mode,
@@ -816,6 +1052,7 @@ class GitWorkspaceManager:
                 "patch_bytes": 0,
                 "recoverable": False,
                 "observation_only": True,
+                "file_changes": file_changes,
             }
         status = _status_bytes(root)
         post_diff_hash = _sha(status)
@@ -866,6 +1103,12 @@ class GitWorkspaceManager:
         else:
             patch = _run_git(root, "diff", "--binary", "--full-index", check=False).stdout
 
+        file_changes = _git_file_changes(
+            execution,
+            reported_file_changes,
+            checkpoint_commit=checkpoint_commit,
+        )
+
         if lease:
             self.store.assert_lease(lease)
         patch_artifact = self.store.store_artifact(
@@ -897,6 +1140,7 @@ class GitWorkspaceManager:
                     **execution.metadata,
                     "label": label,
                     "patch_bytes": len(patch),
+                    "file_change_count": len(file_changes),
                     "checkpointed_at": utc_now_iso(),
                 },
             },
@@ -910,6 +1154,7 @@ class GitWorkspaceManager:
             "post_diff_hash": post_diff_hash,
             "patch_artifact_id": patch_artifact,
             "patch_bytes": len(patch),
+            "file_changes": file_changes,
         }
 
     def publish(

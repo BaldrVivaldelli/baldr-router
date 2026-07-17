@@ -68,7 +68,13 @@ export interface WorkItemProgressReport {
   findings?: unknown;
   corrections?: unknown;
   verification_evidence?: unknown;
+  changes_added?: unknown;
+  changes_modified?: unknown;
+  changes_removed?: unknown;
+  files_added?: unknown;
   files_modified?: unknown;
+  files_deleted?: unknown;
+  file_changes?: unknown;
   commands_run?: unknown;
   tests_run?: unknown;
   verification_needed?: unknown;

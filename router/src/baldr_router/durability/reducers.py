@@ -69,11 +69,17 @@ def _merge_decisions(reports: list[dict[str, Any]]) -> tuple[dict[str, str], lis
     return merged, conflicts
 
 
-def _is_blocking(item: dict[str, Any]) -> bool:
+def _is_blocking(item: dict[str, Any], *, phase: str) -> bool:
     report = _report(item)
     status = str(report.get("status") or item.get("status") or "").lower()
     review_decision = str(report.get("review_decision") or "").lower()
-    if review_decision in {"changes_required", "inconclusive"}:
+    # The shared report schema includes review_decision for every role.  It is
+    # authoritative only in the reviewer phase; architects and implementers
+    # commonly emit "inconclusive" or "not_applicable" there.
+    if phase == "reviewer" and review_decision in {
+        "changes_required",
+        "inconclusive",
+    }:
         return True
     if report.get("blockers"):
         return True
@@ -95,6 +101,7 @@ def _is_blocking(item: dict[str, Any]) -> bool:
 def _base_report(
     reports: list[dict[str, Any]], *, status: str, summary: str
 ) -> dict[str, Any]:
+    decisions = _merge_decisions(reports)[0]
     return {
         "status": status,
         "summary": summary,
@@ -107,13 +114,18 @@ def _base_report(
         "findings": _field(reports, "findings"),
         "corrections": _field(reports, "corrections"),
         "verification_evidence": _field(reports, "verification_evidence"),
+        "changes_added": _field(reports, "changes_added"),
+        "changes_modified": _field(reports, "changes_modified"),
+        "changes_removed": _field(reports, "changes_removed"),
+        "files_added": _field(reports, "files_added"),
         "files_modified": _field(reports, "files_modified"),
+        "files_deleted": _field(reports, "files_deleted"),
         "commands_run": _field(reports, "commands_run"),
         "tests_run": _field(reports, "tests_run"),
         "verification_needed": _field(reports, "verification_needed"),
         "risks": _field(reports, "risks"),
         "follow_up": _field(reports, "follow_up"),
-        "decisions": _merge_decisions(reports)[0],
+        "decisions": decisions,
         "constraints": _field(reports, "constraints"),
         "assumptions": _field(reports, "assumptions"),
         "alternatives_rejected": _field(reports, "alternatives_rejected"),
@@ -147,7 +159,7 @@ def reduce_phase(
 
     reports = [_report(item) for item in participants]
     statuses = [str(report.get("status") or "").lower() for report in reports]
-    blocking = [_is_blocking(item) for item in participants]
+    blocking = [_is_blocking(item, phase=phase) for item in participants]
     summaries = [str(report.get("summary") or "").strip() for report in reports]
     conflicts: list[str] = []
     merged_decisions, decision_conflicts = _merge_decisions(reports)
@@ -195,7 +207,7 @@ def reduce_phase(
             if str(_report(item).get("review_decision") or "").lower() == "approved"
             or (
                 not _report(item).get("review_decision")
-                and not _is_blocking(item)
+                and not _is_blocking(item, phase=phase)
             )
         )
         if normalized_policy == "all-approved":

@@ -89,6 +89,13 @@ class FakeElement {
       focusNodes.push(node);
     }
     this.generated.set('[data-focus-key]', focusNodes);
+    const changedFileNodes = [];
+    for (const match of this._innerHTML.matchAll(/data-open-changed-file="([^"]+)"/g)) {
+      const node = create(`changed-file:${match[1]}:${changedFileNodes.length}`);
+      node.dataset.openChangedFile = match[1];
+      changedFileNodes.push(node);
+    }
+    this.generated.set('[data-open-changed-file]', changedFileNodes);
   }
   addEventListener(type, listener) { this.listeners.set(type, listener); }
   setAttribute(name, value) { this.attributes.set(name, String(value)); }
@@ -127,7 +134,7 @@ function createHarness(persistedState = {}) {
   const ids = [
     'header', 'tasks', 'content', 'composer', 'input', 'send', 'plus', 'configure', 'refresh',
     'gitChip', 'gitChipLabel', 'presetChip', 'presetChipLabel', 'rolesChip',
-    'rolesChipLabel', 'contextChip', 'contextChipLabel', 'attachments', 'slash',
+    'rolesChipLabel', 'contextChip', 'contextChipLabel', 'attachments', 'activeContext', 'slash',
     'plusMenu', 'plusFilter', 'plusEmpty', 'loading', 'liveStatus', 'historySearch',
     'historyPanel', 'historyToggle', 'historyStatus',
   ];
@@ -261,6 +268,120 @@ test('real webview script renders escaped narrative stages and evidence', () => 
   assert.match(harness.elements.tasks.innerHTML, /class="task-summary">Preparando cambios seguros/);
   assert.match(harness.elements.tasks.innerHTML, /class="task-meta-time">/);
   assert.match(harness.elements.tasks.innerHTML, /Tarea &lt;privada&gt;/);
+});
+
+test('changed file rows ask the extension host to open the selected workspace file', () => {
+  const harness = createHarness();
+  const resultState = state();
+  resultState.workbench.selected.presentation.outcome = {
+    title: 'Trabajo listo', tone: 'positive', summary: 'Se actualizó el análisis.',
+    facts: [], sections: [], technicalSections: [],
+    fileChanges: [{ path: 'docs/analizis_ia.md', kind: 'added', additions: 262, deletions: 0 }],
+  };
+
+  harness.receive({ type: 'state', state: resultState });
+  const rows = harness.elements.content.querySelectorAll('[data-open-changed-file]');
+  assert.equal(rows.length, 1);
+  assert.match(harness.elements.content.innerHTML, /<button[^>]+data-open-changed-file="docs\/analizis_ia\.md"/);
+
+  rows[0].listeners.get('click')();
+  assert.deepEqual(harness.messages.at(-1), {
+    type: 'openChangedFile',
+    path: 'docs/analizis_ia.md',
+  });
+});
+
+test('attention explains the stopped stage and labels its report as partial', () => {
+  const harness = createHarness();
+  const attentionState = state();
+  const selected = attentionState.workbench.selected;
+  selected.status = 'needs_attention';
+  selected.allowed_actions = ['mark_failed'];
+  selected.presentation = {
+    ...selected.presentation,
+    overallState: 'attention',
+    headline: 'Necesitamos que elijas cómo continuar',
+    explanation: 'El trabajo está preservado.',
+    attention: {
+      title: 'La planificación se detuvo',
+      message: 'La planificación se detuvo por el motivo que aparece abajo.',
+      actionLabel: 'Cerrar esta sesión',
+      blockers: ['La configuración no permite continuar.'],
+      retryable: false,
+    },
+    outcome: {
+      title: 'Hay cambios pendientes', tone: 'warning', summary: 'Trabajo incompleto.',
+      facts: [], sections: [], technicalSections: [],
+    },
+  };
+
+  harness.receive({ type: 'state', state: attentionState });
+  const html = harness.elements.content.innerHTML;
+
+  assert.match(html, /La planificación se detuvo/);
+  assert.match(html, /La configuración no permite continuar/);
+  assert.match(html, /Resultado hasta ahora/);
+  assert.doesNotMatch(html, /Resultado final/);
+});
+
+test('same durable revision rerenders when a safe retry becomes available', () => {
+  const harness = createHarness();
+  const blocked = state('unchanged-revision');
+  const selected = blocked.workbench.selected;
+  selected.status = 'needs_attention';
+  selected.allowed_actions = ['start', 'archive'];
+  selected.presentation = {
+    ...selected.presentation,
+    overallState: 'attention',
+    attention: {
+      kind: 'blocked',
+      title: 'La planificación se detuvo',
+      message: 'No se llegó a modificar ningún archivo.',
+      actionLabel: 'Elegir cómo continuar',
+      blockers: [],
+      retryable: null,
+    },
+  };
+  harness.receive({ type: 'state', state: blocked });
+  assert.doesNotMatch(harness.elements.content.innerHTML, /data-action="start"/);
+
+  const refreshed = structuredClone(blocked);
+  refreshed.workbench.selected.presentation.attention.retryable = true;
+  refreshed.workbench.selected.presentation.attention.actionLabel = 'Volver a intentar';
+  harness.receive({ type: 'state', state: refreshed });
+
+  assert.match(
+    harness.elements.content.innerHTML,
+    /data-action="start"[^>]*>Volver a intentar</,
+  );
+});
+
+test('write authorization renders two direct choices without a recovery picker', () => {
+  const harness = createHarness();
+  const authorizationState = state();
+  const selected = authorizationState.workbench.selected;
+  selected.status = 'needs_attention';
+  selected.allowed_actions = ['authorize_changes', 'decline_changes', 'archive'];
+  selected.presentation = {
+    ...selected.presentation,
+    overallState: 'attention',
+    attention: {
+      kind: 'authorization',
+      title: 'Baldr necesita permiso para modificar archivos',
+      message: 'El plan está listo. Elegí si Baldr puede continuar.',
+      actionLabel: 'Elegir autorización',
+      blockers: [],
+      retryable: false,
+    },
+  };
+
+  harness.receive({ type: 'state', state: authorizationState });
+  const html = harness.elements.content.innerHTML;
+
+  assert.match(html, /data-action="authorize_changes"[^>]*>Autorizar cambios y reintentar</);
+  assert.match(html, /data-action="decline_changes"[^>]*>No autorizar</);
+  assert.doesNotMatch(html, /data-action="reconcile"/);
+  assert.doesNotMatch(html, /Qué necesita resolverse/);
 });
 
 test('webview restores the P2 draft and history view while shortcuts keep both reachable', () => {

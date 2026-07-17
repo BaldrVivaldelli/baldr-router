@@ -1686,12 +1686,25 @@ class _ShadowWorkspace:
         actual = current.by_path
         conflicts: list[dict[str, Any]] = []
         active_path = str((allow_active or {}).get("path") or "")
+        destructive_roots = {
+            path
+            for path in set(left) | set(right)
+            if (old := left.get(path)) is not None
+            and old.kind == "directory"
+            and (
+                (new := right.get(path)) is None
+                or new.kind != "directory"
+            )
+        }
         for path in sorted(set(left) | set(right) | set(actual)):
             old = left.get(path)
             new = right.get(path)
             found = actual.get(path)
             if old == new:
-                if found != old:
+                overlaps_destructive_change = any(
+                    path.startswith(root + "/") for root in destructive_roots
+                )
+                if overlaps_destructive_change and found != old:
                     conflicts.append({"path": path, "reason": "original-changed"})
                 continue
             if found == old or found == new:
@@ -1702,9 +1715,47 @@ class _ShadowWorkspace:
                 # is accepted as BALDR-owned intermediate state.
                 continue
             conflicts.append({"path": path, "reason": "original-changed"})
-        if current.root_mode not in {base.root_mode, target.root_mode}:
+        if (
+            base.root_mode != target.root_mode
+            and current.root_mode not in {base.root_mode, target.root_mode}
+        ):
             conflicts.append({"path": ".", "reason": "root-mode-changed"})
         return conflicts
+
+    def _merged_publication_target(
+        self,
+        base: ShadowManifest,
+        target: ShadowManifest,
+        current: ShadowManifest,
+    ) -> ShadowManifest:
+        """Overlay only Baldr's delta onto the current original manifest.
+
+        Paths unchanged by the shadow remain owned by the person using the
+        workspace. This lets protected publication coexist with unrelated
+        edits while same-path changes are still rejected by ``_preflight``.
+        """
+
+        merged = dict(current.by_path)
+        left = base.by_path
+        right = target.by_path
+        for path in set(left) | set(right):
+            old = left.get(path)
+            new = right.get(path)
+            if old == new:
+                continue
+            if new is None:
+                merged.pop(path, None)
+            else:
+                merged[path] = new
+        return ShadowManifest(
+            entries=tuple(merged[path] for path in sorted(merged)),
+            root_mode=(
+                target.root_mode
+                if base.root_mode != target.root_mode
+                else current.root_mode
+            ),
+            policy_fingerprint=current.policy_fingerprint,
+        )
 
     def _unmanaged_deletion_conflicts(
         self,
@@ -2444,13 +2495,18 @@ class _ShadowWorkspace:
                 },
             )
         if publication and publication.get("target_manifest") != checkpoint_digest:
-            raise ShadowStateError(
-                "A different shadow checkpoint already has a publication journal.",
-                code="shadow_publication_in_progress",
-            )
+            recorded_checkpoint = str(publication.get("checkpoint_manifest") or "")
+            if recorded_checkpoint != checkpoint_digest:
+                raise ShadowStateError(
+                    "A different shadow checkpoint already has a publication journal.",
+                    code="shadow_publication_in_progress",
+                )
         active = publication.get("active_operation") if publication else None
         conflicts = self._preflight(base, target, current, allow_active=active)
-        conflicts.extend(self._unmanaged_deletion_conflicts(current, target))
+        publication_target = self._merged_publication_target(base, target, current)
+        conflicts.extend(
+            self._unmanaged_deletion_conflicts(current, publication_target)
+        )
         if conflicts:
             state.update(
                 {
@@ -2469,7 +2525,7 @@ class _ShadowWorkspace:
                 "The original workspace changed; no shadow changes were applied.",
                 details={"conflicts": conflicts, "manifest": current.digest},
             )
-        if current.digest == target.digest:
+        if current.digest == publication_target.digest:
             active_operation = dict(publication.get("active_operation") or {})
             if active_operation:
                 ordinal = int(active_operation.get("ordinal") or 0)
@@ -2491,11 +2547,12 @@ class _ShadowWorkspace:
                 publication.update({"status": "published", "active_operation": None})
                 state["publication"] = publication
             self._write_state(state)
-            self._journal("publication_already_applied", manifest=target.digest)
+            self._journal("publication_already_applied", manifest=current.digest)
             return {
                 "ok": True,
                 "status": "already_published",
-                "manifest": target.digest,
+                "manifest": current.digest,
+                "checkpoint_manifest": checkpoint_digest,
                 "delta": delta.to_dict(),
             }
 
@@ -2517,12 +2574,18 @@ class _ShadowWorkspace:
                     "created_at": _utc_now(),
                 },
             )
+        publication_target_digest = (
+            str(publication.get("target_manifest") or "")
+            if publication.get("checkpoint_manifest") == checkpoint_digest
+            else self._save_manifest(publication_target)
+        )
         publication.update(
             {
                 "id": publication_id,
                 "status": "preflight-complete",
                 "base_manifest": str(state["base_manifest"]),
-                "target_manifest": checkpoint_digest,
+                "checkpoint_manifest": checkpoint_digest,
+                "target_manifest": publication_target_digest,
                 "backup_manifest": backup_digest,
                 "active_operation": active,
                 "completed_count": int(publication.get("completed_count") or 0),
@@ -2536,12 +2599,13 @@ class _ShadowWorkspace:
             "publication_preflight_complete",
             publication_id=publication_id,
             backup_manifest=backup_digest,
-            target_manifest=checkpoint_digest,
+            checkpoint_manifest=checkpoint_digest,
+            target_manifest=publication_target_digest,
         )
         self._apply(
             state,
             current,
-            target,
+            publication_target,
             publication_id,
             observer=observer,
         )
@@ -2550,23 +2614,30 @@ class _ShadowWorkspace:
             self.policy,
             reject_sensitive=False,
         )
-        if verified.manifest.digest != target.digest:
-            raise ShadowStateError(
-                "The original workspace did not match the checkpoint after publication.",
-                code="shadow_publication_verification_failed",
-                details={"expected": target.digest, "actual": verified.manifest.digest},
+        verification_conflicts = self._preflight(
+            current,
+            publication_target,
+            verified.manifest,
+        )
+        if verification_conflicts:
+            raise ShadowConflictError(
+                "A published path changed before verification completed.",
+                details={"conflicts": verification_conflicts},
             )
         state = self._read_state()
         publication = dict(state.get("publication") or {})
         publication.update({"status": "published", "active_operation": None, "published_at": _utc_now()})
         state.update({"publication": publication, "status": "published", "updated_at": _utc_now()})
         self._write_state(state)
-        self._journal("published", publication_id=publication_id, manifest=target.digest)
+        self._journal(
+            "published", publication_id=publication_id, manifest=verified.manifest.digest
+        )
         return {
             "ok": True,
             "status": "published",
             "publication_id": publication_id,
-            "manifest": target.digest,
+            "manifest": verified.manifest.digest,
+            "checkpoint_manifest": checkpoint_digest,
             "delta": delta.to_dict(),
         }
 
@@ -2586,7 +2657,10 @@ class _ShadowWorkspace:
             self.execution.original_root, self.policy, reject_sensitive=False
         ).manifest
         conflicts = self._preflight(backup, target, current, allow_active=publication.get("active_operation"))
-        conflicts.extend(self._unmanaged_deletion_conflicts(current, backup))
+        rollback_target = self._merged_publication_target(target, backup, current)
+        conflicts.extend(
+            self._unmanaged_deletion_conflicts(current, rollback_target)
+        )
         if conflicts:
             raise ShadowConflictError(
                 "The original workspace changed after publication; rollback is unsafe.",
@@ -2601,14 +2675,19 @@ class _ShadowWorkspace:
         self._apply(
             state,
             current,
-            backup,
+            rollback_target,
             rollback_id,
             observer=None,
         )
         verified = scan_workspace(
             self.execution.original_root, self.policy, reject_sensitive=False
         ).manifest
-        if verified.digest != backup.digest:
+        verification_conflicts = self._preflight(
+            current,
+            rollback_target,
+            verified,
+        )
+        if verification_conflicts:
             raise ShadowStateError("Rollback verification failed.")
         state = self._read_state()
         publication = dict(state.get("publication") or {})
@@ -2616,7 +2695,11 @@ class _ShadowWorkspace:
         state.update({"publication": publication, "status": "rolled-back", "updated_at": _utc_now()})
         self._write_state(state)
         self._journal("rolled_back", rollback_id=rollback_id, manifest=backup.digest)
-        return {"ok": True, "status": "rolled_back", "manifest": backup.digest}
+        return {
+            "ok": True,
+            "status": "rolled_back",
+            "manifest": verified.digest,
+        }
 
     def inspect(self) -> dict[str, Any]:
         state = self._read_state()

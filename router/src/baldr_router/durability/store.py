@@ -1376,6 +1376,7 @@ class DurableStore:
         *,
         reason: str,
         lease: LeaseToken,
+        retry_successful_participants: bool = False,
     ) -> dict[str, Any]:
         with self.transaction(immediate=True) as connection:
             row = connection.execute(
@@ -1387,6 +1388,10 @@ class DurableStore:
             if str(row["status"]) not in {"unknown", "interrupted", "failed"}:
                 raise RuntimeError(
                     f"Step {step_id} cannot be reset from {row['status']!r}."
+                )
+            if retry_successful_participants and bool(row["can_write"]):
+                raise RuntimeError(
+                    f"Step {step_id} cannot replay successful participants because it can write."
                 )
             now = utc_now_iso()
             connection.execute(
@@ -1403,16 +1408,22 @@ class DurableStore:
                 UPDATE step_participants
                 SET status='pending', result_artifact_id=NULL, error_code=NULL,
                     error_reason=NULL, updated_at=?
-                WHERE step_id=? AND status IN ('unknown','interrupted','failed','cancelled')
+                WHERE step_id=? AND (
+                    status IN ('unknown','interrupted','failed','cancelled')
+                    OR (? = 1 AND status = 'succeeded')
+                )
                 """,
-                (now, step_id),
+                (now, step_id, 1 if retry_successful_participants else 0),
             )
             self._event(
                 connection,
                 run_id=str(row["run_id"]),
                 step_id=step_id,
                 event_type="step.retry_prepared",
-                payload={"reason": reason},
+                payload={
+                    "reason": reason,
+                    "retry_successful_participants": retry_successful_participants,
+                },
             )
             updated = connection.execute(
                 "SELECT * FROM workflow_steps WHERE id = ?", (step_id,)
@@ -2979,7 +2990,8 @@ class DurableStore:
         run_row = connection.execute(
             """
             SELECT id, workflow_name, status, current_step_id, final_artifact_id,
-                   error_code, created_at, updated_at, completed_at, recovery_count
+                   error_code, reconciliation_json, created_at, updated_at,
+                   completed_at, recovery_count
             FROM workflow_runs WHERE id = ?
             """,
             (run_id,),
@@ -2987,6 +2999,32 @@ class DurableStore:
         if run_row is None:
             raise KeyError(run_id)
         run = dict(run_row)
+        raw_reconciliation = _parse_json(run.pop("reconciliation_json", None), {})
+        public_reconciliation_actions = {
+            "authorize_changes",
+            "decline_changes",
+            "resume_from_checkpoint",
+            "accept_existing_changes",
+            "discard_worktree",
+            "inspect_shadow",
+            "continue_from_shadow",
+            "apply_shadow_changes",
+            "discard_shadow",
+            "mark_failed",
+        }
+        if isinstance(raw_reconciliation, dict):
+            allowed_actions = [
+                str(action)
+                for action in raw_reconciliation.get("allowed_actions") or []
+                if str(action) in public_reconciliation_actions
+            ]
+            reason = str(raw_reconciliation.get("reason") or "")[:160]
+            run["reconciliation"] = {
+                "reason": reason,
+                "allowed_actions": list(dict.fromkeys(allowed_actions)),
+            }
+        else:
+            run["reconciliation"] = {}
         run["final"] = self._load_public_json_artifact(
             run.pop("final_artifact_id", None)
         )

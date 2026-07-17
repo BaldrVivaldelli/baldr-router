@@ -39,6 +39,48 @@ def test_sqlite_migrations_upgrade_v1_to_latest(tmp_path: Path):
         row[1] for row in store.connect().execute("PRAGMA table_info(workflow_runs)").fetchall()
     }
     assert {"resume_token", "recovery_policy", "lease_epoch", "request_fingerprint"}.issubset(columns)
+    turn_columns = {
+        row[1]
+        for row in store.connect().execute("PRAGMA table_info(work_item_turns)").fetchall()
+    }
+    assert {
+        "item_id",
+        "ordinal",
+        "item_revision",
+        "request_artifact_id",
+        "context_artifact_id",
+        "run_id",
+        "source",
+    }.issubset(turn_columns)
+
+
+def test_conversation_migration_preserves_published_schema_history(
+    tmp_path: Path,
+) -> None:
+    migrations = {migration.version: migration for migration in MIGRATIONS}
+    assert migrations[10].name == "protected-workspace-durable-models"
+    assert migrations[10].checksum == (
+        "f0f37a74b07f9772444779ee8f773670149cd9a1fecb120f41458fbe3946717f"
+    )
+    assert migrations[11].name == "durable-provider-process-trees"
+    assert migrations[11].checksum == (
+        "1636773896cd2019dfadf11e71ef5c6f957fd85e05619c2c74c646bcc0ba7a9c"
+    )
+    assert migrations[12].name == "durable-work-item-conversation-turns"
+
+    connection = sqlite3.connect(tmp_path / "existing.sqlite3")
+    apply_migrations(connection, MIGRATIONS[:11])
+    apply_migrations(connection)
+    versions = [
+        row[0]
+        for row in connection.execute(
+            "SELECT version FROM schema_migrations ORDER BY version"
+        )
+    ]
+    assert versions == list(range(1, 13))
+    assert connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='work_item_turns'"
+    ).fetchone()
 
 
 def test_state_machine_rejects_invalid_transition():
@@ -75,6 +117,94 @@ def test_event_journal_and_materialized_state_are_transactionally_consistent(tmp
     event_types = [event["event_type"] for event in snapshot["events"]]
     assert event_types[:2] == ["workflow.created", "workflow.running"]
     assert event_types[-1] == "workflow.approved"
+
+
+def test_read_only_retry_can_replay_a_successful_participant(tmp_path: Path) -> None:
+    store = DurableStore(path=tmp_path / "state.sqlite3")
+    _create_run(store)
+    lease = store.acquire_lease("run-1", "worker", 30)
+    assert lease is not None
+    store.transition_run("run-1", "running", lease=lease)
+    step = store.create_step(
+        run_id="run-1",
+        step_key="architect.plan",
+        phase="architect",
+        sequence_number=10,
+        round_number=0,
+        strategy="first-success",
+        min_successes=1,
+        can_write=False,
+        sandbox="read-only",
+        lease=lease,
+    )
+    store.transition_step(step["id"], "dispatching", lease=lease)
+    store.transition_step(step["id"], "running", lease=lease)
+    participant = store.create_participant(
+        step_id=step["id"],
+        ordinal=0,
+        profile={"name": "architect", "provider": "codex"},
+        lease=lease,
+    )
+    store.transition_participant(participant["id"], "dispatching", lease=lease)
+    store.transition_participant(participant["id"], "running", lease=lease)
+    artifact = store.store_artifact(
+        run_id="run-1", kind="architect-result", value={"status": "blocked"}
+    )
+    store.transition_participant(
+        participant["id"],
+        "succeeded",
+        result_artifact_id=artifact,
+        lease=lease,
+    )
+    store.transition_step(
+        step["id"],
+        "failed",
+        error_code="phase_report_blocked",
+        lease=lease,
+    )
+
+    store.reset_step_for_retry(
+        step["id"],
+        reason="operator authorization",
+        lease=lease,
+        retry_successful_participants=True,
+    )
+
+    retried = store.snapshot_run("run-1")["steps"][0]
+    assert retried["status"] == "pending"
+    assert retried["participants"][0]["status"] == "pending"
+    assert retried["participants"][0]["result_artifact_id"] is None
+
+
+def test_write_retry_cannot_replay_a_successful_participant(tmp_path: Path) -> None:
+    store = DurableStore(path=tmp_path / "state.sqlite3")
+    _create_run(store)
+    lease = store.acquire_lease("run-1", "worker", 30)
+    assert lease is not None
+    store.transition_run("run-1", "running", lease=lease)
+    step = store.create_step(
+        run_id="run-1",
+        step_key="implementer.implement",
+        phase="implementer",
+        sequence_number=20,
+        round_number=0,
+        strategy="first-success",
+        min_successes=1,
+        can_write=True,
+        sandbox="workspace-write",
+        lease=lease,
+    )
+    store.transition_step(step["id"], "dispatching", lease=lease)
+    store.transition_step(step["id"], "running", lease=lease)
+    store.transition_step(step["id"], "failed", lease=lease)
+
+    with pytest.raises(RuntimeError, match="cannot replay successful participants"):
+        store.reset_step_for_retry(
+            step["id"],
+            reason="unsafe replay",
+            lease=lease,
+            retry_successful_participants=True,
+        )
 
 
 def test_idempotent_run_and_attempt_creation(tmp_path: Path):

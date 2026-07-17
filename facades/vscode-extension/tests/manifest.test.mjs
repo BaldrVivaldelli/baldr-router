@@ -9,6 +9,7 @@ const manifest = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'ut
 const contract = JSON.parse(fs.readFileSync(path.join(root, 'resources', 'facade-v1.json'), 'utf8'));
 const runtimeSource = fs.readFileSync(path.join(root, 'src', 'runtime.ts'), 'utf8');
 const extensionSource = fs.readFileSync(path.join(root, 'src', 'extension.ts'), 'utf8');
+const workspaceContextSource = fs.readFileSync(path.join(root, 'src', 'workspaceContext.ts'), 'utf8');
 
 test('exposes one command palette command', () => {
   assert.deepEqual(manifest.contributes.commands.map((item) => item.command), ['baldr.open']);
@@ -65,4 +66,18 @@ test('chat completion logs only bounded work-item identity and status', () => {
   assert.doesNotMatch(extensionSource, /JSON\.stringify\(record\(result\.work_item\)\)/);
   assert.match(extensionSource, /error_code: completed\.error_code/);
   assert.doesNotMatch(extensionSource, /completed\.task|completed\.extra_context|completed\.workflow/);
+});
+
+test('chat resumes its durable item and resolves bounded VS Code context', () => {
+  assert.match(extensionSource, /latestBaldrConversation\(chatContext\)/);
+  assert.match(extensionSource, /runtime\.continueWorkItem/);
+  assert.match(extensionSource, /stream\.markdown\(renderRun\(result\)\)/);
+  assert.match(extensionSource, /workspaceRoot,/);
+  assert.match(workspaceContextSource, /request\.references|ChatPromptReference/);
+  assert.match(workspaceContextSource, /activeTextEditor/);
+  assert.match(workspaceContextSource, /document\.isDirty/);
+  assert.match(workspaceContextSource, /getDiagnostics/);
+  assert.match(workspaceContextSource, /promptIfAmbiguous/);
+  assert.doesNotMatch(extensionSource, /workspaceFolders\?\.\[0\]/);
+  assert.doesNotMatch(runtimeSource, /workspaceFolders\?\.\[0\]/);
 });

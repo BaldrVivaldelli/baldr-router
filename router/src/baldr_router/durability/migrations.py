@@ -399,6 +399,244 @@ MIGRATIONS: tuple[Migration, ...] = (
             "CREATE INDEX IF NOT EXISTS idx_phase_deliverables_item_recent ON phase_deliverables(work_item_id, run_ordinal DESC, item_revision DESC, created_at DESC)",
         ),
     ),
+    Migration(
+        10,
+        "protected-workspace-durable-models",
+        (
+            """
+            CREATE TABLE IF NOT EXISTS private_references (
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
+                artifact_id TEXT NOT NULL REFERENCES artifacts(id) ON DELETE RESTRICT,
+                reference_kind TEXT NOT NULL,
+                schema_version INTEGER NOT NULL CHECK(schema_version >= 1),
+                digest TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS idempotency_bindings (
+                binding_scope TEXT NOT NULL,
+                binding_key TEXT NOT NULL,
+                request_fingerprint TEXT NOT NULL,
+                target_kind TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(binding_scope, binding_key)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS frozen_run_inputs (
+                run_id TEXT PRIMARY KEY REFERENCES workflow_runs(id) ON DELETE CASCADE,
+                schema_version INTEGER NOT NULL CHECK(schema_version >= 1),
+                task_ref_id TEXT NOT NULL REFERENCES private_references(id) ON DELETE RESTRICT,
+                project_ref_id TEXT NOT NULL REFERENCES private_references(id) ON DELETE RESTRICT,
+                profiles_ref_id TEXT NOT NULL REFERENCES private_references(id) ON DELETE RESTRICT,
+                effective_config_ref_id TEXT NOT NULL REFERENCES private_references(id) ON DELETE RESTRICT,
+                workspace_mode TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS workspace_identity_records (
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
+                binding_key TEXT NOT NULL,
+                schema_version INTEGER NOT NULL CHECK(schema_version >= 1),
+                identity_fingerprint TEXT NOT NULL,
+                private_ref_id TEXT NOT NULL REFERENCES private_references(id) ON DELETE RESTRICT,
+                created_at TEXT NOT NULL,
+                UNIQUE(run_id, binding_key)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS frozen_workspace_policies (
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
+                binding_key TEXT NOT NULL,
+                schema_version INTEGER NOT NULL CHECK(schema_version >= 1),
+                policy_fingerprint TEXT NOT NULL,
+                private_ref_id TEXT NOT NULL REFERENCES private_references(id) ON DELETE RESTRICT,
+                created_at TEXT NOT NULL,
+                UNIQUE(run_id, binding_key)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS durable_checkpoint_records (
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
+                binding_key TEXT NOT NULL,
+                schema_version INTEGER NOT NULL CHECK(schema_version >= 1),
+                workspace_checkpoint_id TEXT REFERENCES workspace_checkpoints(id) ON DELETE SET NULL,
+                step_id TEXT,
+                attempt_id TEXT,
+                review_id TEXT,
+                backend TEXT NOT NULL,
+                manifest_digest TEXT,
+                approval_state TEXT NOT NULL,
+                private_ref_id TEXT REFERENCES private_references(id) ON DELETE RESTRICT,
+                created_at TEXT NOT NULL,
+                UNIQUE(run_id, binding_key)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS publication_decisions (
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
+                checkpoint_id TEXT NOT NULL,
+                schema_version INTEGER NOT NULL CHECK(schema_version >= 1),
+                idempotency_key TEXT NOT NULL,
+                request_fingerprint TEXT NOT NULL,
+                workspace_identity_fingerprint TEXT NOT NULL,
+                disposition TEXT NOT NULL CHECK(disposition IN ('apply','reject','retain')),
+                actor_ref_id TEXT NOT NULL REFERENCES private_references(id) ON DELETE RESTRICT,
+                client_id TEXT,
+                interaction_type TEXT,
+                supersedes_decision_id TEXT REFERENCES publication_decisions(id),
+                validation_status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(run_id, idempotency_key)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS durable_publication_records (
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
+                publication_id TEXT NOT NULL,
+                sequence INTEGER NOT NULL CHECK(sequence >= 0),
+                schema_version INTEGER NOT NULL CHECK(schema_version >= 1),
+                decision_id TEXT REFERENCES publication_decisions(id),
+                state TEXT NOT NULL,
+                baseline_digest TEXT,
+                checkpoint_digest TEXT,
+                workspace_identity_fingerprint TEXT,
+                plan_ref_id TEXT REFERENCES private_references(id) ON DELETE RESTRICT,
+                created_at TEXT NOT NULL,
+                UNIQUE(publication_id, sequence)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS workspace_lifecycle_records (
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
+                sequence INTEGER NOT NULL CHECK(sequence >= 0),
+                schema_version INTEGER NOT NULL CHECK(schema_version >= 1),
+                state TEXT NOT NULL,
+                retention_class TEXT NOT NULL,
+                workspace_ref_id TEXT REFERENCES private_references(id) ON DELETE RESTRICT,
+                expires_at TEXT,
+                retention_condition TEXT,
+                cleanup_attempts INTEGER NOT NULL DEFAULT 0 CHECK(cleanup_attempts >= 0),
+                last_cleanup_result TEXT,
+                created_at TEXT NOT NULL,
+                UNIQUE(run_id, sequence)
+            )
+            """,
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_workspace_identity_records_append_only
+            BEFORE UPDATE ON workspace_identity_records
+            BEGIN SELECT RAISE(ABORT, 'workspace identity records are append-only'); END
+            """,
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_frozen_workspace_policies_append_only
+            BEFORE UPDATE ON frozen_workspace_policies
+            BEGIN SELECT RAISE(ABORT, 'frozen workspace policies are append-only'); END
+            """,
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_durable_checkpoint_records_append_only
+            BEFORE UPDATE ON durable_checkpoint_records
+            BEGIN SELECT RAISE(ABORT, 'durable checkpoint records are append-only'); END
+            """,
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_publication_decisions_append_only
+            BEFORE UPDATE ON publication_decisions
+            BEGIN SELECT RAISE(ABORT, 'publication decisions are append-only'); END
+            """,
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_durable_publication_records_append_only
+            BEFORE UPDATE ON durable_publication_records
+            BEGIN SELECT RAISE(ABORT, 'durable publication records are append-only'); END
+            """,
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_workspace_lifecycle_records_append_only
+            BEFORE UPDATE ON workspace_lifecycle_records
+            BEGIN SELECT RAISE(ABORT, 'workspace lifecycle records are append-only'); END
+            """,
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_idempotency_bindings_immutable
+            BEFORE UPDATE ON idempotency_bindings
+            BEGIN SELECT RAISE(ABORT, 'idempotency bindings are immutable'); END
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_private_references_run_kind ON private_references(run_id, reference_kind)",
+            "CREATE INDEX IF NOT EXISTS idx_identity_records_run_created ON workspace_identity_records(run_id, created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_policy_records_run_created ON frozen_workspace_policies(run_id, created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_durable_checkpoints_run_created ON durable_checkpoint_records(run_id, created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_publication_decisions_run_created ON publication_decisions(run_id, created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_durable_publications_run_sequence ON durable_publication_records(run_id, publication_id, sequence)",
+            "CREATE INDEX IF NOT EXISTS idx_lifecycle_records_run_sequence ON workspace_lifecycle_records(run_id, sequence)",
+        ),
+    ),
+    Migration(
+        11,
+        "durable-provider-process-trees",
+        (
+            """
+            CREATE TABLE IF NOT EXISTS provider_process_trees (
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
+                attempt_id TEXT NOT NULL REFERENCES step_attempts(id) ON DELETE CASCADE,
+                root_pid INTEGER NOT NULL CHECK(root_pid > 0),
+                process_group_id INTEGER CHECK(process_group_id IS NULL OR process_group_id > 0),
+                start_token TEXT,
+                status TEXT NOT NULL CHECK(status IN ('running','terminated','termination_failed')),
+                exit_code INTEGER,
+                forced INTEGER NOT NULL DEFAULT 0 CHECK(forced IN (0, 1)),
+                registered_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                terminated_at TEXT,
+                UNIQUE(run_id, attempt_id, root_pid, start_token)
+            )
+            """,
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_provider_process_tree_attempt_run_insert
+            BEFORE INSERT ON provider_process_trees
+            WHEN NOT EXISTS (
+                SELECT 1 FROM step_attempts a
+                JOIN step_participants p ON p.id = a.participant_id
+                JOIN workflow_steps s ON s.id = p.step_id
+                WHERE a.id = NEW.attempt_id AND s.run_id = NEW.run_id
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'provider process attempt belongs to another run');
+            END
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_provider_process_trees_run_status ON provider_process_trees(run_id, status)",
+            "CREATE INDEX IF NOT EXISTS idx_provider_process_trees_attempt ON provider_process_trees(attempt_id, registered_at)",
+        ),
+    ),
+    Migration(
+        12,
+        "durable-work-item-conversation-turns",
+        (
+            """
+            CREATE TABLE IF NOT EXISTS work_item_turns (
+                id TEXT PRIMARY KEY,
+                item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE,
+                ordinal INTEGER NOT NULL CHECK(ordinal >= 1),
+                item_revision INTEGER NOT NULL CHECK(item_revision >= 1),
+                request_artifact_id TEXT NOT NULL,
+                context_artifact_id TEXT,
+                run_id TEXT REFERENCES workflow_runs(id) ON DELETE SET NULL,
+                source TEXT NOT NULL DEFAULT 'unknown',
+                created_at TEXT NOT NULL,
+                UNIQUE(item_id, ordinal),
+                UNIQUE(item_id, item_revision)
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_work_item_turns_item_order ON work_item_turns(item_id, ordinal)",
+            "CREATE INDEX IF NOT EXISTS idx_work_item_turns_run ON work_item_turns(run_id)",
+        ),
+    ),
 
 )
 
