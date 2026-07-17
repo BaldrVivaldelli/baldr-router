@@ -1,0 +1,29 @@
+{
+  "contract": "baldr-agent-registry",
+  "version": 1,
+  "agents": [
+    {
+      "ref": "local://kiro/baldr-worker@1.0.0",
+      "digest": "sha256:7e4ed0661ea2e464e7eb2ed17e24281c17a8a2ef39cde1dfcf41a8bd1d8c4b75",
+      "owner": "local-development",
+      "transport": "provider",
+      "target": {
+        "provider": "kiro-cli",
+        "agent": "baldr-worker",
+        "effort": "high",
+        "runner": "cli"
+      },
+      "capabilities": [
+        "workspace.read",
+        "workspace.write"
+      ],
+      "input_schema": "baldr.Task/v1",
+      "output_schema": "baldr.StructuredReport/v1",
+      "execution": {
+        "effect_mode": "workspace-write",
+        "supports_sessions": false,
+        "supports_cancellation": true
+      }
+    }
+  ]
+}

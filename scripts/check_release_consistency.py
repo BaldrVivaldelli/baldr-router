@@ -184,6 +184,22 @@ def check_source_consistency(root: Path = ROOT) -> str:
                     f"Generated contract schema is stale: {schema.relative_to(root)}"
                 )
 
+    for schema_name in (
+        "agent-registry-v1.schema.json",
+        "agent-transport-http-v1.schema.json",
+        "agent-manager-v1.schema.json",
+    ):
+        canonical = json.loads(
+            (root / "contracts" / schema_name).read_text(encoding="utf-8")
+        )
+        packaged_path = (
+            root / "router" / "src" / "baldr_router" / "contracts" / schema_name
+        )
+        if json.loads(packaged_path.read_text(encoding="utf-8")) != canonical:
+            raise ReleaseConsistencyError(
+                f"Generated contract schema is stale: {packaged_path.relative_to(root)}"
+            )
+
     return version
 
 
@@ -222,6 +238,9 @@ def check_artifact_consistency(
         "baldr_router/contracts/phase-deliverable-page-v1.schema.json",
         "baldr_router/contracts/phase-deliverable-index-page-v1.schema.json",
         "baldr_router/contracts/work-item-progress-v1.schema.json",
+        "baldr_router/contracts/agent-registry-v1.schema.json",
+        "baldr_router/contracts/agent-transport-http-v1.schema.json",
+        "baldr_router/contracts/agent-manager-v1.schema.json",
         f"baldr_router-{release}.dist-info/METADATA",
     }
     _require_members(core_wheel, wheel_members, label="Core wheel")
@@ -249,6 +268,15 @@ def check_artifact_consistency(
     canonical_deliverable_index_page_schema = json.loads(
         (root / "contracts" / "phase-deliverable-index-page-v1.schema.json").read_text(encoding="utf-8")
     )
+    canonical_agent_registry_schema = json.loads(
+        (root / "contracts" / "agent-registry-v1.schema.json").read_text(encoding="utf-8")
+    )
+    canonical_agent_http_schema = json.loads(
+        (root / "contracts" / "agent-transport-http-v1.schema.json").read_text(encoding="utf-8")
+    )
+    canonical_agent_manager_schema = json.loads(
+        (root / "contracts" / "agent-manager-v1.schema.json").read_text(encoding="utf-8")
+    )
     with zipfile.ZipFile(core_wheel) as wheel_archive:
         metadata = wheel_archive.read(f"baldr_router-{release}.dist-info/METADATA").decode()
         wheel_schema = json.loads(
@@ -263,6 +291,15 @@ def check_artifact_consistency(
         wheel_deliverable_index_page_schema = json.loads(
             wheel_archive.read("baldr_router/contracts/phase-deliverable-index-page-v1.schema.json")
         )
+        wheel_agent_registry_schema = json.loads(
+            wheel_archive.read("baldr_router/contracts/agent-registry-v1.schema.json")
+        )
+        wheel_agent_http_schema = json.loads(
+            wheel_archive.read("baldr_router/contracts/agent-transport-http-v1.schema.json")
+        )
+        wheel_agent_manager_schema = json.loads(
+            wheel_archive.read("baldr_router/contracts/agent-manager-v1.schema.json")
+        )
     if f"Version: {release}\n" not in metadata.replace("\r\n", "\n"):
         raise ReleaseConsistencyError("Core wheel metadata does not match the release version")
     if wheel_schema != canonical_schema:
@@ -273,6 +310,12 @@ def check_artifact_consistency(
         raise ReleaseConsistencyError("Core wheel contains a stale deliverable page schema")
     if wheel_deliverable_index_page_schema != canonical_deliverable_index_page_schema:
         raise ReleaseConsistencyError("Core wheel contains a stale deliverable index schema")
+    if wheel_agent_registry_schema != canonical_agent_registry_schema:
+        raise ReleaseConsistencyError("Core wheel contains a stale agent registry schema")
+    if wheel_agent_http_schema != canonical_agent_http_schema:
+        raise ReleaseConsistencyError("Core wheel contains a stale agent HTTP schema")
+    if wheel_agent_manager_schema != canonical_agent_manager_schema:
+        raise ReleaseConsistencyError("Core wheel contains a stale Agent Manager schema")
 
     with zipfile.ZipFile(vsix) as vsix_archive:
         runtime_wheels = sorted(

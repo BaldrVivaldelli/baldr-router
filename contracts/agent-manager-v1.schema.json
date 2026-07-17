@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://baldr.dev/contracts/agent-manager-v1.schema.json",
+  "title": "Baldr Agent Manager HTTP responses v1",
+  "oneOf": [
+    { "$ref": "#/$defs/resolution" },
+    { "$ref": "#/$defs/catalog" },
+    { "$ref": "#/$defs/health" },
+    { "$ref": "#/$defs/admin" }
+  ],
+  "$defs": {
+    "resolution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "version", "manifest"],
+      "properties": {
+        "contract": { "const": "baldr-agent-resolution" },
+        "version": { "const": 1 },
+        "manifest": {
+          "$ref": "agent-registry-v1.schema.json#/$defs/agent"
+        }
+      }
+    },
+    "catalog": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "version", "agents"],
+      "properties": {
+        "contract": { "const": "baldr-agent-catalog" },
+        "version": { "const": 1 },
+        "agents": {
+          "type": "array",
+          "maxItems": 1000,
+          "items": {
+            "$ref": "agent-registry-v1.schema.json#/$defs/agent"
+          }
+        }
+      }
+    },
+    "health": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "version", "status"],
+      "properties": {
+        "contract": { "const": "baldr-agent-manager-health" },
+        "version": { "const": 1 },
+        "status": { "enum": ["ok", "degraded"] },
+        "service_version": { "type": "string", "maxLength": 128 },
+        "registry": { "type": "string", "maxLength": 128 },
+        "total": { "type": "integer", "minimum": 0 },
+        "enabled": { "type": "integer", "minimum": 0 },
+        "revoked": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "admin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "version", "ok", "reference"],
+      "properties": {
+        "contract": { "const": "baldr-agent-manager-admin" },
+        "version": { "const": 1 },
+        "ok": { "const": true },
+        "reference": { "type": "string", "maxLength": 512 },
+        "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "created": { "type": "boolean" },
+        "enabled": { "type": "boolean" },
+        "revoked": { "type": "boolean" }
+      }
+    }
+  }
+}

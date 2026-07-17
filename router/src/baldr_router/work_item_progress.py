@@ -1749,6 +1749,10 @@ def compact_execution_profiles(value: Mapping[str, Any] | None) -> dict[str, Any
             "effort": _safe_text(profile.get("effort"), limit=64),
             "enabled": bool(profile.get("enabled", True)),
             "description": _safe_text(profile.get("description"), limit=400),
+            "agent_ref": _safe_text(profile.get("agent_ref"), limit=320),
+            "agent_manifest_digest": _safe_text(
+                profile.get("agent_manifest_digest"), limit=71
+            ),
         }
 
     roles: dict[str, dict[str, Any]] = {}

@@ -417,12 +417,55 @@ test('catalog failure and selection cancellation leave the current team untouche
   assert.doesNotMatch(fallback, /upsertExecutionProfile|setWorkspacePreferences/);
 });
 
+test('external agents are loaded explicitly and assigned by immutable reference', () => {
+  const runtimeCatalog = section(runtimeSource, '  async agentCatalog(', '  qualificationProfile(');
+  const chooser = section(source, '  private async chooseExternalAgent(', '  private async manageExternalAgents(');
+
+  assert.match(runtimeCatalog, /\['agent-catalog'\]/);
+  assert.match(chooser, /this\.runtime\.agentCatalog\(this\.requireWorkspace\(\), token\)/);
+  assert.match(chooser, /capabilities\.includes\('workspace\.read'\)/);
+  assert.match(chooser, /capabilities\.includes\('workspace\.write'\)/);
+  assert.match(chooser, /text\(agent\.effect_mode\) === 'workspace-write'/);
+  assert.match(chooser, /agent_manifest_digest: digest/);
+  assert.match(chooser, /agent_ref: reference/);
+  assert.match(chooser, /this\.runtime\.upsertExecutionProfile\(root, \{/);
+  assert.match(chooser, /this\.runtime\.setWorkspacePreferences\(root, \{/);
+  assert.match(chooser, /roleProfiles\[role\.id\] = \[profileName\]/);
+  assert.match(chooser, /No pudimos consultar los agentes registrados\. Tu equipo no cambió\./);
+  assert.doesNotMatch(chooser, /target\.|authorization_env|endpoint/);
+});
+
+test('external agent UX exposes health, lifecycle, local management, and safe provider restore', () => {
+  const chooser = section(source, '  private async chooseExternalAgent(', '  private async manageExternalAgents(');
+  const manager = section(source, '  private async manageExternalAgents(', '  private async registerExternalAgent(');
+  const register = section(source, '  private async registerExternalAgent(', '  private async restoreStandardProvider(');
+  const restore = section(source, '  private async restoreStandardProvider(', '  private currentRoleProfile(');
+  const runtimeCatalog = section(runtimeSource, '  async agentCatalog(', '  qualificationProfile(');
+
+  assert.match(chooser, /text\(agent\.version\)/);
+  assert.match(chooser, /const stateLabel = agent\.enabled === false/);
+  assert.match(chooser, /stateLabel,/);
+  assert.match(chooser, /last_success/);
+  assert.match(chooser, /selected\.agent\.ready === false/);
+  assert.match(manager, /\['inspect', text\(agent\.ref\)\]/);
+  assert.match(manager, /'disable' : 'enable'/);
+  assert.match(manager, /id: 'remove'/);
+  assert.match(register, /'publish', reference/);
+  assert.match(register, /workspace\.write/);
+  assert.match(restore, /provider-codex-default|profileName = `provider-/);
+  assert.match(restore, /provider: provider\.id/);
+  assert.match(restore, /roleProfiles\[role\.id\] = \[profileName\]/);
+  assert.match(runtimeCatalog, /\['agent', \.\.\.args\]/);
+  assert.match(runtimeCatalog, /--workspace/);
+});
+
 test('team chip resolves actual named or inline role models and exposes role details', () => {
   assert.match(source, /function shortModelLabel\(value\)/);
   assert.match(source, /\(sol\|terra\|luna\|spark\)/);
   assert.match(source, /function configuredRole\(role\)/);
   assert.match(source, /profiles\.execution_profiles\[selected\]/);
   assert.match(source, /profiles\.resolved_roles/);
+  assert.match(source, /config\.agent_ref\|\|config\.model/);
   assert.match(source, /const modelNames=\[\.\.\.new Set\(/);
   assert.match(source, /modelNames\.join\(' · '\)/);
   assert.match(source, /Planificación/);

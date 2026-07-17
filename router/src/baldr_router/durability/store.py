@@ -917,6 +917,79 @@ class DurableStore:
         )
         return dict(row) if row is not None else None
 
+    def active_runs_using_agent(self, agent_ref: str) -> list[str]:
+        """Return nonterminal runs whose frozen snapshot references an agent."""
+
+        reference = str(agent_ref or "").strip()
+        if not reference:
+            return []
+        rows = self.connect().execute(
+            """
+            SELECT id, config_snapshot_json
+            FROM workflow_runs
+            WHERE status NOT IN ('approved', 'needs_changes', 'blocked', 'failed', 'cancelled')
+            ORDER BY created_at ASC
+            """
+        ).fetchall()
+
+        def contains(value: Any) -> bool:
+            if isinstance(value, dict):
+                if str(value.get("agent_ref") or "") == reference:
+                    return True
+                return any(contains(item) for item in value.values())
+            if isinstance(value, list):
+                return any(contains(item) for item in value)
+            return False
+
+        active = {
+            str(row["id"])
+            for row in rows
+            if contains(_parse_json(row["config_snapshot_json"], {}))
+        }
+        participant_rows = self.connect().execute(
+            """
+            SELECT DISTINCT r.id
+            FROM workflow_runs r
+            JOIN workflow_steps s ON s.run_id = r.id
+            JOIN step_participants p ON p.step_id = s.id
+            WHERE p.agent_ref = ?
+              AND r.status NOT IN ('approved', 'needs_changes', 'blocked', 'failed', 'cancelled')
+            """,
+            (reference,),
+        ).fetchall()
+        active.update(str(row["id"]) for row in participant_rows)
+        return sorted(active)
+
+    def agent_execution_status(self, agent_ref: str) -> dict[str, Any]:
+        """Return bounded latest/last-success metadata without provider payloads."""
+
+        reference = str(agent_ref or "").strip()
+        if not reference:
+            return {"last_execution": None, "last_success": None}
+
+        def latest(*, succeeded: bool) -> dict[str, Any] | None:
+            condition = "AND p.status = 'succeeded'" if succeeded else ""
+            row = self.connect().execute(
+                f"""
+                SELECT r.id AS run_id, r.status AS run_status,
+                       p.status AS participant_status, p.error_code,
+                       p.updated_at
+                FROM step_participants p
+                JOIN workflow_steps s ON s.id = p.step_id
+                JOIN workflow_runs r ON r.id = s.run_id
+                WHERE p.agent_ref = ? {condition}
+                ORDER BY p.updated_at DESC
+                LIMIT 1
+                """,
+                (reference,),
+            ).fetchone()
+            return dict(row) if row is not None else None
+
+        return {
+            "last_execution": latest(succeeded=False),
+            "last_success": latest(succeeded=True),
+        }
+
     def get_run_by_resume_token(self, resume_token: str) -> dict[str, Any] | None:
         row = (
             self.connect()
@@ -1509,8 +1582,9 @@ class DurableStore:
                 INSERT INTO step_participants(
                     id, step_id, ordinal, profile_name, provider, model,
                     reasoning_effort, agent, effort, runner, session_scope,
+                    agent_ref, agent_manifest_digest, agent_transport, agent_registry,
                     status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
                 """,
                 (
                     participant_id,
@@ -1524,6 +1598,10 @@ class DurableStore:
                     profile.get("effort") or None,
                     profile.get("runner") or None,
                     profile.get("session_scope") or None,
+                    profile.get("agent_ref") or None,
+                    profile.get("agent_manifest_digest") or None,
+                    profile.get("agent_transport") or None,
+                    profile.get("agent_registry") or None,
                     now,
                     now,
                 ),
@@ -1540,6 +1618,8 @@ class DurableStore:
                 payload={
                     "participant_id": participant_id,
                     "profile": profile.get("name"),
+                    "agent_ref": profile.get("agent_ref"),
+                    "agent_manifest_digest": profile.get("agent_manifest_digest"),
                 },
             )
             row = connection.execute(
@@ -2971,7 +3051,28 @@ class DurableStore:
             value = json.loads(raw.decode("utf-8", errors="replace"))
         except (UnicodeError, json.JSONDecodeError):
             return None
-        return dict(value) if isinstance(value, dict) else None
+        if not isinstance(value, dict):
+            return None
+
+        def public_value(item: Any) -> Any:
+            if isinstance(item, dict):
+                return {
+                    str(key): public_value(nested)
+                    for key, nested in item.items()
+                    if str(key) != "write_request"
+                }
+            if isinstance(item, list):
+                return [
+                    public_value(nested)
+                    for nested in item
+                    if not (
+                        isinstance(nested, dict)
+                        and str(nested.get("key") or "") == "write_request"
+                    )
+                ]
+            return item
+
+        return public_value(value)
 
     def snapshot_run_public(
         self,

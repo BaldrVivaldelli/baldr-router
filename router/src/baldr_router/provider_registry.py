@@ -268,6 +268,8 @@ def provider_isolation_status(
     can_write: bool,
     runner: str = "",
     sandbox: str = "",
+    agent_ref: str = "",
+    agent_transport: str = "",
 ) -> dict[str, Any]:
     """Prove that a provider invocation stays inside an isolated workspace.
 
@@ -276,6 +278,26 @@ def provider_isolation_status(
     an unrestricted sandbox. Direct modes remain available as the explicit
     reduced-guarantee escape hatch.
     """
+
+    normalized_agent_transport = str(agent_transport or "").strip().lower()
+    if agent_ref and normalized_agent_transport != "provider":
+        if normalized_agent_transport == "http-json" and not can_write:
+            return {
+                "ok": True,
+                "provider": provider,
+                "agent_ref": agent_ref,
+                "agent_transport": normalized_agent_transport,
+                "sandbox": str(sandbox or "").strip().lower(),
+                "enforcement": "gateway-no-workspace-path",
+            }
+        return {
+            "ok": False,
+            "provider": provider,
+            "agent_ref": agent_ref,
+            "agent_transport": normalized_agent_transport or "unknown",
+            "reason": "external-agent-workspace-boundary-not-proven",
+            "enforcement": "unsupported",
+        }
 
     adapter = get_provider_registry().resolve(provider)
     if adapter is None:
@@ -335,6 +357,8 @@ def run_provider_role(
     durable_run_id: str = "",
     durable_step_id: str = "",
     durable_attempt_id: str = "",
+    agent_ref: str = "",
+    agent_manifest_digest: str = "",
     activity_sink: ProviderActivitySink | None = None,
 ) -> dict[str, Any]:
     request = ProviderRunRequest(
@@ -359,6 +383,82 @@ def run_provider_role(
         durable_attempt_id=durable_attempt_id,
         activity_sink=activity_sink,
     )
+    if agent_ref:
+        from .agent_api import (
+            AgentContractError,
+            AgentDigestMismatchError,
+            AgentInvocation,
+            AgentNotFoundError,
+            AgentTransportError,
+        )
+        from .agent_gateway import AgentPolicyError, get_agent_gateway
+
+        requested_capabilities = (
+            ("workspace.read", "workspace.write")
+            if role.can_write
+            else ("workspace.read",)
+        )
+        invocation = AgentInvocation(
+            cwd=cwd,
+            task=prompt,
+            workflow=workflow,
+            step_name=role_name,
+            report_kind=report_kind,
+            can_write=bool(role.can_write),
+            sandbox=role.sandbox,
+            profile_name=profile_name,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            agent=agent,
+            effort=effort,
+            runner=runner,
+            session_scope=session_scope,
+            session_key=session_key,
+            resume_session_id=resume_session_id,
+            durable_run_id=durable_run_id,
+            durable_step_id=durable_step_id,
+            durable_attempt_id=durable_attempt_id,
+            extra_env=extra_env,
+            requested_capabilities=requested_capabilities,
+            activity_sink=activity_sink,
+        )
+        try:
+            return get_agent_gateway().invoke(
+                agent_ref,
+                invocation,
+                expected_digest=agent_manifest_digest,
+            )
+        except AgentDigestMismatchError as error:
+            code, retryable = "agent_manifest_digest_mismatch", False
+            reason = str(error)
+        except AgentNotFoundError as error:
+            code, retryable = "agent_not_found", True
+            reason = str(error)
+        except AgentPolicyError as error:
+            code, retryable = "agent_policy_denied", False
+            reason = str(error)
+        except AgentTransportError as error:
+            code, retryable = "agent_transport_failed", error.retryable
+            reason = str(error)
+        except AgentContractError as error:
+            code, retryable = "agent_contract_invalid", False
+            reason = str(error)
+        return {
+            "ok": False,
+            "status": "failed",
+            "provider": provider,
+            "role": role_name,
+            "workflow": workflow,
+            "profile_name": profile_name,
+            "agent_ref": agent_ref,
+            "agent_manifest_digest": agent_manifest_digest or None,
+            "reason": reason,
+            "error": {
+                "code": code,
+                "message": reason,
+                "retryable": retryable,
+            },
+        }
     return get_provider_registry().run(provider=provider, request=request)
 
 

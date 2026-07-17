@@ -1031,6 +1031,7 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
       { id: 'git', label: '$(shield) Protección de cambios', description: 'Elegir cómo guardar y recuperar el trabajo' },
       { id: 'preset', label: '$(dashboard) Nivel de detalle', description: 'Rápido, estándar, detallado o a medida' },
       { id: 'roles', label: '$(organization) Equipo de Baldr', description: 'Elegir cómo se reparte el trabajo' },
+      { id: 'agents', label: '$(remote-explorer) Agentes externos', description: 'Consultar y asignar agentes registrados de forma segura' },
       { id: 'profile-create', label: '$(tools) Crear una configuración avanzada', description: 'Elegir proveedor y modelo paso a paso' },
       { id: 'context', label: '$(sparkle) Ayuda adicional', description: 'Buscar información útil cuando haga falta' },
       { id: 'status', label: '$(refresh) Actualizar', description: 'Volver a cargar las sesiones y su estado' },
@@ -1053,6 +1054,7 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
       case 'git': await this.chooseSafetyMode(); break;
       case 'preset': await this.choosePreset(); break;
       case 'roles': await this.chooseRoleProfiles(); break;
+      case 'agents': await this.chooseExternalAgent(); break;
       case 'profile-create': await this.createExecutionProfile(); break;
       case 'context': await this.chooseContextMode(); break;
       case 'status': await this.refresh(); break;
@@ -1171,6 +1173,21 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
         description: 'Elegir entre las opciones que ya tenés preparadas',
       },
       {
+        id: 'external-agents',
+        label: '$(remote-explorer) Usar un agente externo registrado',
+        description: 'Consultar el catálogo y asignarlo sin editar archivos de configuración',
+      },
+      {
+        id: 'manage-agents',
+        label: '$(server-process) Administrar agentes externos',
+        description: 'Registrar versiones, inspeccionar, habilitar, deshabilitar o eliminar',
+      },
+      {
+        id: 'restore-provider',
+        label: '$(discard) Volver a Codex o Kiro normal',
+        description: 'Quitar el agente externo de una etapa sin afectar las demás',
+      },
+      {
         id: 'advanced',
         label: '$(settings-gear) Crear una configuración avanzada',
         description: 'Elegir otro proveedor o escribir los datos manualmente',
@@ -1182,7 +1199,311 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
     });
     if (choice?.id === 'codex-models') await this.chooseCodexTeamModels();
     else if (choice?.id === 'saved') await this.chooseSavedRoleProfiles();
+    else if (choice?.id === 'external-agents') await this.chooseExternalAgent();
+    else if (choice?.id === 'manage-agents') await this.manageExternalAgents();
+    else if (choice?.id === 'restore-provider') await this.restoreStandardProvider();
     else if (choice?.id === 'advanced') await this.createExecutionProfile();
+  }
+
+  private async chooseExternalAgent(): Promise<void> {
+    const role = await vscode.window.showQuickPick([
+      { id: 'architect' as BaldrRole, label: 'Planificación', description: 'Necesita acceso de lectura' },
+      { id: 'reviewer' as BaldrRole, label: 'Revisión', description: 'Necesita acceso de lectura' },
+      { id: 'implementer' as BaldrRole, label: 'Ejecución', description: 'Necesita acceso de escritura explícito' },
+    ], {
+      title: 'Etapa para el agente externo',
+      placeHolder: 'Elegí dónde participará el agente',
+      ignoreFocusOut: true,
+    });
+    if (!role) return;
+
+    let catalog: JsonRecord;
+    try {
+      catalog = await vscode.window.withProgress({
+        location: vscode.ProgressLocation.Notification,
+        title: 'Consultando agentes registrados…',
+        cancellable: true,
+      }, (_progress, token) => this.runtime.agentCatalog(this.requireWorkspace(), token));
+    } catch (error) {
+      if (error instanceof vscode.CancellationError) return;
+      this.output.appendLine(`[agentes] ${error instanceof Error ? error.message : String(error)}`);
+      void vscode.window.showErrorMessage('No pudimos consultar los agentes registrados. Tu equipo no cambió.');
+      return;
+    }
+    if (catalog.ok !== true) {
+      const reason = this.resultReason(catalog);
+      this.output.appendLine(`[agentes] ${reason}`);
+      void vscode.window.showErrorMessage(`No pudimos consultar los agentes registrados. ${reason}`);
+      return;
+    }
+    const needsWrite = role.id === 'implementer';
+    const agents = (Array.isArray(catalog.agents) ? catalog.agents : [])
+      .map(record)
+      .filter((agent) => {
+        const capabilities = Array.isArray(agent.capabilities) ? agent.capabilities.map(String) : [];
+        return capabilities.includes('workspace.read')
+          && (!needsWrite || (capabilities.includes('workspace.write') && text(agent.effect_mode) === 'workspace-write'));
+      });
+    if (!agents.length) {
+      void vscode.window.showInformationMessage(
+        needsWrite
+          ? 'No hay agentes registrados con permiso explícito de escritura.'
+          : 'No hay agentes de lectura registrados.',
+      );
+      return;
+    }
+    const selected = await vscode.window.showQuickPick(agents.map((agent) => {
+      const ready = agent.ready !== false && agent.enabled !== false;
+      const lastSuccess = record(agent.last_success);
+      const stateLabel = agent.enabled === false
+        ? 'Deshabilitado'
+        : ready ? 'Listo' : 'No disponible';
+      return {
+      agent,
+      label: `${ready ? '$(check)' : '$(warning)'} ${text(agent.ref)}`,
+      description: [
+        `v${text(agent.version)}`,
+        stateLabel,
+        text(agent.owner),
+        text(agent.transport),
+      ].filter(Boolean).join(' · '),
+      detail: [
+        `Digest: ${text(agent.digest)}`,
+        lastSuccess.run_id ? `Último éxito: ${text(lastSuccess.updated_at)} · ${text(lastSuccess.run_id)}` : '',
+        ready ? '' : `Motivo: ${text(agent.reason, 'agente no disponible')}`,
+      ].filter(Boolean).join(' — '),
+    };
+    }), {
+      title: `Agente para ${role.label.toLowerCase()}`,
+      placeHolder: 'Se muestran estado, versión y digest de cada agente compatible',
+      ignoreFocusOut: true,
+    });
+    if (!selected) return;
+    if (selected.agent.ready === false || selected.agent.enabled === false) {
+      void vscode.window.showWarningMessage(
+        `No se puede asignar ${text(selected.agent.ref)}: ${text(selected.agent.reason, 'no está disponible')}.`,
+      );
+      return;
+    }
+
+    const reference = text(selected.agent.ref);
+    const digest = text(selected.agent.digest);
+    const transport = text(selected.agent.transport);
+    const suggestedName = `agent-${reference.replace('://', '-').replace('@', '-').replace(/[^A-Za-z0-9._-]/g, '-')}`.slice(0, 64);
+    const profileName = await vscode.window.showInputBox({
+      title: 'Nombre de la configuración',
+      value: suggestedName,
+      validateInput: (value) => /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(value)
+        ? undefined
+        : 'Usá entre 1 y 64 letras, números, puntos, guiones bajos o guiones.',
+      ignoreFocusOut: true,
+    });
+    if (!profileName) return;
+
+    const root = this.requireWorkspace();
+    const preferences = record(record(this.lastStatus.workbench).preferences);
+    const selectedByRole = record(preferences.role_profiles);
+    const roleProfiles: Record<string, string[]> = {};
+    for (const currentRole of BALDR_ROLES) {
+      const current = selectedByRole[currentRole];
+      if (Array.isArray(current) && current.length) roleProfiles[currentRole] = current.map(String);
+    }
+    roleProfiles[role.id] = [profileName];
+    await this.withProgress('Guardando el agente externo…', async () => {
+      const saved = await this.runtime.upsertExecutionProfile(root, {
+        name: profileName,
+        provider: `external-${transport}`,
+        agent_ref: reference,
+        agent_manifest_digest: digest,
+        description: `Agente externo ${reference}.`,
+      });
+      if (saved.ok === false) throw new Error(this.resultReason(saved));
+      const updated = await this.runtime.setWorkspacePreferences(root, {
+        preset: 'custom',
+        roleProfiles,
+      });
+      if (updated.ok === false) throw new Error(this.resultReason(updated));
+    });
+    await this.refresh();
+    void vscode.window.showInformationMessage(`${reference} quedó asignado a ${role.label.toLowerCase()}.`);
+  }
+
+  private async manageExternalAgents(): Promise<void> {
+    const root = this.requireWorkspace();
+    let catalog: JsonRecord;
+    try {
+      catalog = await this.withProgress('Consultando el catálogo de agentes…', () => this.runtime.agentCatalog(root));
+    } catch (error) {
+      void vscode.window.showErrorMessage(error instanceof Error ? error.message : String(error));
+      return;
+    }
+    const localAgents = (Array.isArray(catalog.agents) ? catalog.agents : [])
+      .map(record)
+      .filter((agent) => text(agent.source) === 'local');
+    const selected = await vscode.window.showQuickPick([
+      {
+        id: 'publish',
+        label: '$(add) Registrar una versión de agente',
+        description: 'Publica un AgentRef inmutable en el catálogo local',
+        agent: {} as JsonRecord,
+      },
+      ...localAgents.map((agent) => ({
+        id: 'agent',
+        agent,
+        label: `${agent.enabled === false ? '$(circle-slash)' : agent.ready === false ? '$(warning)' : '$(check)'} ${text(agent.ref)}`,
+        description: [`v${text(agent.version)}`, text(agent.state), text(agent.owner)].filter(Boolean).join(' · '),
+        detail: `${text(agent.digest)}${agent.reason ? ` — ${text(agent.reason)}` : ''}`,
+      })),
+    ], {
+      title: 'Administrar agentes externos',
+      placeHolder: 'Elegí una versión exacta o registrá una nueva',
+      ignoreFocusOut: true,
+    });
+    if (!selected) return;
+    if (selected.id === 'publish') {
+      await this.registerExternalAgent();
+      return;
+    }
+    const agent = selected.agent;
+    const enabled = agent.enabled !== false;
+    const action = await vscode.window.showQuickPick([
+      { id: 'inspect', label: '$(info) Inspeccionar', description: 'Ver contrato, destino y diagnóstico seguro' },
+      { id: enabled ? 'disable' : 'enable', label: enabled ? '$(circle-slash) Deshabilitar' : '$(play) Habilitar', description: enabled ? 'Impide nuevas resoluciones' : 'Permite volver a resolver esta versión' },
+      { id: 'new-version', label: '$(versions) Publicar nueva versión', description: 'Conserva esta versión y registra otro AgentRef' },
+      { id: 'remove', label: '$(trash) Eliminar del catálogo local', description: 'Sólo si está deshabilitado y ninguna sesión durable lo usa' },
+    ], { title: text(agent.ref), ignoreFocusOut: true });
+    if (!action) return;
+    if (action.id === 'new-version') {
+      await this.registerExternalAgent(agent);
+      return;
+    }
+    if (action.id === 'remove') {
+      const confirmation = await vscode.window.showWarningMessage(
+        `¿Eliminar ${text(agent.ref)} del catálogo local?`,
+        { modal: true },
+        'Eliminar',
+      );
+      if (confirmation !== 'Eliminar') return;
+    }
+    const command = action.id === 'inspect' ? ['inspect', text(agent.ref)] : [action.id, text(agent.ref)];
+    const result = await this.withProgress('Actualizando el catálogo…', () => this.runtime.manageLocalAgent(root, command));
+    if (result.ok !== true) {
+      void vscode.window.showErrorMessage(this.resultReason(result));
+      return;
+    }
+    if (action.id === 'inspect') {
+      const details = record(result.agent);
+      this.output.appendLine(`[agente] ${JSON.stringify(details, null, 2)}`);
+      void vscode.window.showInformationMessage(
+        `${text(details.ref)} · ${details.enabled === false ? 'deshabilitado' : 'habilitado'} · ${text(details.digest)}`,
+      );
+    } else {
+      await this.refresh();
+      void vscode.window.showInformationMessage(`${text(agent.ref)}: operación ${action.id} completada.`);
+    }
+  }
+
+  private async registerExternalAgent(existing: JsonRecord = {}): Promise<void> {
+    const root = this.requireWorkspace();
+    const reference = await vscode.window.showInputBox({
+      title: 'AgentRef exacto',
+      value: text(existing.ref),
+      placeHolder: 'local://equipo/revisor@1.0.0',
+      validateInput: (value) => /^[a-z][a-z0-9+.-]*:\/\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+@[A-Za-z0-9._+-]+$/.test(value)
+        ? undefined
+        : 'Usá registry://namespace/name@version.',
+      ignoreFocusOut: true,
+    });
+    if (!reference) return;
+    const owner = await vscode.window.showInputBox({
+      title: 'Propietario del agente',
+      value: text(existing.owner),
+      placeHolder: 'equipo-producto',
+      ignoreFocusOut: true,
+    });
+    if (!owner) return;
+    const kind = await vscode.window.showQuickPick([
+      { id: 'codex', label: 'Codex', description: 'Agente externo resuelto por el proveedor Codex' },
+      { id: 'kiro-cli', label: 'Kiro', description: 'Agente externo definido en Kiro CLI' },
+      { id: 'http-json', label: 'HTTP JSON', description: 'Servicio externo de sólo lectura' },
+    ], { title: 'Transporte del agente', ignoreFocusOut: true });
+    if (!kind) return;
+    const permission = await vscode.window.showQuickPick([
+      { id: 'read', label: 'Sólo lectura', description: 'Planificación o revisión' },
+      { id: 'write', label: 'Lectura y escritura', description: 'Sólo para proveedores locales que trabajan en el workspace' },
+    ], { title: 'Capacidades declaradas', ignoreFocusOut: true });
+    if (!permission) return;
+    const targets: string[] = [];
+    let transport = 'provider';
+    if (kind.id === 'http-json') {
+      transport = 'http-json';
+      if (permission.id === 'write') {
+        void vscode.window.showWarningMessage('HTTP JSON v1 es de sólo lectura. Elegí sólo lectura para ese transporte.');
+        return;
+      }
+      const endpoint = await vscode.window.showInputBox({ title: 'Endpoint HTTPS del agente', placeHolder: 'https://agents.example/invoke', ignoreFocusOut: true });
+      if (!endpoint) return;
+      targets.push(`endpoint=${endpoint}`);
+    } else if (kind.id === 'kiro-cli') {
+      const agentName = await vscode.window.showInputBox({ title: 'Nombre del agente en Kiro', placeHolder: 'mi-agente', ignoreFocusOut: true });
+      if (!agentName) return;
+      targets.push('provider=kiro-cli', `agent=${agentName}`);
+    } else {
+      targets.push('provider=codex', 'runner=exec-json');
+    }
+    const args = [
+      'publish', reference,
+      '--owner', owner,
+      '--transport', transport,
+      '--capability', 'workspace.read',
+      '--effect-mode', permission.id === 'write' ? 'workspace-write' : 'read-only',
+      ...targets.flatMap((target) => ['--target', target]),
+    ];
+    if (permission.id === 'write') args.push('--capability', 'workspace.write');
+    const result = await this.withProgress('Registrando la versión del agente…', () => this.runtime.manageLocalAgent(root, args));
+    if (result.ok !== true) {
+      void vscode.window.showErrorMessage(this.resultReason(result));
+      return;
+    }
+    await this.refresh();
+    void vscode.window.showInformationMessage(`${reference} quedó registrado sin editar agents.json manualmente.`);
+  }
+
+  private async restoreStandardProvider(): Promise<void> {
+    const role = await vscode.window.showQuickPick([
+      { id: 'architect' as BaldrRole, label: 'Planificación' },
+      { id: 'implementer' as BaldrRole, label: 'Ejecución' },
+      { id: 'reviewer' as BaldrRole, label: 'Revisión' },
+    ], { title: 'Etapa que volverá a un proveedor normal', ignoreFocusOut: true });
+    if (!role) return;
+    const provider = await vscode.window.showQuickPick([
+      { id: 'codex', label: 'Codex normal', description: 'Usa la configuración predeterminada de Codex' },
+      { id: 'kiro-cli', label: 'Kiro normal', description: 'Usa la configuración predeterminada de Kiro CLI' },
+    ], { title: `Proveedor normal para ${role.label.toLowerCase()}`, ignoreFocusOut: true });
+    if (!provider) return;
+    const root = this.requireWorkspace();
+    const profileName = `provider-${provider.id}-default`;
+    const preferences = record(record(this.lastStatus.workbench).preferences);
+    const selectedByRole = record(preferences.role_profiles);
+    const roleProfiles: Record<string, string[]> = {};
+    for (const currentRole of BALDR_ROLES) {
+      const current = selectedByRole[currentRole];
+      if (Array.isArray(current) && current.length) roleProfiles[currentRole] = current.map(String);
+    }
+    roleProfiles[role.id] = [profileName];
+    await this.withProgress('Restaurando el proveedor normal…', async () => {
+      const saved = await this.runtime.upsertExecutionProfile(root, {
+        name: profileName,
+        provider: provider.id,
+        agent: provider.id === 'kiro-cli' ? 'kiro_default' : '',
+        description: `Proveedor ${provider.label} sin AgentRef externo.`,
+      });
+      if (saved.ok === false) throw new Error(this.resultReason(saved));
+      const updated = await this.runtime.setWorkspacePreferences(root, { preset: 'custom', roleProfiles });
+      if (updated.ok === false) throw new Error(this.resultReason(updated));
+    });
+    await this.refresh();
+    void vscode.window.showInformationMessage(`${role.label} volvió a ${provider.label}.`);
   }
 
   private currentRoleProfile(role: BaldrRole): JsonRecord {
@@ -1444,7 +1765,7 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
       return {
         id: name,
         label: name,
-        description: [text(value.provider), text(value.model), text(value.reasoning_effort)].filter(Boolean).join(' · '),
+        description: [text(value.agent_ref), text(value.provider), text(value.model), text(value.reasoning_effort)].filter(Boolean).join(' · '),
       };
     }), { title, ignoreFocusOut: true });
     return selected?.id;
@@ -2108,7 +2429,7 @@ function sessionProgressHtml(stages,presentation,expanded){if(!stages.length)ret
 function shortModelLabel(value){ const raw=String(value||'').trim(); const named=raw.match(/^gpt-[0-9]+(?:[.][0-9]+)*-(sol|terra|luna|spark)$/i); if(named)return named[1].charAt(0).toUpperCase()+named[1].slice(1).toLowerCase(); const version=raw.match(/^gpt-([0-9]+(?:[.][0-9]+)*)(?:-(mini))?$/i); if(version)return 'GPT-'+version[1]+(version[2]?' Mini':''); return raw||''; }
 function effortChipLabel(value){ return ({minimal:'Mínimo',low:'Bajo',medium:'Medio',high:'Alto',xhigh:'Muy alto',max:'Máximo',ultra:'Ultra'}[String(value||'').toLowerCase()]||String(value||'')); }
 function configuredRole(role){ const wb=workbench(); const pref=wb.preferences||{}; const profiles=wb.profiles||{}; const selected=(((pref.role_profiles||{})[role]||[])[0]); if(selected&&profiles.execution_profiles&&profiles.execution_profiles[selected])return profiles.execution_profiles[selected]; return (((profiles.resolved_roles||{})[role]||[])[0])||{}; }
-function renderChips(){ const pref=workbench().preferences||{}; const safety=safetyLabel(pref.safety_mode); const preset=presetLabel(pref.preset); const context=contextLabel(pref.context_mode); const roleNames={architect:'Planificación',implementer:'Ejecución',reviewer:'Revisión'}; const roleConfigurations=['architect','implementer','reviewer'].map(role=>{const config=configuredRole(role);const raw=config.model||config.agent||config.provider||'';return {role,label:shortModelLabel(raw),effort:effortChipLabel(config.reasoning_effort||config.effort)};}); const modelNames=[...new Set(roleConfigurations.map(item=>item.label).filter(Boolean))]; const team=modelNames.length?modelNames.join(' · '):'Equipo estándar'; const teamDetail=roleConfigurations.filter(item=>item.label).map(item=>roleNames[item.role]+': '+item.label+(item.effort?' ('+item.effort+')':'')).join(' · '); els.gitChipLabel.textContent=safety; els.gitChip.title='Uso de Git y protección: '+safety; els.gitChip.setAttribute('aria-label',els.gitChip.title); els.presetChipLabel.textContent=preset; els.presetChip.title='Nivel de detalle: '+preset; els.presetChip.setAttribute('aria-label',els.presetChip.title); els.rolesChipLabel.textContent=team; els.rolesChip.title='Equipo de Baldr: '+(teamDetail||team); els.rolesChip.setAttribute('aria-label',els.rolesChip.title); els.contextChipLabel.textContent=context; els.contextChip.title='Ayuda adicional: '+context; els.contextChip.setAttribute('aria-label',els.contextChip.title); }
+function renderChips(){ const pref=workbench().preferences||{}; const safety=safetyLabel(pref.safety_mode); const preset=presetLabel(pref.preset); const context=contextLabel(pref.context_mode); const roleNames={architect:'Planificación',implementer:'Ejecución',reviewer:'Revisión'}; const roleConfigurations=['architect','implementer','reviewer'].map(role=>{const config=configuredRole(role);const raw=config.agent_ref||config.model||config.agent||config.provider||'';return {role,label:shortModelLabel(raw),effort:effortChipLabel(config.reasoning_effort||config.effort)};}); const modelNames=[...new Set(roleConfigurations.map(item=>item.label).filter(Boolean))]; const team=modelNames.length?modelNames.join(' · '):'Equipo estándar'; const teamDetail=roleConfigurations.filter(item=>item.label).map(item=>roleNames[item.role]+': '+item.label+(item.effort?' ('+item.effort+')':'')).join(' · '); els.gitChipLabel.textContent=safety; els.gitChip.title='Uso de Git y protección: '+safety; els.gitChip.setAttribute('aria-label',els.gitChip.title); els.presetChipLabel.textContent=preset; els.presetChip.title='Nivel de detalle: '+preset; els.presetChip.setAttribute('aria-label',els.presetChip.title); els.rolesChipLabel.textContent=team; els.rolesChip.title='Equipo de Baldr: '+(teamDetail||team); els.rolesChip.setAttribute('aria-label',els.rolesChip.title); els.contextChipLabel.textContent=context; els.contextChip.title='Ayuda adicional: '+context; els.contextChip.setAttribute('aria-label',els.contextChip.title); }
 function renderPending(){ const items=(state.pending||{}).attachments||[];const key=items.map(item=>[item.kind,item.label].join(':')).join('|');if(key===lastPendingKey)return;lastPendingKey=key;const focusedIndex=els.attachments.contains(document.activeElement)?String(document.activeElement?.dataset?.removePending||''):''; const kindLabels={file:'Archivo',folder:'Carpeta',selection:'Selección'}; els.attachments.innerHTML=items.map((item,index)=>'<div class="attachment"><div class="attachment-icon" aria-hidden="true">'+({file:'▤',folder:'◇',selection:'≡'}[item.kind]||'▤')+'</div><div><div class="attachment-label" title="'+escapeHtml(item.label||'Archivo')+'">'+escapeHtml(item.label||'Archivo')+'</div><div class="attachment-kind">'+escapeHtml(kindLabels[item.kind]||'Archivo')+'</div></div><button type="button" class="remove-attachment" data-remove-pending="'+index+'" title="Quitar" aria-label="Quitar '+escapeHtml(item.label||'archivo')+'">×</button></div>').join(''); els.attachments.querySelectorAll('[data-remove-pending]').forEach(node=>node.addEventListener('click',()=>post({type:'removePending',index:Number(node.dataset.removePending)})));if(focusedIndex){const focusTarget=[...els.attachments.querySelectorAll('[data-remove-pending]')].find(node=>node.dataset.removePending===focusedIndex);focusTarget?.focus({preventScroll:true});} }
 function renderComposerContext(){const item=selected();const continuing=Boolean(item&&(item.allowed_actions||[]).includes('continue'));els.input.placeholder=continuing?'Continuar esta conversación…':'Escribí qué necesitás…';els.input.setAttribute('aria-label',continuing?'Continuar conversación con Baldr':'Nuevo pedido para Baldr');const active=String(state.activeContext||'');els.activeContext.textContent=active?'Contexto actual: '+active:'';els.activeContext.title=active?'Baldr incluirá este archivo o selección al enviar':'';}
 function updateDurations(){ const stages=selected()?.presentation?.stages||[];stages.forEach(stage=>{const node=els.content.querySelector('[data-stage-duration="'+stage.id+'"]');if(node)node.textContent=stage.durationLabel||'';}); }

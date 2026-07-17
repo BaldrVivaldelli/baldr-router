@@ -1880,6 +1880,8 @@ def upsert_execution_profile(
     runner: str = "",
     session_scope: str = "",
     description: str = "",
+    agent_ref: str = "",
+    agent_manifest_digest: str = "",
 ) -> dict[str, Any]:
     clean = name.strip()
     if not clean or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", clean):
@@ -1897,6 +1899,8 @@ def upsert_execution_profile(
         session_scope=session_scope.strip(),
         enabled=True,
         description=description.strip(),
+        agent_ref=agent_ref.strip(),
+        agent_manifest_digest=agent_manifest_digest.strip(),
     )
     path = save_config(cfg)
     return {

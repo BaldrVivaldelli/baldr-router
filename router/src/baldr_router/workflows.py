@@ -11,6 +11,17 @@ from .durability.engine import (
     _has_blockers as _durable_has_blockers,
     _resolved_snapshot,
 )
+from .agent_api import (
+    AgentContractError,
+    AgentDigestMismatchError,
+    AgentNotFoundError,
+    AgentTransportError,
+)
+from .agent_gateway import (
+    AgentPolicyError,
+    configured_agent_bindings_status,
+    external_agent_catalog_status,
+)
 from .durability.recovery import recover_stale_runs
 from .durability.store import DurableStore
 from .execution_profiles import role_execution_plan
@@ -169,6 +180,44 @@ def run_workflow_impl(
             context7_policy=context7_policy,
             execution_preset=execution_preset,
         )
+    except AgentDigestMismatchError as exc:
+        return {
+            "ok": False,
+            "status": "invalid_agent_binding",
+            "error": {"code": "agent_manifest_digest_mismatch", "retryable": False},
+            "reason": str(exc),
+        }
+    except AgentNotFoundError as exc:
+        return {
+            "ok": False,
+            "status": "invalid_agent_binding",
+            "error": {"code": "agent_not_found", "retryable": True},
+            "reason": str(exc),
+        }
+    except AgentContractError as exc:
+        return {
+            "ok": False,
+            "status": "invalid_agent_binding",
+            "error": {"code": "agent_contract_invalid", "retryable": False},
+            "reason": str(exc),
+        }
+    except AgentPolicyError as exc:
+        return {
+            "ok": False,
+            "status": "invalid_agent_binding",
+            "error": {"code": "agent_policy_denied", "retryable": False},
+            "reason": str(exc),
+        }
+    except AgentTransportError as exc:
+        return {
+            "ok": False,
+            "status": "agent_transport_unavailable",
+            "error": {
+                "code": "agent_transport_failed",
+                "retryable": exc.retryable,
+            },
+            "reason": str(exc),
+        }
     except Exception as exc:
         return {"ok": False, "reason": f"Invalid execution profile configuration: {exc}"}
 
@@ -212,8 +261,12 @@ def workflow_status() -> dict[str, Any]:
         else {"ok": True, "count": 0, "runs": []}
     )
     roles = list_roles()
+    agents = {
+        **external_agent_catalog_status(),
+        "configured_bindings": configured_agent_bindings_status(roles["resolved"]),
+    }
     return {
-        "ok": True,
+        "ok": bool(agents["ok"] and agents["configured_bindings"]["ok"]),
         "default_workflow": cfg.router.default_workflow,
         "safety": asdict(cfg.safety),
         "durability": {
@@ -226,6 +279,7 @@ def workflow_status() -> dict[str, Any]:
         },
         "sessions": asdict(cfg.sessions),
         "providers": provider_status(),
+        "agents": agents,
         "roles": roles["roles"],
         "execution_profiles": roles["execution_profiles"],
         "resolved_role_plans": roles["resolved"],

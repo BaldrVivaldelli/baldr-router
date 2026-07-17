@@ -637,6 +637,17 @@ MIGRATIONS: tuple[Migration, ...] = (
             "CREATE INDEX IF NOT EXISTS idx_work_item_turns_run ON work_item_turns(run_id)",
         ),
     ),
+    Migration(
+        13,
+        "external-agent-identities",
+        (
+            "ALTER TABLE step_participants ADD COLUMN agent_ref TEXT",
+            "ALTER TABLE step_participants ADD COLUMN agent_manifest_digest TEXT",
+            "ALTER TABLE step_participants ADD COLUMN agent_transport TEXT",
+            "ALTER TABLE step_participants ADD COLUMN agent_registry TEXT",
+            "CREATE INDEX IF NOT EXISTS idx_step_participants_agent_ref ON step_participants(agent_ref)",
+        ),
+    ),
 
 )
 

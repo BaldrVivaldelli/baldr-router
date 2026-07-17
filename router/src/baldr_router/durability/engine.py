@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from baldr_router import __version__
+from baldr_router.agent_api import AgentResolutionContext
+from baldr_router.agent_gateway import get_agent_gateway
 from baldr_router.config import AppConfig, RoleConfig, WorkflowConfig
 from baldr_router.context7 import prepare_context7_bundle
 from baldr_router.execution_profiles import role_execution_plan
@@ -419,6 +421,37 @@ def _resolved_snapshot(
                 profile["reasoning_effort"] = selected_effort
                 profile["effort"] = selected_effort
 
+    # Resolve exact external agent identities before the durable run snapshot
+    # is created. A resumed workflow therefore keeps the same manifest digest
+    # even if the local registry later changes or moves the transport target.
+    gateway = None
+    for role_name, plan in role_plans.items():
+        requested_capabilities = (
+            ("workspace.read", "workspace.write")
+            if bool(plan.get("can_write"))
+            else ("workspace.read",)
+        )
+        for profile in plan["profiles"]:
+            agent_ref = str(profile.get("agent_ref") or "").strip()
+            if not agent_ref:
+                continue
+            if gateway is None:
+                gateway = get_agent_gateway()
+            binding = gateway.binding(
+                agent_ref,
+                context=AgentResolutionContext(
+                    workflow="architect-implement-review",
+                    step_name=role_name,
+                    requested_capabilities=requested_capabilities,
+                ),
+                expected_digest=str(
+                    profile.get("agent_manifest_digest") or ""
+                ),
+            )
+            profile.update(binding)
+            if binding.get("provider"):
+                profile["provider"] = binding["provider"]
+
     wf = cfg.workflows.get(cfg.router.default_workflow, WorkflowConfig())
     rounds = max_rounds if max_rounds is not None else min(wf.max_rounds, cfg.safety.max_rounds)
     if selected_preset == "fast":
@@ -503,11 +536,13 @@ def _session_key(
     profile: dict[str, Any],
 ) -> str:
     scope = str(profile.get("session_scope") or "workflow")
+    agent_identity = str(profile.get("agent_ref") or "")
     identity = ":".join(
         [
             str(profile.get("provider") or "provider"),
             role,
-            str(profile.get("model") or profile.get("agent") or "default"),
+            agent_identity
+            or str(profile.get("model") or profile.get("agent") or "default"),
             str(profile.get("name") or "profile"),
         ]
     )
@@ -796,6 +831,10 @@ class DurableWorkflowEngine:
                             can_write=bool(plan["can_write"]),
                             runner=str(profile.get("runner") or ""),
                             sandbox=str(plan.get("sandbox") or ""),
+                            agent_ref=str(profile.get("agent_ref") or ""),
+                            agent_transport=str(
+                                profile.get("agent_transport") or ""
+                            ),
                         )
                         if not status["ok"]:
                             violations.append(
@@ -1800,10 +1839,15 @@ class DurableWorkflowEngine:
                 profile=profile,
             )
             provider_identity = provider_runtime_identity(str(profile["provider"]))
+            provider_version = str(provider_identity.get("version") or "")
+            if profile.get("agent_manifest_digest"):
+                provider_version = (
+                    f"{provider_version}|{profile['agent_manifest_digest']}"
+                )
             session = self.store.get_valid_session(
                 session_key,
                 identity_fingerprint=identity_fingerprint,
-                provider_version=str(provider_identity.get("version") or ""),
+                provider_version=provider_version,
                 ttl_hours=int(sessions_cfg.get("ttl_hours") or 24),
                 max_turns=int(sessions_cfg.get("max_turns") or 20),
                 invalidate_on_identity=bool(
@@ -1863,6 +1907,11 @@ class DurableWorkflowEngine:
                     "BALDR_LEASE_EPOCH": str(lease.epoch),
                 }
             )
+            if profile.get("agent_ref"):
+                env["BALDR_AGENT_REF"] = str(profile["agent_ref"])
+                env["BALDR_AGENT_MANIFEST_DIGEST"] = str(
+                    profile.get("agent_manifest_digest") or ""
+                )
             heartbeat = LeaseHeartbeat(
                 self.store,
                 lease,
@@ -1909,6 +1958,10 @@ class DurableWorkflowEngine:
                         durable_run_id=run_id,
                         durable_step_id=step_id,
                         durable_attempt_id=attempt_id,
+                        agent_ref=str(profile.get("agent_ref") or ""),
+                        agent_manifest_digest=str(
+                            profile.get("agent_manifest_digest") or ""
+                        ),
                     )
                     if _runner_accepts_activity_sink(self.provider_runner):
                         provider_kwargs["activity_sink"] = activity_sink
@@ -1950,7 +2003,7 @@ class DurableWorkflowEngine:
                         "last_step_id": step_id,
                     },
                     identity_fingerprint=identity_fingerprint,
-                    provider_version=str(provider_identity.get("version") or ""),
+                    provider_version=provider_version,
                     ttl_hours=int(sessions_cfg.get("ttl_hours") or 24),
                     increment_turn=True,
                     lease=lease,
@@ -2210,6 +2263,10 @@ class DurableWorkflowEngine:
                     "model": p.get("model"),
                     "reasoning_effort": p.get("reasoning_effort"),
                     "runner": p.get("runner"),
+                    "agent_ref": p.get("agent_ref"),
+                    "agent_manifest_digest": p.get("agent_manifest_digest"),
+                    "agent_transport": p.get("agent_transport"),
+                    "agent_registry": p.get("agent_registry"),
                     "status": p.get("status"),
                     "attempts": len(p.get("attempts") or []),
                 }

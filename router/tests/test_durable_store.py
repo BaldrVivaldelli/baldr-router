@@ -52,6 +52,18 @@ def test_sqlite_migrations_upgrade_v1_to_latest(tmp_path: Path):
         "run_id",
         "source",
     }.issubset(turn_columns)
+    participant_columns = {
+        row[1]
+        for row in store.connect().execute(
+            "PRAGMA table_info(step_participants)"
+        ).fetchall()
+    }
+    assert {
+        "agent_ref",
+        "agent_manifest_digest",
+        "agent_transport",
+        "agent_registry",
+    }.issubset(participant_columns)
 
 
 def test_conversation_migration_preserves_published_schema_history(
@@ -67,6 +79,7 @@ def test_conversation_migration_preserves_published_schema_history(
         "1636773896cd2019dfadf11e71ef5c6f957fd85e05619c2c74c646bcc0ba7a9c"
     )
     assert migrations[12].name == "durable-work-item-conversation-turns"
+    assert migrations[13].name == "external-agent-identities"
 
     connection = sqlite3.connect(tmp_path / "existing.sqlite3")
     apply_migrations(connection, MIGRATIONS[:11])
@@ -77,10 +90,46 @@ def test_conversation_migration_preserves_published_schema_history(
             "SELECT version FROM schema_migrations ORDER BY version"
         )
     ]
-    assert versions == list(range(1, 13))
+    assert versions == list(range(1, 14))
     assert connection.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='work_item_turns'"
     ).fetchone()
+
+
+def test_external_agent_identity_is_persisted_on_the_participant(
+    tmp_path: Path,
+) -> None:
+    store = DurableStore(path=tmp_path / "state.sqlite3")
+    _create_run(store)
+    step = store.create_step(
+        run_id="run-1",
+        step_key="review",
+        phase="reviewer",
+        sequence_number=10,
+        round_number=0,
+        strategy="first-success",
+        min_successes=1,
+        can_write=False,
+        sandbox="read-only",
+    )
+    store.create_participant(
+        step_id=str(step["id"]),
+        ordinal=0,
+        profile={
+            "name": "external-review",
+            "provider": "kiro-cli",
+            "agent_ref": "company://cyber/security-reviewer@1.0.0",
+            "agent_manifest_digest": "sha256:" + "a" * 64,
+            "agent_transport": "provider",
+            "agent_registry": "company",
+        },
+    )
+
+    participant = store.snapshot_run("run-1")["steps"][0]["participants"][0]
+    assert participant["agent_ref"] == "company://cyber/security-reviewer@1.0.0"
+    assert participant["agent_manifest_digest"] == "sha256:" + "a" * 64
+    assert participant["agent_transport"] == "provider"
+    assert participant["agent_registry"] == "company"
 
 
 def test_state_machine_rejects_invalid_transition():

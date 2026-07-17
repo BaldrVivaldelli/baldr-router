@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://baldr.dev/contracts/agent-registry-v1.schema.json",
+  "title": "Baldr external agent registry v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "version",
+    "agents"
+  ],
+  "properties": {
+    "contract": {
+      "const": "baldr-agent-registry"
+    },
+    "version": {
+      "const": 1
+    },
+    "disabled": {
+      "type": "array",
+      "maxItems": 1000,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "maxLength": 320,
+        "pattern": "^[a-z0-9][a-z0-9._-]{0,95}://[a-z0-9][a-z0-9._-]{0,95}/[a-z0-9][a-z0-9._-]{0,95}@[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$"
+      }
+    },
+    "agents": {
+      "type": "array",
+      "maxItems": 1000,
+      "items": {
+        "$ref": "#/$defs/agent"
+      }
+    }
+  },
+  "$defs": {
+    "stringMap": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 32,
+      "propertyNames": {
+        "allOf": [
+          {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+          },
+          {
+            "not": {
+              "pattern": "^([Aa][Pp][Ii][_-][Kk][Ee][Yy]|[Aa][Uu][Tt][Hh][Oo][Rr][Ii][Zz][Aa][Tt][Ii][Oo][Nn]|[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Tt][Oo][Kk][Ee][Nn])$"
+            }
+          }
+        ]
+      },
+      "additionalProperties": {
+        "type": "string",
+        "maxLength": 512
+      }
+    },
+    "agent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ref",
+        "owner",
+        "transport",
+        "target",
+        "capabilities",
+        "input_schema",
+        "output_schema",
+        "execution"
+      ],
+      "properties": {
+        "ref": {
+          "type": "string",
+          "maxLength": 320,
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,95}://[a-z0-9][a-z0-9._-]{0,95}/[a-z0-9][a-z0-9._-]{0,95}@[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$",
+          "not": {
+            "pattern": "@([Ll][Aa][Tt][Ee][Ss][Tt]|[Cc][Uu][Rr][Rr][Ee][Nn][Tt]|[Ss][Tt][Aa][Bb][Ll][Ee])$"
+          }
+        },
+        "owner": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "transport": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{0,31}$"
+        },
+        "target": {
+          "$ref": "#/$defs/stringMap"
+        },
+        "capabilities": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160
+          }
+        },
+        "input_schema": {
+          "type": "string",
+          "maxLength": 240
+        },
+        "output_schema": {
+          "type": "string",
+          "maxLength": 240
+        },
+        "execution": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "effect_mode",
+            "supports_sessions",
+            "supports_cancellation"
+          ],
+          "properties": {
+            "effect_mode": {
+              "enum": [
+                "read-only",
+                "workspace-write",
+                "external"
+              ]
+            },
+            "supports_sessions": {
+              "type": "boolean"
+            },
+            "supports_cancellation": {
+              "type": "boolean"
+            }
+          }
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      }
+    }
+  }
+}

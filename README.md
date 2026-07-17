@@ -214,6 +214,15 @@ Los workflows guardan un snapshot inmutable de su configuración. Tras un crash,
 
 Detalle y ejemplos TOML: [`docs/durable-orchestration.md`](docs/durable-orchestration.md)
 
+Los perfiles también pueden apuntar a identidades exactas de agentes externos.
+El registry local resuelve manifests versionados y el gateway invoca el
+transporte declarado sin cargar código de agentes dentro de Baldr. Codex y Kiro
+continúan funcionando por la ruta anterior cuando el perfil no declara
+`agent_ref`. Detalle y piloto Kiro:
+[`docs/external-agent-registry.md`](docs/external-agent-registry.md).
+El transporte HTTP independiente y la frontera de Agent Manager están
+documentados en [`docs/external-agent-http.md`](docs/external-agent-http.md).
+
 ## Consistencia y control operativo
 
 Baldr v0.16 cierra las carreras más importantes entre procesos y efectos externos:

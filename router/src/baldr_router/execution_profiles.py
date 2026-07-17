@@ -21,6 +21,8 @@ class ResolvedExecutionProfile:
     can_write: bool
     sandbox: str
     description: str
+    agent_ref: str
+    agent_manifest_digest: str
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -37,6 +39,8 @@ def _inline_profile(role: RoleConfig) -> ExecutionProfileConfig:
         session_scope=role.session_scope,
         enabled=True,
         description=role.description,
+        agent_ref=role.agent_ref,
+        agent_manifest_digest=role.agent_manifest_digest,
     )
 
 
@@ -113,6 +117,8 @@ def resolve_role_profiles(
                 can_write=bool(role.can_write),
                 sandbox=role.sandbox,
                 description=profile.description or role.description,
+                agent_ref=profile.agent_ref,
+                agent_manifest_digest=profile.agent_manifest_digest,
             )
         )
 

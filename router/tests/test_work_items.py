@@ -512,7 +512,7 @@ def test_continuation_appends_private_turn_and_carries_only_structured_result(
         run_id=run_id,
         idempotency_key="conversation-first",
         request_fingerprint="conversation-first-fingerprint",
-        resume_token="conversation-first-resume",
+        resume_token="synthetic-conversation-first-resume",
         workflow_name="architect-implement-review",
         workflow_version=1,
         workspace_root=str(repo),

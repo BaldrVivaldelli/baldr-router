@@ -5,6 +5,10 @@ from pathlib import Path
 from typing import Any
 
 from .codex import codex_found, codex_login_status, codex_version, npx_found
+from .agent_gateway import (
+    configured_agent_bindings_status,
+    external_agent_catalog_status,
+)
 from .codex_config import context7_mcp_config_status
 from .config import config_path, load_config, secrets_path
 from .context7 import cache_status
@@ -42,6 +46,7 @@ def _workspace_status(workspace_root: str, store: DurableStore) -> dict[str, Any
 def doctor(workspace_root: str | None = None) -> dict[str, Any]:
     cfg = load_config()
     providers = provider_status()
+    agents = external_agent_catalog_status()
     implemented = providers.get("implemented_providers", [])
     store = DurableStore()
     recovery = (
@@ -55,6 +60,8 @@ def doctor(workspace_root: str | None = None) -> dict[str, Any]:
             resolved_roles[role_name] = role_execution_plan(cfg, role_name, role)
         except Exception as exc:
             resolved_roles[role_name] = {"ok": False, "reason": str(exc)}
+    binding_status = configured_agent_bindings_status(resolved_roles)
+    agents = {**agents, "configured_bindings": binding_status}
     client_id = __import__("os").environ.get("BALDR_CLIENT_ID") or None
     verification: dict[str, Any]
     if (
@@ -82,6 +89,7 @@ def doctor(workspace_root: str | None = None) -> dict[str, Any]:
             "default_provider": cfg.router.default_provider,
             "default_workflow": cfg.router.default_workflow,
             "implemented_providers": implemented,
+            "agents": agents,
             "roles": {name: asdict(role) for name, role in cfg.roles.items()},
             "execution_profiles": {
                 name: asdict(profile) for name, profile in cfg.execution_profiles.items()
@@ -101,6 +109,7 @@ def doctor(workspace_root: str | None = None) -> dict[str, Any]:
             },
         },
         "providers": providers,
+        "agents": agents,
         "extensions": extension_status(),
         "codex": {
             "found": bool(codex_found()),
@@ -137,6 +146,13 @@ def doctor(workspace_root: str | None = None) -> dict[str, Any]:
     if codex_found():
         result["codex"]["version"] = codex_version()
         result["codex"]["login_status"] = codex_login_status()
+
+    if not agents["ok"] or not binding_status["ok"]:
+        result["ok"] = False
+        result.setdefault(
+            "next_step",
+            "Fix the configured external agent references or their registry manifests.",
+        )
 
     if cfg.codex.runner == "sdk":
         try:

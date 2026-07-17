@@ -60,6 +60,17 @@ class KiroCliConfig:
 
 
 @dataclass
+class AgentManagerConfig:
+    enabled: bool = False
+    registry: str = "manager"
+    base_url: str = ""
+    authorization_env: str = ""
+    timeout_seconds: int = 10
+    allow_insecure_loopback: bool = False
+    catalog_limit: int = 100
+
+
+@dataclass
 class Context7Config:
     enabled: bool = False
     # off: disabled, codex-mcp: only let Codex use Context7 MCP,
@@ -246,6 +257,10 @@ class ExecutionProfileConfig:
     session_scope: str = ""
     enabled: bool = True
     description: str = ""
+    # Optional immutable external agent binding. Empty keeps the legacy
+    # provider/model/agent profile behavior for existing installations.
+    agent_ref: str = ""
+    agent_manifest_digest: str = ""
 
 
 @dataclass
@@ -272,6 +287,8 @@ class RoleConfig:
     can_write: bool = False
     sandbox: str = "read-only"
     description: str = ""
+    agent_ref: str = ""
+    agent_manifest_digest: str = ""
 
 
 @dataclass
@@ -288,6 +305,7 @@ class AppConfig:
     router: RouterConfig
     codex: CodexConfig
     kiro_cli: KiroCliConfig
+    agent_manager: AgentManagerConfig
     context7: Context7Config
     workspace: WorkspaceConfig
     telemetry: TelemetryConfig
@@ -315,6 +333,7 @@ class AppConfig:
             router=RouterConfig(),
             codex=CodexConfig(),
             kiro_cli=KiroCliConfig(),
+            agent_manager=AgentManagerConfig(),
             context7=Context7Config(),
             workspace=WorkspaceConfig(),
             telemetry=TelemetryConfig(),
@@ -400,6 +419,7 @@ def load_config(path: Path | None = None) -> AppConfig:
         "router": "router",
         "codex": "codex",
         "kiro_cli": "kiro_cli",
+        "agent_manager": "agent_manager",
         "context7": "context7",
         "workspace": "workspace",
         "telemetry": "telemetry",
@@ -474,6 +494,7 @@ def dump_config(cfg: AppConfig) -> str:
     lines += _dump_dataclass_table("router", cfg.router)
     lines += _dump_dataclass_table("codex", cfg.codex)
     lines += _dump_dataclass_table("kiro_cli", cfg.kiro_cli)
+    lines += _dump_dataclass_table("agent_manager", cfg.agent_manager)
     lines += _dump_dataclass_table("context7", cfg.context7)
     lines += _dump_dataclass_table("workspace", cfg.workspace)
     lines += _dump_dataclass_table("telemetry", cfg.telemetry)

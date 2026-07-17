@@ -27,6 +27,9 @@ packages = ["src/baldr_router"]
 "src/baldr_router/contracts/phase-deliverable-v1.schema.json" = "baldr_router/contracts/phase-deliverable-v1.schema.json"
 "src/baldr_router/contracts/phase-deliverable-page-v1.schema.json" = "baldr_router/contracts/phase-deliverable-page-v1.schema.json"
 "src/baldr_router/contracts/phase-deliverable-index-page-v1.schema.json" = "baldr_router/contracts/phase-deliverable-index-page-v1.schema.json"
+"src/baldr_router/contracts/agent-registry-v1.schema.json" = "baldr_router/contracts/agent-registry-v1.schema.json"
+"src/baldr_router/contracts/agent-transport-http-v1.schema.json" = "baldr_router/contracts/agent-transport-http-v1.schema.json"
+"src/baldr_router/contracts/agent-manager-v1.schema.json" = "baldr_router/contracts/agent-manager-v1.schema.json"
 "src/baldr_router/qualification/profiles-v1.json" = "baldr_router/qualification/profiles-v1.json"
 "src/baldr_router/qualification/canaries-v1.json" = "baldr_router/qualification/canaries-v1.json"
 

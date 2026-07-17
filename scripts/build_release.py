@@ -424,6 +424,9 @@ def main() -> int:
             "baldr_router/contracts/phase-deliverable-page-v1.schema.json",
             "baldr_router/contracts/phase-deliverable-index-page-v1.schema.json",
             "baldr_router/contracts/work-item-progress-v1.schema.json",
+            "baldr_router/contracts/agent-registry-v1.schema.json",
+            "baldr_router/contracts/agent-transport-http-v1.schema.json",
+            "baldr_router/contracts/agent-manager-v1.schema.json",
         },
         label="Core wheel",
     )

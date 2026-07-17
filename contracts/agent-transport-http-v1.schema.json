@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://baldr.dev/contracts/agent-transport-http-v1.schema.json",
+  "title": "Baldr external agent HTTP transport v1",
+  "oneOf": [
+    { "$ref": "#/$defs/invocation" },
+    { "$ref": "#/$defs/result" }
+  ],
+  "$defs": {
+    "agentIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref", "digest"],
+      "properties": {
+        "ref": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,95}://[a-z0-9][a-z0-9._-]{0,95}/[a-z0-9][a-z0-9._-]{0,95}@[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$"
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      }
+    },
+    "invocationBody": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task",
+        "workflow",
+        "step_name",
+        "report_kind",
+        "can_write",
+        "sandbox",
+        "profile_name",
+        "session_key",
+        "resume_session_id",
+        "durable_run_id",
+        "durable_step_id",
+        "durable_attempt_id",
+        "requested_capabilities"
+      ],
+      "properties": {
+        "task": { "type": "string", "maxLength": 2000000 },
+        "workflow": { "type": "string", "maxLength": 160 },
+        "step_name": { "type": "string", "maxLength": 160 },
+        "report_kind": { "type": "string", "maxLength": 160 },
+        "can_write": { "const": false },
+        "sandbox": { "const": "read-only" },
+        "profile_name": { "type": "string", "maxLength": 160 },
+        "session_key": { "type": "string", "maxLength": 512 },
+        "resume_session_id": {
+          "type": ["string", "null"],
+          "maxLength": 512
+        },
+        "durable_run_id": { "type": "string", "maxLength": 160 },
+        "durable_step_id": { "type": "string", "maxLength": 160 },
+        "durable_attempt_id": { "type": "string", "maxLength": 160 },
+        "requested_capabilities": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": { "type": "string", "maxLength": 160 }
+        }
+      }
+    },
+    "invocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "version", "agent", "invocation"],
+      "properties": {
+        "contract": { "const": "baldr-agent-invocation" },
+        "version": { "const": 1 },
+        "agent": { "$ref": "#/$defs/agentIdentity" },
+        "invocation": { "$ref": "#/$defs/invocationBody" }
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "version", "result"],
+      "properties": {
+        "contract": { "const": "baldr-agent-result" },
+        "version": { "const": 1 },
+        "result": { "type": "object" }
+      }
+    }
+  }
+}

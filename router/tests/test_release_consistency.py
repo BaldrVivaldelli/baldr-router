@@ -36,6 +36,15 @@ def _synthetic_artifacts(
     deliverable_index_page_schema = (
         ROOT / "contracts" / "phase-deliverable-index-page-v1.schema.json"
     ).read_bytes()
+    agent_registry_schema = (
+        ROOT / "contracts" / "agent-registry-v1.schema.json"
+    ).read_bytes()
+    agent_http_schema = (
+        ROOT / "contracts" / "agent-transport-http-v1.schema.json"
+    ).read_bytes()
+    agent_manager_schema = (
+        ROOT / "contracts" / "agent-manager-v1.schema.json"
+    ).read_bytes()
     with zipfile.ZipFile(wheel, "w") as archive:
         archive.writestr("baldr_router/phase_deliverables.py", "VERSION = 1\n")
         archive.writestr("baldr_router/provider_activity.py", "ACTIVITY = True\n")
@@ -54,6 +63,18 @@ def _synthetic_artifacts(
         archive.writestr(
             "baldr_router/contracts/phase-deliverable-index-page-v1.schema.json",
             deliverable_index_page_schema,
+        )
+        archive.writestr(
+            "baldr_router/contracts/agent-registry-v1.schema.json",
+            agent_registry_schema,
+        )
+        archive.writestr(
+            "baldr_router/contracts/agent-transport-http-v1.schema.json",
+            agent_http_schema,
+        )
+        archive.writestr(
+            "baldr_router/contracts/agent-manager-v1.schema.json",
+            agent_manager_schema,
         )
         archive.writestr(
             f"baldr_router-{version}.dist-info/METADATA",

@@ -16,6 +16,9 @@ DELIVERABLE_PAGE_SCHEMA_PATH = (
 DELIVERABLE_INDEX_PAGE_SCHEMA_PATH = (
     ROOT / "contracts" / "phase-deliverable-index-page-v1.schema.json"
 )
+AGENT_REGISTRY_SCHEMA_PATH = ROOT / "contracts" / "agent-registry-v1.schema.json"
+AGENT_HTTP_SCHEMA_PATH = ROOT / "contracts" / "agent-transport-http-v1.schema.json"
+AGENT_MANAGER_SCHEMA_PATH = ROOT / "contracts" / "agent-manager-v1.schema.json"
 
 
 def rendered_json(path: Path) -> str:
@@ -104,6 +107,9 @@ def outputs() -> dict[Path, str]:
     deliverable_index_page_schema_json = rendered_json(
         DELIVERABLE_INDEX_PAGE_SCHEMA_PATH
     )
+    agent_registry_schema_json = rendered_json(AGENT_REGISTRY_SCHEMA_PATH)
+    agent_http_schema_json = rendered_json(AGENT_HTTP_SCHEMA_PATH)
+    agent_manager_schema_json = rendered_json(AGENT_MANAGER_SCHEMA_PATH)
     table = docs_table(contract)
 
     out: dict[Path, str] = {
@@ -117,6 +123,12 @@ def outputs() -> dict[Path, str]:
         / "router/src/baldr_router/contracts/phase-deliverable-page-v1.schema.json": deliverable_page_schema_json,
         ROOT
         / "router/src/baldr_router/contracts/phase-deliverable-index-page-v1.schema.json": deliverable_index_page_schema_json,
+        ROOT
+        / "router/src/baldr_router/contracts/agent-registry-v1.schema.json": agent_registry_schema_json,
+        ROOT
+        / "router/src/baldr_router/contracts/agent-transport-http-v1.schema.json": agent_http_schema_json,
+        ROOT
+        / "router/src/baldr_router/contracts/agent-manager-v1.schema.json": agent_manager_schema_json,
         ROOT / "facades/vscode-extension/resources/facade-v1.json": contract_json,
         ROOT / "facades/vscode-extension/resources/facade-v1.schema.json": schema_json,
         ROOT

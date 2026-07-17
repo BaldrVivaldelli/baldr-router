@@ -3,9 +3,21 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 
 from . import __version__
+from .agent_api import (
+    AgentContractError,
+    AgentManifest,
+    AgentNotFoundError,
+    AgentRef,
+    AgentTransportError,
+)
 from .codex import codex_model_catalog
+from .agent_gateway import external_agent_catalog_status
+from .agent_manager import HttpAgentManagerAdmin, agent_manager_status
+from .agent_registry import LocalAgentRegistryAdmin
+from .kiro_cli import kiro_cli_mcp_status
 from .codex_config import install_context7_mcp_config, remove_context7_mcp_config
 from .config import Context7Config, load_config, save_config
 from .provider_registry import get_provider_registry, provider_status
@@ -34,9 +46,10 @@ from .qualification.runner import (
     write_qualification_template,
 )
 from .validation.lifecycle import run_lifecycle_verification
+from .durability.store import DurableStore
 from .secrets import prompt_context7_key_and_store
 from .status import doctor
-from .telemetry import recent_runs, telemetry_stats
+from .telemetry import app_state_dir, recent_runs, telemetry_stats
 from .workspace_policy import inspect_workspace, trust_workspace, untrust_workspace
 
 
@@ -88,6 +101,22 @@ def _parse_json_array(raw: str | None, flag: str) -> list[dict[str, object]] | N
     if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
         raise SystemExit(f"{flag} must decode to an array of objects")
     return value
+
+
+def _parse_agent_target(values: list[str] | None) -> dict[str, str]:
+    target: dict[str, str] = {}
+    for raw in values or []:
+        key, separator, value = raw.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if not separator or not key or not value:
+            raise SystemExit(f"--target expects key=value: {raw!r}")
+        if key in target:
+            raise SystemExit(f"Duplicate --target key: {key!r}")
+        target[key] = value
+    if not target:
+        raise SystemExit("At least one --target key=value is required")
+    return target
 
 
 def cmd_facade(args: argparse.Namespace) -> int:
@@ -222,6 +251,13 @@ def cmd_provider_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_kiro_mcp_status(args: argparse.Namespace) -> int:
+    del args
+    result = kiro_cli_mcp_status()
+    print_json(result)
+    return 0 if result.get("ok") else 2
+
+
 def cmd_provider_models(args: argparse.Namespace) -> int:
     provider = str(args.provider or "codex").strip().lower().replace("_", "-")
     if provider not in {"codex", "openai-codex"}:
@@ -236,6 +272,179 @@ def cmd_provider_models(args: argparse.Namespace) -> int:
     result = codex_model_catalog(force=bool(args.refresh))
     print_json(result)
     return 0 if result.get("ok") else 2
+
+
+def cmd_agent_catalog(args: argparse.Namespace) -> int:
+    result = external_agent_catalog_status(
+        workspace_root=getattr(args, "workspace", None)
+    )
+    print_json(result)
+    return 0 if result.get("ok") else 2
+
+
+def _agent_command_error(error: Exception) -> int:
+    print_json(
+        {
+            "ok": False,
+            "error": {
+                "code": "agent_registry_operation_failed",
+                "message": str(error),
+            },
+        }
+    )
+    return 2
+
+
+def _manifest_from_args(args: argparse.Namespace) -> AgentManifest:
+    return AgentManifest(
+        reference=AgentRef.parse(args.reference),
+        owner=args.owner,
+        transport=args.transport,
+        target=_parse_agent_target(args.target),
+        capabilities=tuple(args.capability or ()),
+        input_schema=args.input_schema,
+        output_schema=args.output_schema,
+        effect_mode=args.effect_mode,
+        supports_sessions=bool(args.supports_sessions),
+        supports_cancellation=bool(args.supports_cancellation),
+        declared_digest=args.digest or "",
+    )
+
+
+def cmd_agent_publish(args: argparse.Namespace) -> int:
+    try:
+        manifest = _manifest_from_args(args)
+        result = LocalAgentRegistryAdmin().publish(manifest)
+    except (AgentContractError, AgentNotFoundError) as exc:
+        return _agent_command_error(exc)
+    print_json(result)
+    return 0
+
+
+def cmd_agent_manager_configure(args: argparse.Namespace) -> int:
+    cfg = load_config()
+    cfg.agent_manager.enabled = True
+    cfg.agent_manager.registry = args.registry
+    cfg.agent_manager.base_url = args.base_url
+    cfg.agent_manager.authorization_env = args.authorization_env
+    cfg.agent_manager.allow_insecure_loopback = bool(args.allow_insecure_loopback)
+    path = save_config(cfg)
+    print_json(
+        {
+            "ok": True,
+            "config_path": str(path),
+            "agent_manager": {
+                "enabled": True,
+                "registry": cfg.agent_manager.registry,
+                "base_url": cfg.agent_manager.base_url,
+                "authorization_env": cfg.agent_manager.authorization_env,
+                "allow_insecure_loopback": cfg.agent_manager.allow_insecure_loopback,
+            },
+        }
+    )
+    return 0
+
+
+def cmd_agent_manager_status(args: argparse.Namespace) -> int:
+    del args
+    result = agent_manager_status(load_config().agent_manager)
+    print_json(result)
+    return 0 if result.get("ok") else 2
+
+
+def cmd_agent_manager_publish(args: argparse.Namespace) -> int:
+    try:
+        result = HttpAgentManagerAdmin(load_config().agent_manager).publish(
+            _manifest_from_args(args)
+        )
+    except (AgentContractError, AgentNotFoundError, AgentTransportError) as exc:
+        return _agent_command_error(exc)
+    print_json(result)
+    return 0
+
+
+def cmd_agent_manager_set_enabled(args: argparse.Namespace) -> int:
+    try:
+        result = HttpAgentManagerAdmin(load_config().agent_manager).set_enabled(
+            AgentRef.parse(args.reference), enabled=bool(args.enabled)
+        )
+    except (AgentContractError, AgentNotFoundError, AgentTransportError) as exc:
+        return _agent_command_error(exc)
+    print_json(result)
+    return 0
+
+
+def cmd_agent_manager_revoke(args: argparse.Namespace) -> int:
+    try:
+        result = HttpAgentManagerAdmin(load_config().agent_manager).revoke(
+            AgentRef.parse(args.reference)
+        )
+    except (AgentContractError, AgentNotFoundError, AgentTransportError) as exc:
+        return _agent_command_error(exc)
+    print_json(result)
+    return 0
+
+
+def cmd_agent_manager_serve(args: argparse.Namespace) -> int:
+    from .agent_manager_service import serve_agent_manager
+
+    database = (
+        Path(args.database).expanduser()
+        if args.database
+        else app_state_dir() / "agent-manager.sqlite3"
+    )
+    print_json(
+        {
+            "ok": True,
+            "listening": f"http://{args.host}:{args.port}",
+            "registry": args.registry,
+            "database": str(database),
+            "authorization_env": args.authorization_env,
+        }
+    )
+    sys.stdout.flush()
+    serve_agent_manager(
+        host=args.host,
+        port=args.port,
+        database=database,
+        registry=args.registry,
+        authorization_env=args.authorization_env,
+    )
+    return 0
+
+
+def cmd_agent_inspect(args: argparse.Namespace) -> int:
+    try:
+        result = LocalAgentRegistryAdmin().inspect(args.reference)
+    except (AgentContractError, AgentNotFoundError) as exc:
+        return _agent_command_error(exc)
+    print_json(result)
+    return 0
+
+
+def cmd_agent_set_enabled(args: argparse.Namespace) -> int:
+    try:
+        result = LocalAgentRegistryAdmin().set_enabled(
+            args.reference, enabled=bool(args.enabled)
+        )
+    except (AgentContractError, AgentNotFoundError) as exc:
+        return _agent_command_error(exc)
+    print_json(result)
+    return 0
+
+
+def cmd_agent_remove(args: argparse.Namespace) -> int:
+    try:
+        reference = str(AgentRef.parse(args.reference))
+        active = DurableStore().active_runs_using_agent(reference)
+        result = LocalAgentRegistryAdmin().remove(
+            reference,
+            active_run_ids=active,
+        )
+    except (AgentContractError, AgentNotFoundError, RuntimeError) as exc:
+        return _agent_command_error(exc)
+    print_json(result)
+    return 0
 
 
 def cmd_workflow_status(args: argparse.Namespace) -> int:
@@ -832,11 +1041,129 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_provider_status)
 
     p = sub.add_parser(
+        "kiro-mcp-status",
+        help="Explicitly diagnose Kiro MCP registry and local configuration",
+    )
+    p.set_defaults(func=cmd_kiro_mcp_status)
+
+    p = sub.add_parser(
         "provider-models", help="List selectable models and variants for a provider"
     )
     p.add_argument("provider", nargs="?", default="codex")
     p.add_argument("--refresh", action="store_true")
     p.set_defaults(func=cmd_provider_models)
+
+    p = sub.add_parser(
+        "agent-catalog",
+        help="List safe metadata for externally registered agents",
+    )
+    p.add_argument("--workspace")
+    p.set_defaults(func=cmd_agent_catalog)
+
+    agent = sub.add_parser(
+        "agent",
+        help="Manage exact external agent versions in the local registry",
+    )
+    agent_sub = agent.add_subparsers(dest="agent_command", required=True)
+
+    p = agent_sub.add_parser("list", help="List registered external agents")
+    p.add_argument("--workspace")
+    p.set_defaults(func=cmd_agent_catalog)
+
+    p = agent_sub.add_parser("inspect", help="Inspect one exact local AgentRef")
+    p.add_argument("reference")
+    p.set_defaults(func=cmd_agent_inspect)
+
+    p = agent_sub.add_parser(
+        "publish",
+        help="Publish a new immutable local agent version",
+    )
+    p.add_argument("reference")
+    p.add_argument("--owner", required=True)
+    p.add_argument("--transport", required=True)
+    p.add_argument(
+        "--target",
+        action="append",
+        help="Transport target key=value; repeat for multiple values",
+    )
+    p.add_argument("--capability", action="append", default=[])
+    p.add_argument("--input-schema", default="baldr.Task/v1")
+    p.add_argument("--output-schema", default="baldr.StructuredReport/v1")
+    p.add_argument(
+        "--effect-mode",
+        choices=["read-only", "workspace-write", "external"],
+        default="read-only",
+    )
+    p.add_argument("--supports-sessions", action="store_true")
+    p.add_argument("--supports-cancellation", action="store_true")
+    p.add_argument(
+        "--digest",
+        help="Optional declared sha256 digest; computed automatically when omitted",
+    )
+    p.set_defaults(func=cmd_agent_publish)
+
+    for action, enabled in (("enable", True), ("disable", False)):
+        p = agent_sub.add_parser(action, help=f"{action.title()} one exact AgentRef")
+        p.add_argument("reference")
+        p.set_defaults(func=cmd_agent_set_enabled, enabled=enabled)
+
+    p = agent_sub.add_parser(
+        "remove",
+        help="Remove a disabled AgentRef when no active durable run uses it",
+    )
+    p.add_argument("reference")
+    p.set_defaults(func=cmd_agent_remove)
+
+    manager = sub.add_parser(
+        "agent-manager",
+        help="Run and administer the persistent HTTP Agent Manager",
+    )
+    manager_sub = manager.add_subparsers(dest="agent_manager_command", required=True)
+
+    p = manager_sub.add_parser("configure", help="Configure the HTTP manager client")
+    p.add_argument("--registry", default="manager")
+    p.add_argument("--base-url", required=True)
+    p.add_argument("--authorization-env", default="")
+    p.add_argument("--allow-insecure-loopback", action="store_true")
+    p.set_defaults(func=cmd_agent_manager_configure)
+
+    p = manager_sub.add_parser("status", help="Check manager health and catalog")
+    p.set_defaults(func=cmd_agent_manager_status)
+
+    p = manager_sub.add_parser("serve", help="Start the persistent manager service")
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=8766)
+    p.add_argument("--database", default="")
+    p.add_argument("--registry", default="manager")
+    p.add_argument("--authorization-env", default="BALDR_AGENT_MANAGER_TOKEN")
+    p.set_defaults(func=cmd_agent_manager_serve)
+
+    p = manager_sub.add_parser("publish", help="Publish one immutable manager version")
+    p.add_argument("reference")
+    p.add_argument("--owner", required=True)
+    p.add_argument("--transport", required=True)
+    p.add_argument("--target", action="append")
+    p.add_argument("--capability", action="append", default=[])
+    p.add_argument("--input-schema", default="baldr.Task/v1")
+    p.add_argument("--output-schema", default="baldr.StructuredReport/v1")
+    p.add_argument(
+        "--effect-mode",
+        choices=["read-only", "workspace-write", "external"],
+        default="read-only",
+    )
+    p.add_argument("--supports-sessions", action="store_true")
+    p.add_argument("--supports-cancellation", action="store_true")
+    p.add_argument("--digest")
+    p.set_defaults(func=cmd_agent_manager_publish)
+
+    for action, enabled in (("enable", True), ("disable", False)):
+        p = manager_sub.add_parser(action, help=f"{action.title()} one manager AgentRef")
+        p.add_argument("reference")
+        p.set_defaults(func=cmd_agent_manager_set_enabled, enabled=enabled)
+
+    p = manager_sub.add_parser("revoke", help="Irreversibly revoke one AgentRef")
+    p.add_argument("reference")
+    p.set_defaults(func=cmd_agent_manager_revoke)
 
     p = sub.add_parser(
         "workflow-status", help="Show roles, workflows, providers, and safety settings"

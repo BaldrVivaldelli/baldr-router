@@ -53,6 +53,10 @@ def setup_facade(
             runner=str(profile_definition.get("runner") or ""),
             session_scope=str(profile_definition.get("session_scope") or ""),
             description=str(profile_definition.get("description") or ""),
+            agent_ref=str(profile_definition.get("agent_ref") or ""),
+            agent_manifest_digest=str(
+                profile_definition.get("agent_manifest_digest") or ""
+            ),
         )
 
     workspace_trust: dict[str, Any] | None = None

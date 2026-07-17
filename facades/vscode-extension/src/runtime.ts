@@ -586,6 +586,23 @@ export class BaldrRuntime {
     return request;
   }
 
+  async agentCatalog(
+    workspaceRoot?: string,
+    token?: vscode.CancellationToken,
+  ): Promise<JsonRecord> {
+    const args = ['agent-catalog'];
+    if (workspaceRoot) args.push('--workspace', workspaceRoot);
+    return this.runRouterJson(args, token, true, false, workspaceRoot);
+  }
+
+  async manageLocalAgent(
+    workspaceRoot: string,
+    args: string[],
+    token?: vscode.CancellationToken,
+  ): Promise<JsonRecord> {
+    return this.runRouterJson(['agent', ...args], token, true, false, workspaceRoot);
+  }
+
   qualificationProfile(detection?: JsonRecord): string {
     if (vscode.env.remoteName === 'wsl') return 'vscode-remote-wsl';
     const target = record(detection?.target);
