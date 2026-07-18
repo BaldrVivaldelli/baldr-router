@@ -392,8 +392,12 @@ def _atomic_write_registry(
     )
     temporary_path = Path(temporary_name)
     try:
-        os.fchmod(descriptor, 0o600)
+        # mkstemp creates the file with owner-only permissions on POSIX.  Do
+        # not call os.fchmod here: it is unavailable on Windows and, if it
+        # fails before fdopen takes ownership, leaves a handle that prevents
+        # os.replace/unlink on that platform.
         with os.fdopen(descriptor, "wb", closefd=True) as handle:
+            descriptor = -1
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
@@ -409,6 +413,11 @@ def _atomic_write_registry(
             finally:
                 os.close(directory)
     finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
         try:
             temporary_path.unlink()
         except FileNotFoundError:

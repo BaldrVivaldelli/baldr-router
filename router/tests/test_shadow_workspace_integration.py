@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import shutil
 import stat
 import subprocess
 from dataclasses import asdict
@@ -13,6 +12,7 @@ from baldr_router.config import AppConfig, ExecutionProfileConfig
 from baldr_router.durability.engine import DurableWorkflowEngine, _resolved_snapshot
 from baldr_router.durability.git_workspace import GitWorkspaceError, GitWorkspaceManager
 from baldr_router.durability.identity import workspace_identity
+from baldr_router.durability import shadow_workspace as shadow_workspace_module
 from baldr_router.durability.store import DurableStore
 
 
@@ -770,7 +770,7 @@ def test_restart_reconstructs_missing_shadow_tree_from_latest_checkpoint(
 
     # Simulate a process/machine restart with a missing materialized tree. The
     # control journal, manifests, and content-addressed blobs remain durable.
-    shutil.rmtree(execution_root)
+    shadow_workspace_module._remove_owned_tree(execution_root)
     assert not execution_root.exists()
 
     second_store = DurableStore(path=database)

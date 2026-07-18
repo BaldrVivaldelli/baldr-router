@@ -84,7 +84,11 @@ def _retry_owned_readonly_removal(
     error = error_info[1]
     if not isinstance(error, PermissionError):
         raise error
-    os.chmod(target, stat.S_IRWXU)
+    # On Windows chmod only observes the read-only flag; S_IWRITE clears it
+    # for Git object files. POSIX directories retain execute permission so a
+    # failed traversal can also be retried safely.
+    writable_mode = stat.S_IWRITE if os.name == "nt" else stat.S_IRWXU
+    os.chmod(target, writable_mode)
     operation(target)
 
 

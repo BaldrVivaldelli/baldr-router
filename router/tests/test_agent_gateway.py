@@ -300,6 +300,7 @@ def test_provider_connector_attests_global_kiro_definition_and_rejects_shadowing
     definition = b'{"name":"baldr-worker","tools":["read"]}\n'
     definition_path.write_bytes(definition)
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
     manifest = AgentManifest(
         reference=AgentRef.parse("local://kiro/baldr-worker@1.0.0"),
         owner="external-team",

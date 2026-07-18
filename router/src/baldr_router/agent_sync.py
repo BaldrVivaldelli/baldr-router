@@ -441,14 +441,22 @@ def _write_state(path: Path, state: Mapping[str, Any]) -> None:
     )
     temporary = Path(temporary_name)
     try:
-        os.fchmod(descriptor, 0o600)
+        # mkstemp is already private on POSIX.  Avoid os.fchmod because it is
+        # not portable to Windows and a pre-fdopen failure would leak the
+        # descriptor, keeping the temporary file locked.
         with os.fdopen(descriptor, "wb", closefd=True) as handle:
+            descriptor = -1
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
         os.chmod(path, 0o600)
     finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
         try:
             temporary.unlink()
         except FileNotFoundError:

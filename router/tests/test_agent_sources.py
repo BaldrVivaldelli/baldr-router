@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -64,7 +65,26 @@ def _source_document() -> dict:
     return result.to_dict()
 
 
-def _write_executable(path: Path, *, version: str = "kiro-cli 1.2.3") -> None:
+def _write_executable(path: Path, *, version: str = "kiro-cli 1.2.3") -> Path:
+    if os.name == "nt":
+        path = path.with_suffix(".cmd")
+        path.write_text(
+            "@echo off\n"
+            'if "%~1"=="--version" goto version\n'
+            'if "%~1"=="agent" if "%~2"=="list" goto list\n'
+            "exit /b 2\n"
+            ":version\n"
+            f"echo {version}\n"
+            "exit /b 0\n"
+            ":list\n"
+            "echo Workspace: ~/.kiro/agents\n"
+            "echo Global:    ~/.kiro/agents\n"
+            "echo * kiro_default    ^(Built-in^)    Default agent\n"
+            "echo   kiro_help       ^(Built-in^)    Help agent\n"
+            "exit /b 0\n",
+            encoding="utf-8",
+        )
+        return path
     path.write_text(
         "#!/bin/sh\n"
         "if [ \"$1\" = \"--version\" ]; then\n"
@@ -82,9 +102,27 @@ def _write_executable(path: Path, *, version: str = "kiro-cli 1.2.3") -> None:
         encoding="utf-8",
     )
     path.chmod(0o755)
+    return path
 
 
-def _write_stderr_executable(path: Path) -> None:
+def _write_stderr_executable(path: Path) -> Path:
+    if os.name == "nt":
+        path = path.with_suffix(".cmd")
+        path.write_text(
+            "@echo off\n"
+            'if "%~1"=="--version" goto version\n'
+            'if "%~1"=="agent" if "%~2"=="list" goto list\n'
+            "exit /b 2\n"
+            ":version\n"
+            "echo kiro-cli 1.2.3\n"
+            "exit /b 0\n"
+            ":list\n"
+            "echo MCP functionality disabled 1>&2\n"
+            "echo * kiro_default    ^(Built-in^)    Default agent 1>&2\n"
+            "exit /b 0\n",
+            encoding="utf-8",
+        )
+        return path
     path.write_text(
         "#!/bin/sh\n"
         "if [ \"$1\" = \"--version\" ]; then\n"
@@ -100,6 +138,7 @@ def _write_stderr_executable(path: Path) -> None:
         encoding="utf-8",
     )
     path.chmod(0o755)
+    return path
 
 
 def test_agent_source_v1_round_trips_exact_manifests() -> None:
@@ -252,9 +291,9 @@ def test_kiro_source_discovers_builtins_and_attested_definition_versions(
         ),
         encoding="utf-8",
     )
-    command = tmp_path / "kiro-cli"
-    _write_executable(command)
+    command = _write_executable(tmp_path / "kiro-cli")
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
 
     result = KiroAgentSource(command=str(command)).discover(
         context=AgentSourceContext(workspace)
@@ -291,11 +330,11 @@ def test_kiro_source_discovers_builtins_and_attested_definition_versions(
 def test_kiro_source_accepts_successful_catalog_written_to_stderr(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    command = tmp_path / "kiro-cli"
-    _write_stderr_executable(command)
+    command = _write_stderr_executable(tmp_path / "kiro-cli")
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
 
     result = KiroAgentSource(command=str(command)).discover(
         context=AgentSourceContext(tmp_path)
@@ -309,8 +348,7 @@ def test_kiro_source_accepts_successful_catalog_written_to_stderr(
 def test_builtin_kiro_identity_is_rechecked_before_invocation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    command = tmp_path / "kiro-cli"
-    _write_executable(command)
+    command = _write_executable(tmp_path / "kiro-cli")
     monkeypatch.setattr(
         agent_gateway_module,
         "load_config",

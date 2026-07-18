@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import shlex
-import shutil
 import stat
 import subprocess
 import sys
@@ -709,7 +708,7 @@ def test_restore_missing_tree_recreates_usable_private_git_checkpoint(
     execution = manager.prepare(run_id="missing-tree", workspace_root=source)
     (execution.execution_root / "file.txt").write_text("checkpoint")
     digest = manager.checkpoint(execution)["manifest"]
-    shutil.rmtree(execution.execution_root)
+    shadow_workspace_module._remove_owned_tree(execution.execution_root)
 
     restored = manager.restore(execution)
 
@@ -750,7 +749,7 @@ def test_restore_missing_tree_fails_closed_when_private_git_is_unavailable(
     manager = _manager(tmp_path)
     execution = manager.prepare(run_id="missing-git", workspace_root=source)
     manager.checkpoint(execution)
-    shutil.rmtree(execution.execution_root)
+    shadow_workspace_module._remove_owned_tree(execution.execution_root)
     workspace = manager._workspace(execution)
     monkeypatch.setattr(
         workspace,
@@ -1104,6 +1103,10 @@ def test_publication_mkdir_refuses_an_observer_creation_after_intent(
     assert (source / "created" / "external.txt").read_text() == "keep"
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="Windows does not expose publication-relevant POSIX mode transitions",
+)
 def test_publication_chmod_refuses_an_observer_edit_after_intent(
     tmp_path: Path,
 ) -> None:

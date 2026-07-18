@@ -586,7 +586,10 @@ def test_publication_sdk_policy_and_public_contract_are_secret_free(
         "owner": "product-team",
         "effect_mode": "read-only",
     }
-    assert publication.stat().st_mode & 0o077 == 0
+    if os.name != "nt":
+        # Windows chmod controls the read-only attribute rather than POSIX
+        # group/other permission bits. Access there is inherited from ACLs.
+        assert publication.stat().st_mode & 0o077 == 0
     with pytest.raises(AgentContractError, match="already exists"):
         write_agent_publication(publication, manifest)
 

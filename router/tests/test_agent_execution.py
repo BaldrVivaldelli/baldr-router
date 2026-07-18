@@ -37,9 +37,9 @@ if effect_mode == "workspace-write":
 else:
     try:
         (workspace / "forbidden.txt").write_text("must fail")
-        readonly = False
+        snapshot_writable = True
     except OSError:
-        readonly = True
+        snapshot_writable = False
 event = {
     "contract": "baldr-agent-execution",
     "version": 1,
@@ -60,7 +60,8 @@ result = {
     "agent": request["agent"],
     "result": {
         "ok": True,
-        "readonly": readonly if effect_mode == "read-only" else None,
+        "snapshot_writable": snapshot_writable if effect_mode == "read-only" else None,
+        "workspace_root": str(workspace),
         "final_report": {
             "status": "approved",
             "summary": "external fixture completed",
@@ -145,7 +146,10 @@ def test_local_process_connector_enforces_read_and_write_boundaries(
         _invocation(workspace, can_write=False, events=events),
     )
     assert read["ok"] is True
-    assert read["readonly"] is True
+    # Windows does not enforce POSIX directory write bits.  The security
+    # boundary is the disposable snapshot: an agent may mutate that copy, but
+    # it must never receive or alter the original workspace.
+    assert Path(read["workspace_root"]).resolve() != workspace.resolve()
     assert not (workspace / "forbidden.txt").exists()
     assert events == ["working"]
 
