@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 from pathlib import Path
 
@@ -234,7 +235,8 @@ def test_sync_revoke_requires_source_confirmation_and_is_irreversible(
     state = json.loads(sync.state_path.read_text(encoding="utf-8"))
     assert state["events"][-1]["actor"] == "catalog-admin"
     assert state["events"][-1]["changes"][0]["action"] == "revoke"
-    assert stat.S_IMODE(sync.state_path.stat().st_mode) == 0o600
+    if os.name != "nt":
+        assert stat.S_IMODE(sync.state_path.stat().st_mode) == 0o600
 
 
 def test_sync_unavailable_managed_candidate_requires_explicit_lifecycle_action(

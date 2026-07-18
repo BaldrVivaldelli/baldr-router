@@ -8,6 +8,8 @@ import sys
 import tempfile
 import time
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -74,6 +76,19 @@ def _scenario(identifier: str, func: Callable[[], dict[str, Any]]) -> dict[str, 
         }
 
 
+def _close_process_streams(proc: subprocess.Popen[Any]) -> None:
+    """Release Windows pipe handles after a managed process terminates."""
+
+    for name in ("stdin", "stdout", "stderr"):
+        stream = getattr(proc, name, None)
+        if stream is None:
+            continue
+        try:
+            stream.close()
+        except (OSError, ValueError):
+            pass
+
+
 def _run_capture(cmd: list[str], *, timeout: float, cwd: Path | None = None) -> dict[str, Any]:
     proc = managed_popen(
         cmd,
@@ -98,6 +113,7 @@ def _run_capture(cmd: list[str], *, timeout: float, cwd: Path | None = None) -> 
         }
     finally:
         unregister_process(proc)
+        _close_process_streams(proc)
     return {
         "ok": proc.returncode == 0,
         "timed_out": False,
@@ -175,27 +191,66 @@ def _cancel_fixture(scratch: Path) -> dict[str, Any]:
         text=True,
         env={**os.environ, "BALDR_VERIFY_DISABLE": "1"},
     )
-    deadline = time.monotonic() + 8
-    while time.monotonic() < deadline and not pid_file.exists() and proc.poll() is None:
-        time.sleep(0.05)
-    if not pid_file.exists():
-        termination = terminate_process_tree(proc, grace_seconds=0.3)
-        return {"ok": False, "reason": "fixture did not expose its process ids", "termination": termination}
-    pids = json.loads(pid_file.read_text(encoding="utf-8"))
-    child_pid = int(pids.get("child_pid") or 0)
-    parent_pid = int(pids.get("pid") or proc.pid)
-    termination = terminate_process_tree(proc, grace_seconds=0.7)
-    time.sleep(0.15)
-    parent_alive = _pid_alive(parent_pid)
-    child_alive = _pid_alive(child_pid)
-    return {
-        "ok": bool(termination.get("terminated") and not parent_alive and not child_alive),
-        "parent_pid": parent_pid,
-        "child_pid": child_pid,
-        "parent_alive_after": parent_alive,
-        "child_alive_after": child_alive,
-        "termination": termination,
-    }
+    try:
+        deadline = time.monotonic() + 8
+        while (
+            time.monotonic() < deadline
+            and not pid_file.exists()
+            and proc.poll() is None
+        ):
+            time.sleep(0.05)
+        if not pid_file.exists():
+            termination = terminate_process_tree(proc, grace_seconds=0.3)
+            return {
+                "ok": False,
+                "reason": "fixture did not expose its process ids",
+                "termination": termination,
+            }
+        pids = json.loads(pid_file.read_text(encoding="utf-8"))
+        child_pid = int(pids.get("child_pid") or 0)
+        parent_pid = int(pids.get("pid") or proc.pid)
+        termination = terminate_process_tree(proc, grace_seconds=0.7)
+        time.sleep(0.15)
+        parent_alive = _pid_alive(parent_pid)
+        child_alive = _pid_alive(child_pid)
+        return {
+            "ok": bool(
+                termination.get("terminated")
+                and not parent_alive
+                and not child_alive
+            ),
+            "parent_pid": parent_pid,
+            "child_pid": child_pid,
+            "parent_alive_after": parent_alive,
+            "child_alive_after": child_alive,
+            "termination": termination,
+        }
+    finally:
+        unregister_process(proc)
+        _close_process_streams(proc)
+
+
+def _remove_verification_tree(root: Path) -> None:
+    """Remove a verification tree after transient Windows handle release."""
+
+    deadline = time.monotonic() + 5.0
+    while root.exists():
+        try:
+            shutil.rmtree(root)
+            return
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.1)
+
+
+@contextmanager
+def _temporary_verification_root() -> Iterator[Path]:
+    root = Path(tempfile.mkdtemp(prefix="baldr-verify-"))
+    try:
+        yield root
+    finally:
+        _remove_verification_tree(root)
 
 
 def _mcp_restart_fixture() -> dict[str, Any]:
@@ -343,8 +398,8 @@ def run_lifecycle_verification(
     if workspace_root:
         profile = workspace_profile(workspace_root)
 
-    with tempfile.TemporaryDirectory(prefix="baldr-verify-") as temp:
-        scratch = Path(temp) / "repo"
+    with _temporary_verification_root() as verification_root:
+        scratch = verification_root / "repo"
         _prepare_scratch(scratch)
         scenarios = [
             _scenario("installation_receipt", lambda: _install_receipt_fixture(environment)),

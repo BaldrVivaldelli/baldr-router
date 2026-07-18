@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import baldr_router.validation.lifecycle as lifecycle_module
 from baldr_router.validation.lifecycle import ensure_quick_verification, run_lifecycle_verification
 
 
@@ -28,3 +29,27 @@ def test_quick_lifecycle_verification_and_evidence(tmp_path: Path, monkeypatch):
 
     cached = ensure_quick_verification(client_id="pytest")
     assert cached["status"] == "cached"
+
+
+def test_verification_cleanup_retries_a_transient_directory_lock(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = tmp_path / "verification"
+    root.mkdir()
+    (root / "result.json").write_text("{}\n", encoding="utf-8")
+    remove_tree = lifecycle_module.shutil.rmtree
+    attempts = 0
+
+    def transient_lock(path: Path) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise PermissionError("synthetic Windows sharing violation")
+        remove_tree(path)
+
+    monkeypatch.setattr(lifecycle_module.shutil, "rmtree", transient_lock)
+
+    lifecycle_module._remove_verification_tree(root)
+
+    assert attempts == 2
+    assert not root.exists()
