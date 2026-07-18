@@ -9,7 +9,7 @@
 
 ## Steps
 
-1. Install `baldr-router-vscode-0.19.0.vsix` over any previous version.
+1. Install `baldr-router-vscode-0.20.0.vsix` over any previous version.
 2. Reload VS Code once if requested by VS Code.
 3. Run `Baldr: Open` → **Status** before setup. Confirm the runtime target is either the Windows host or WSL and no hand-written `mcp.json` is required.
 4. Run `@baldr /setup`. Confirm the open repository is reported as trusted and is a Git repository.

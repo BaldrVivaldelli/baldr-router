@@ -128,5 +128,11 @@ def init_project(
         "project": str(root),
         "config": str(root / PROJECT_FILE),
         "language": language,
-        "next": ["baldr-agent test", "baldr-agent build", "baldr-agent publish"],
+        "next": [
+            "baldr-agent test",
+            f"baldr-agent driver conformance baldr.{language}",
+            "baldr-agent build",
+            "baldr-agent publish",
+            "baldr-agent run --role implementer --workspace <path> --request <task>",
+        ],
     }

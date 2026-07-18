@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.20.0 — Polyglot External Agents
+
+- Promoted the external-agent platform into a coordinated release of Router, Agent Manager, Runner, Agent Builder, the Python SDK, the TypeScript SDK and the TypeScript Builder driver.
+- Added `baldr-agent run` for an exact, ephemeral development execution through Agent Runner with an explicit workspace and the role's declared effect boundary.
+- Added `baldr-agent driver conformance` to verify stable driver identity, fail-closed protocol negotiation, tests, artifact attestation, reproducible builds and checkout-independent output against a real agent project.
+- Added clean-install release coverage for the complete create, test, conform, build, publish, run, update, immutable-replacement rejection and rollback lifecycle.
+- Applied the same 15-second minimum durable lease used by recovery to normal workflow and participant execution, preventing false stale-worker fences under local Git/SQLite load.
+- Kept Python schema-v1 agents, Codex/Kiro provider profiles and the public `setup/status/run` facade contract compatible with 0.19.
+- Versioned all Python, npm, launcher, Kiro, VS Code and release surfaces together as `0.20.0`, with exact cross-package dependency ranges and migration guidance.
+
 ## 0.19.0 — Narrative Progress UX
 
 - Replaced internal workflow-status rows with a durable narrative view that explains what Baldr is doing now, what each stage produced, what was verified, and whether the user must act.

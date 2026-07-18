@@ -401,8 +401,11 @@ def _crash_write_run(
     store: DurableStore,
     filename: str = "unknown.txt",
 ) -> str:
+    observed_roles: list[str] = []
+
     def provider(**kwargs):
         role = kwargs["role_name"]
+        observed_roles.append(role)
         if role == "implementer":
             (kwargs["cwd"] / filename).write_text("unknown effect\n", encoding="utf-8")
             raise SimulatedProcessCrash("provider-side-effect")
@@ -413,8 +416,8 @@ def _crash_write_run(
             "final_report": _report(status, role),
         }
 
-    with pytest.raises(SimulatedProcessCrash):
-        DurableWorkflowEngine(store=store, provider_runner=provider).run(
+    try:
+        result = DurableWorkflowEngine(store=store, provider_runner=provider).run(
             workspace_root=repo,
             task="write fixture",
             extra_context="",
@@ -422,6 +425,13 @@ def _crash_write_run(
             context7_libraries=None,
             client_name="test",
             idempotency_key="write-fixture",
+        )
+    except SimulatedProcessCrash:
+        pass
+    else:
+        pytest.fail(
+            "Expected the simulated implementer crash; "
+            f"observed_roles={observed_roles!r}, result={result!r}"
         )
     run_id = _only_run_id(store)
     _expire_run_lease(store, run_id)

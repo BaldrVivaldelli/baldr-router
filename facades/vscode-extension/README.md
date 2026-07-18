@@ -113,7 +113,7 @@ The extension renders UI and native Quick Picks. Provider routing, profiles, wor
 ## Packaged runtime
 
 ```text
-resources/runtime/baldr_router-0.19.0-py3-none-any.whl
+resources/runtime/baldr_router-0.20.0-py3-none-any.whl
 runtime/runtime-bootstrap.mjs
 runtime/baldr-bootstrap.mjs
 ```

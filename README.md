@@ -126,8 +126,8 @@ Una release se instala sin conservar el checkout:
 ```bash
 node_package_dir=/ruta/a/release/artifacts/node
 npm install --global \
-  "$node_package_dir/baldr-agent-sdk-0.19.0.tgz" \
-  "$node_package_dir/baldr-agent-builder-typescript-0.19.0.tgz"
+  "$node_package_dir/baldr-agent-sdk-0.20.0.tgz" \
+  "$node_package_dir/baldr-agent-builder-typescript-0.20.0.tgz"
 baldr-agent driver doctor baldr.typescript
 ```
 
@@ -149,9 +149,15 @@ baldr-agent init ./my-typescript-agent \
 
 cd my-typescript-agent
 baldr-agent test
+baldr-agent driver conformance baldr.typescript
 baldr-agent build
 baldr-agent publish
 baldr-agent doctor
+
+baldr-agent run \
+  --role implementer \
+  --workspace /ruta/al/workspace \
+  --request "Generá el resultado"
 ```
 
 El proyecto importa `@baldr/agent-sdk`; el driver `baldr.typescript` genera un
@@ -171,6 +177,7 @@ baldr-agent init ./my-python-agent \
 
 cd my-python-agent
 baldr-agent test
+baldr-agent driver conformance baldr.python
 baldr-agent build
 baldr-agent publish
 baldr-agent doctor
@@ -218,7 +225,7 @@ make check
 - Agregar otro lenguaje requiere un SDK de autoría y un driver compatible; no
   requiere modificar Router, Agent Manager ni Runner.
 
-> **v0.19.0 — Progreso narrativo.** La consola explica en lenguaje cotidiano
+> **v0.20.0 — Agentes externos políglotas.** La consola explica en lenguaje cotidiano
 > qué entendió Baldr, qué está haciendo, qué produjo Planificación, Ejecución y
 > Revisión, qué comprobó y cuándo necesita una decisión. La protección
 > automática de v0.18 continúa siendo la opción recomendada.
@@ -303,7 +310,7 @@ Instalación local:
 Extensions
   -> …
   -> Install from VSIX
-  -> baldr-router-vscode-0.19.0.vsix
+  -> baldr-router-vscode-0.20.0.vsix
 ```
 
 Superficie diaria:
@@ -628,6 +635,7 @@ El build genera wheels, VSIX, ZIPs de fachadas, checksums y `dist/RC_VALIDATION.
 
 ## Documentación
 
+- [`docs/agentes-externos-necesitan-fronteras.md`](docs/agentes-externos-necesitan-fronteras.md) — artículo de diseño sobre la plataforma de agentes externos
 - [`docs/architecture.md`](docs/architecture.md)
 - [`docs/durable-orchestration.md`](docs/durable-orchestration.md)
 - [`docs/release-candidate-hardening.md`](docs/release-candidate-hardening.md)

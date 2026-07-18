@@ -7,8 +7,10 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from baldr_agent_builder.backend import LocalBuilderBackend
 from baldr_agent_builder.client import BuilderClient
 from baldr_agent_builder.config import load_project
+from baldr_agent_builder.drivers import DriverRegistry
 from baldr_agent_builder.release import install_release, publish_release
 from baldr_agent_builder.scaffold import init_project
 from baldr_router.agent_gateway import external_agent_catalog_status, reset_agent_gateway
@@ -84,7 +86,23 @@ def main() -> int:
         assert project.language == "typescript"
         assert project.driver == "baldr.typescript"
 
-        client = BuilderClient()
+        discovered = DriverRegistry().discover()
+        checkout_drivers = [
+            item
+            for item in discovered.drivers
+            if item.descriptor.get("id") == "baldr.typescript"
+            and item.process.origin == str(registration)
+        ]
+        if len(checkout_drivers) != 1:
+            raise AssertionError(
+                "The vertical slice requires exactly one TypeScript driver "
+                f"from the checkout registration: {discovered}"
+            )
+        client = BuilderClient(
+            LocalBuilderBackend(
+                registry=DriverRegistry([checkout_drivers[0].process])
+            )
+        )
         tested = client.test(project)
         assert tested["ok"] is True
         first = client.build(project, output_dir=temp / "build-one").build

@@ -24,7 +24,7 @@ def _synthetic_artifacts(
     presenter: bool = True,
     stale_wheel: bool = False,
 ) -> tuple[Path, Path]:
-    version = "0.19.0"
+    version = "0.20.0"
     wheel = tmp_path / f"baldr_router-{version}-py3-none-any.whl"
     schema = (ROOT / "contracts" / "work-item-progress-v1.schema.json").read_bytes()
     deliverable_schema = (
@@ -152,17 +152,17 @@ def _synthetic_artifacts(
 def test_current_release_surfaces_are_consistent() -> None:
     values = release_consistency.source_version_values(ROOT)
     assert len(values) >= 15
-    assert set(values.values()) == {"0.19.0"}
-    assert release_consistency.check_source_consistency(ROOT) == "0.19.0"
+    assert set(values.values()) == {"0.20.0"}
+    assert release_consistency.check_source_consistency(ROOT) == "0.20.0"
 
 
 def test_uniform_version_gate_reports_every_surface() -> None:
     with pytest.raises(
         release_consistency.ReleaseConsistencyError,
-        match=r"core='0\.19\.0'.*extension='0\.18\.0'",
+        match=r"core='0\.20\.0'.*extension='0\.19\.0'",
     ):
         release_consistency.assert_uniform_versions(
-            {"core": "0.19.0", "extension": "0.18.0"}
+            {"core": "0.20.0", "extension": "0.19.0"}
         )
 
 
@@ -172,9 +172,9 @@ def test_packaged_release_gate_checks_narrative_modules_and_schema(
     wheel, vsix = _synthetic_artifacts(tmp_path)
     assert (
         release_consistency.check_artifact_consistency(
-            wheel, vsix, root=ROOT, version="0.19.0"
+            wheel, vsix, root=ROOT, version="0.20.0"
         )
-        == "0.19.0"
+        == "0.20.0"
     )
 
 
@@ -185,7 +185,7 @@ def test_packaged_release_gate_rejects_missing_presenter(tmp_path: Path) -> None
         match="workItemPresentation.js",
     ):
         release_consistency.check_artifact_consistency(
-            wheel, vsix, root=ROOT, version="0.19.0"
+            wheel, vsix, root=ROOT, version="0.20.0"
         )
 
 
@@ -196,5 +196,5 @@ def test_packaged_release_gate_rejects_stale_embedded_wheels(tmp_path: Path) -> 
         match="exactly the current core wheel",
     ):
         release_consistency.check_artifact_consistency(
-            wheel, vsix, root=ROOT, version="0.19.0"
+            wheel, vsix, root=ROOT, version="0.20.0"
         )

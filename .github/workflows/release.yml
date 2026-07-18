@@ -3,9 +3,14 @@ name: Release
 on:
   push:
     tags:
-      - 'v0.19.*'
+      - 'v0.20.*'
   workflow_dispatch:
     inputs:
+      publish_pypi:
+        description: Publish the validated Python control-plane and agent packages to PyPI
+        required: true
+        default: false
+        type: boolean
       publish_npm:
         description: Publish the validated TypeScript SDK and driver to npm
         required: true
@@ -41,6 +46,9 @@ jobs:
         working-directory: facades/vscode-extension
       - run: python scripts/dev.py build
       - run: python scripts/dev.py verify-release
+      - name: Publish Python packages to PyPI
+        if: github.event_name == 'workflow_dispatch' && inputs.publish_pypi
+        run: uv publish --trusted-publishing always dist/artifacts/python/*
       - name: Publish TypeScript agent packages to npm
         if: github.event_name == 'workflow_dispatch' && inputs.publish_npm
         run: |

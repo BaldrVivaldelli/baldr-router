@@ -56,7 +56,7 @@ def main(argv: list[str] | None = None) -> int:
                     "health-response",
                     "runner-health",
                     status="ok",
-                    runner_version="0.19.0",
+                    runner_version="0.20.0",
                     protocols=[1],
                 )
             )

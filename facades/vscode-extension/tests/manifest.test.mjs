@@ -33,8 +33,8 @@ test('requires VS Code Workspace Trust before provider execution', () => {
   assert.equal(manifest.capabilities.untrustedWorkspaces.supported, false);
 });
 
-test('packages the v0.19.0 Baldr Console facade', () => {
-  assert.equal(manifest.version, '0.19.0');
+test('packages the v0.20.0 Baldr Console facade', () => {
+  assert.equal(manifest.version, '0.20.0');
   const extensionVersion = runtimeSource.match(/export const EXTENSION_VERSION = '([^']+)'/)?.[1];
   assert.equal(extensionVersion, manifest.version);
   assert.match(contract.intents.setup.description, /lifecycle verification/);

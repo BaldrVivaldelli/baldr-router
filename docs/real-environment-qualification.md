@@ -1,4 +1,4 @@
-# Real Environment Qualification — v0.19
+# Real Environment Qualification — v0.20
 
 Baldr distinguishes three different claims:
 
@@ -148,7 +148,7 @@ code, secrets, full home paths, and raw workspace paths.
 
 ## Promotion rule
 
-A v0.19.x build may be promoted only when all mandatory profiles have a
+A v0.20.x build may be promoted only when all mandatory profiles have a
 `qualified` receipt and the receipts refer to the same release version.
 Synthetic CI evidence remains necessary, but never substitutes for this gate.
 

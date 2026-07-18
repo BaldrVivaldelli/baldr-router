@@ -260,7 +260,7 @@ class Agent:
                         "kind": "health-response",
                         "request_id": message["request_id"],
                         "status": "ok",
-                        "runner_version": "agent-sdk-0.19.0",
+                        "runner_version": "agent-sdk-0.20.0",
                         "protocols": [1],
                     }
                 )

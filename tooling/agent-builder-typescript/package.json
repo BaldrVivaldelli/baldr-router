@@ -1,6 +1,6 @@
 {
   "name": "@baldr/agent-builder-typescript",
-  "version": "0.19.0",
+  "version": "0.20.0",
   "description": "TypeScript process driver for Baldr Builder Protocol v1.",
   "keywords": [
     "agents",
@@ -39,7 +39,7 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@baldr/agent-sdk": "0.19.0",
+    "@baldr/agent-sdk": "0.20.0",
     "typescript": "^5.9.3"
   },
   "devDependencies": {

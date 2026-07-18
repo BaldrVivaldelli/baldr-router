@@ -1,4 +1,4 @@
-# Baldr Console y progreso narrativo — v0.19
+# Baldr Console y progreso narrativo — v0.20
 
 Baldr Console es la interfaz principal de Baldr Router en VS Code. Vive en una sección propia de la Activity Bar y evita usar Copilot Chat como panel operativo.
 

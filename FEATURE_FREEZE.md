@@ -1,6 +1,6 @@
-# Feature Freeze — línea de estabilización v0.19
+# Feature Freeze — línea de estabilización v0.20
 
-Baldr Router permanece bajo **congelación funcional**. v0.19 agrega una proyección narrativa y una presentación accesible del progreso durable sin ampliar providers, roles, workflows ni las intenciones públicas `setup/status/run`; la protección automática de v0.18 continúa vigente.
+Baldr permanece bajo **congelación funcional**. v0.20 agrega la plataforma de agentes externos políglotas, Agent Builder, Runner y resolución durable de equipos sin ampliar las intenciones públicas `setup/status/run`; la protección automática y el progreso narrativo de las líneas anteriores continúan vigentes.
 
 ## Superficie congelada
 
@@ -54,7 +54,7 @@ La lista exacta de tools, prompts, providers, roles y workflows está declarada 
 4. Validación real de VS Code Windows + WSL automático.
 5. Validación real de VS Code Remote WSL.
 6. Validación real de Kiro Power + adapter.
-7. Upgrade v0.18 → v0.19 sin destruir el runtime anterior si falla la instalación nueva.
+7. Upgrade v0.19 → v0.20 sin destruir el runtime anterior si falla la instalación nueva.
 8. Cancelación sin procesos huérfanos.
 9. Context7 sin secretos en logs, configuración, telemetría ni cache.
 10. Diez tareas representativas completadas en al menos dos repositorios Git reales sin edición técnica manual de la integración.
@@ -67,7 +67,7 @@ La lista exacta de tools, prompts, providers, roles y workflows está declarada 
 Los tests sintéticos son necesarios pero no reemplazan los runbooks de entorno real bajo `e2e/`. Cada perfil obligatorio debe pasar tres veces consecutivas desde un estado limpio.
 
 
-## Permitido en v0.19.x Real Environment Qualification
+## Permitido en v0.20.x Real Environment Qualification
 
 - qualification profiles, operator assertions and canary receipts;
 - CI, SBOM, provenance, checksums and release hygiene;

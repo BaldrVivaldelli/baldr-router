@@ -30,7 +30,7 @@ def test_builder_owns_lifecycle_entrypoint_and_depends_only_on_sdk() -> None:
         "baldr-agent": "baldr_agent_builder.cli:main"
     }
     assert builder["project"]["dependencies"] == [
-        "baldr-agent-sdk>=0.19.0,<0.20.0"
+        "baldr-agent-sdk>=0.20.0,<0.21.0"
     ]
 
     package = builder_root / "src" / "baldr_agent_builder"
@@ -42,9 +42,11 @@ def test_builder_owns_lifecycle_entrypoint_and_depends_only_on_sdk() -> None:
         "client.py",
         "cli.py",
         "config.py",
+        "conformance.py",
         "diagnostics.py",
         "driver.py",
         "drivers.py",
+        "execution.py",
         "inventory.py",
         "models.py",
         "protocol.py",

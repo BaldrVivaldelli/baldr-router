@@ -13,7 +13,7 @@ const bin = join(launcherRoot, 'bin', 'baldr-router-launcher.mjs');
 test('prints current launcher version', () => {
   const result = spawnSync(process.execPath, [bin, '--version'], { encoding: 'utf8' });
   assert.equal(result.status, 0);
-  assert.match(result.stdout, /^0\.19\.0/);
+  assert.match(result.stdout, /^0\.20\.0/);
 });
 
 test('detect emits the shared runtime descriptor shape', () => {
@@ -23,7 +23,7 @@ test('detect emits the shared runtime descriptor shape', () => {
   });
   assert.equal(result.status, 0);
   const parsed = JSON.parse(result.stdout);
-  assert.equal(parsed.launcher.version, '0.19.0');
+  assert.equal(parsed.launcher.version, '0.20.0');
   assert.equal(parsed.target.mode, 'host');
   assert.ok(['host', 'missing'].includes(parsed.target.kind));
 });
@@ -49,11 +49,11 @@ import {
 test('managed runtime manifest detects current wheel and upgrade mismatch', () => {
   const root = fs.mkdtempSync(join(os.tmpdir(), 'baldr-runtime-manifest-'));
   const executable = join(root, 'baldr-router');
-  const wheel = join(root, 'baldr_router-0.19.0.whl');
+  const wheel = join(root, 'baldr_router-0.20.0.whl');
   fs.writeFileSync(executable, 'binary');
   fs.writeFileSync(wheel, 'wheel-v1');
   fs.writeFileSync(join(root, 'runtime.json'), JSON.stringify({
-    version: '0.19.0',
+    version: '0.20.0',
     wheelSha256: sha256File(wheel),
   }));
 
@@ -65,7 +65,7 @@ test('managed runtime manifest detects current wheel and upgrade mismatch', () =
 
 test('runtime upgrade pruning keeps current and newest prior version', () => {
   const runtimeDir = fs.mkdtempSync(join(os.tmpdir(), 'baldr-runtime-prune-'));
-  const versions = ['0.13.0', '0.14.0', '0.15.0', '0.17.0', '0.18.0', '0.19.0'];
+  const versions = ['0.13.0', '0.14.0', '0.15.0', '0.17.0', '0.18.0', '0.19.0', '0.20.0'];
   for (const [index, version] of versions.entries()) {
     const dir = join(runtimeDir, version);
     fs.mkdirSync(dir, { recursive: true });
@@ -75,12 +75,12 @@ test('runtime upgrade pruning keeps current and newest prior version', () => {
 
   const removed = pruneOldHostRuntimes(runtimeDir, {
     keepVersions: 2,
-    currentVersion: '0.19.0',
+    currentVersion: '0.20.0',
   });
 
-  assert.deepEqual(removed.sort(), ['0.13.0', '0.14.0', '0.15.0', '0.17.0']);
-  assert.equal(fs.existsSync(join(runtimeDir, '0.18.0')), true);
+  assert.deepEqual(removed.sort(), ['0.13.0', '0.14.0', '0.15.0', '0.17.0', '0.18.0']);
   assert.equal(fs.existsSync(join(runtimeDir, '0.19.0')), true);
+  assert.equal(fs.existsSync(join(runtimeDir, '0.20.0')), true);
   fs.rmSync(runtimeDir, { recursive: true, force: true });
 });
 
@@ -170,7 +170,7 @@ test('shared cancellation terminates a detached child process group', { skip: pr
 
 test('managed WSL runtime is created at its final path with rollback semantics', () => {
   const root = fs.mkdtempSync(join(os.tmpdir(), 'baldr-wsl-install-'));
-  const wheel = join(root, 'baldr_router-0.19.0-py3-none-any.whl');
+  const wheel = join(root, 'baldr_router-0.20.0-py3-none-any.whl');
   fs.writeFileSync(wheel, 'synthetic-wheel');
   let installScript = '';
 
@@ -185,13 +185,13 @@ test('managed WSL runtime is created at its final path with rollback semantics',
     if (command === 'wsl.exe') {
       const script = String(args.at(-1) ?? '');
       if (script.startsWith('wslpath -u ')) {
-        return { status: 0, stdout: '/mnt/c/baldr_router-0.19.0-py3-none-any.whl\n', stderr: '' };
+        return { status: 0, stdout: '/mnt/c/baldr_router-0.20.0-py3-none-any.whl\n', stderr: '' };
       }
       if (script.includes('set -e;')) {
         installScript = script;
         return {
           status: 0,
-          stdout: '/home/test/.local/share/baldr-router-vscode/0.19.0/venv/bin/baldr-router\n',
+          stdout: '/home/test/.local/share/baldr-router-vscode/0.20.0/venv/bin/baldr-router\n',
           stderr: '',
         };
       }
@@ -213,7 +213,7 @@ test('managed WSL runtime is created at its final path with rollback semantics',
 
   assert.equal(target.ok, true);
   assert.equal(target.kind, 'wsl');
-  assert.match(installScript, /root="\$HOME\/\.local\/share\/baldr-router-vscode\/0\.19\.0"/);
+  assert.match(installScript, /root="\$HOME\/\.local\/share\/baldr-router-vscode\/0\.20\.0"/);
   assert.match(installScript, /python3 -m venv "\$root\/venv"/);
   assert.match(installScript, /rollback=/);
   assert.match(installScript, /receiptSchemaVersion/);

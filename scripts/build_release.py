@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "0.19.0"
+VERSION = "0.20.0"
 DIST = ROOT / "dist"
 ARTIFACTS = DIST / "artifacts"
 PYTHON_DIST = ARTIFACTS / "python"
@@ -302,11 +302,27 @@ print(json.dumps({{'version': __version__, 'sdk': sdk_version, 'builder': builde
         help_text = run(
             str(agent_cli), "--help", label="isolated external agent CLI"
         )
-        for command in ("init", "test", "build", "publish", "doctor"):
+        for command in (
+            "init",
+            "test",
+            "build",
+            "publish",
+            "run",
+            "doctor",
+            "rollback",
+        ):
             if command not in help_text:
                 raise SystemExit(
                     f"External agent CLI does not expose {command!r}: {help_text}"
                 )
+        driver_help = run(
+            str(agent_cli), "driver", "--help", label="isolated driver CLI"
+        )
+        if "conformance" not in driver_help:
+            raise SystemExit(
+                "External agent CLI does not expose driver conformance: "
+                f"{driver_help}"
+            )
 
 
 def isolated_typescript_distribution_validation(
@@ -363,11 +379,24 @@ def isolated_typescript_distribution_validation(
             label="isolated TypeScript package install",
         )
         npm_bin = npm_prefix if os.name == "nt" else npm_prefix / "bin"
+        isolated_tools = root / "tool-bin"
+        isolated_tools.mkdir()
+        if os.name == "nt":
+            shutil.copy2(node, isolated_tools / "node.exe")
+        else:
+            (isolated_tools / "node").symlink_to(Path(node).resolve())
+        isolated_path = (
+            str(npm_bin),
+            str(scripts),
+            str(isolated_tools),
+            str(Path(executable("git")).resolve().parent),
+        )
         env = {
             **os.environ,
-            "PATH": os.pathsep.join(
-                (str(npm_bin), str(scripts), os.environ.get("PATH", ""))
-            ),
+            # Do not inherit globally installed Baldr drivers. The release
+            # smoke must prove only the freshly installed packages plus the
+            # explicit platform prerequisites (Node and Git).
+            "PATH": os.pathsep.join(dict.fromkeys(isolated_path)),
             "XDG_CONFIG_HOME": str(root / "config"),
             "XDG_CACHE_HOME": str(root / "cache"),
             "XDG_STATE_HOME": str(root / "state"),
@@ -451,6 +480,58 @@ def isolated_typescript_distribution_validation(
             env=env,
             label="isolated TypeScript agent tests",
         )
+        conformance = parse_json_output(
+            run(
+                str(agent_cli),
+                "driver",
+                "conformance",
+                "baldr.typescript",
+                "--project",
+                str(project),
+                "--output-root",
+                str(root / "conformance"),
+                cwd=root,
+                env=env,
+                label="installed TypeScript driver conformance",
+            ),
+            label="installed TypeScript driver conformance",
+        )
+        if conformance.get("ok") is not True or not all(
+            item.get("ok") is True for item in conformance.get("checks", [])
+        ):
+            raise SystemExit(
+                f"Installed TypeScript driver failed conformance: {conformance}"
+            )
+        run_workspace = root / "run-workspace"
+        run_workspace.mkdir()
+        direct_run = parse_json_output(
+            run(
+                str(agent_cli),
+                "run",
+                "--project",
+                str(project),
+                "--role",
+                "implementer",
+                "--workspace",
+                str(run_workspace),
+                "--request",
+                "Create the generated TypeScript result",
+                "--output-dir",
+                str(root / "run-build"),
+                cwd=root,
+                env=env,
+                label="direct TypeScript agent execution",
+            ),
+            label="direct TypeScript agent execution",
+        )
+        if (
+            direct_run.get("ok") is not True
+            or direct_run.get("state") != "succeeded"
+            or not (run_workspace / "distribution-agent_result.md").is_file()
+        ):
+            raise SystemExit(
+                f"Installed TypeScript agent direct run failed: {direct_run}"
+            )
         first = parse_json_output(
             run(
                 str(agent_cli),
@@ -520,6 +601,83 @@ def isolated_typescript_distribution_validation(
             raise SystemExit(
                 f"Initial TypeScript release is unhealthy: {first_publication=} {doctor=}"
             )
+
+        facade_runs: dict[str, dict[str, Any]] = {}
+        role_references = {
+            "architect": "local://distribution/distribution-agent-planner@1.0.0",
+            "implementer": "local://distribution/distribution-agent-writer@1.0.0",
+            "reviewer": "local://distribution/distribution-agent-reviewer@1.0.0",
+        }
+        facade_workspaces = {
+            client: root / f"{client}-workspace"
+            for client in ("vscode-extension", "kiro")
+        }
+        facade_env = {
+            **env,
+            "BALDR_TRUSTED_WORKSPACE_ROOTS_JSON": json.dumps(
+                [str(path) for path in facade_workspaces.values()]
+            ),
+        }
+        for client, workspace in facade_workspaces.items():
+            workspace.mkdir()
+            run(
+                executable("git"),
+                "init",
+                "-q",
+                str(workspace),
+                cwd=root,
+                env=facade_env,
+                label=f"initialize {client} facade workspace",
+            )
+            arguments = [
+                str(router_cli),
+                "facade",
+                "run",
+                str(workspace),
+                "Create the generated TypeScript result through the shared facade",
+                "--workspace-mode",
+                "current",
+                "--team-mode",
+                "automatic",
+            ]
+            for role, reference in role_references.items():
+                arguments.extend(("--agent-override", f"{role}={reference}"))
+            arguments.extend(("--client", client))
+            facade_result = parse_json_output(
+                run(
+                    *arguments,
+                    cwd=root,
+                    env=facade_env,
+                    label=f"installed {client} external-agent facade execution",
+                ),
+                label=f"installed {client} external-agent facade execution",
+            )
+            actual_references = {
+                str(step.get("phase")): str(profile.get("agent_ref"))
+                for step in facade_result.get("steps", [])
+                if isinstance(step, dict)
+                for profile in step.get("profiles", [])
+                if isinstance(profile, dict)
+            }
+            if (
+                facade_result.get("ok") is not True
+                or facade_result.get("status") != "approved"
+                or (facade_result.get("facade") or {}).get("client") != client
+                or actual_references != role_references
+                or not (workspace / "distribution-agent_result.md").is_file()
+            ):
+                raise SystemExit(
+                    f"Installed {client} facade execution failed: {facade_result}"
+                )
+            facade_runs[client] = {
+                "status": facade_result.get("status"),
+                "workflow": facade_result.get("workflow"),
+                "roles": actual_references,
+                "write_authorization_requested": (
+                    (facade_result.get("error") or {}).get("code")
+                    == "write_authorization_required"
+                ),
+            }
 
         config = project / "baldr-agent.toml"
         configured = config.read_text(encoding="utf-8")
@@ -631,6 +789,13 @@ def isolated_typescript_distribution_validation(
                 },
                 "driver": installed_descriptor,
                 "artifact_digest": first.get("artifact_digest"),
+                "conformance": conformance,
+                "direct_run": {
+                    "agent": direct_run.get("agent"),
+                    "role": direct_run.get("role"),
+                    "state": direct_run.get("state"),
+                },
+                "shared_facade_runs": facade_runs,
                 "published_versions": ["1.0.0", "1.1.0"],
                 "immutable_replacement_rejected": True,
                 "rollback": rollback,
@@ -707,7 +872,7 @@ def write_checksums() -> Path:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Build Baldr Router v0.19 narrative-progress artifacts")
+    parser = argparse.ArgumentParser(description="Build Baldr 0.20 polyglot-agent artifacts")
     parser.add_argument("--skip-tests", action="store_true")
     parser.add_argument("--keep-dist", action="store_true")
     args = parser.parse_args()
@@ -869,10 +1034,12 @@ def main() -> int:
             "baldr_agent_builder/build.py",
             "baldr_agent_builder/client.py",
             "baldr_agent_builder/cli.py",
+            "baldr_agent_builder/conformance.py",
             "baldr_agent_builder/config.py",
             "baldr_agent_builder/diagnostics.py",
             "baldr_agent_builder/driver.py",
             "baldr_agent_builder/drivers.py",
+            "baldr_agent_builder/execution.py",
             "baldr_agent_builder/inventory.py",
             "baldr_agent_builder/models.py",
             "baldr_agent_builder/protocol.py",
@@ -1065,7 +1232,12 @@ def main() -> int:
     source_bundle = DIST / f"baldr-router-{VERSION}-source.zip"
     artifacts_bundle = DIST / f"baldr-router-{VERSION}-artifacts.zip"
     validation_bundle = DIST / f"baldr-router-{VERSION}-validation-evidence.zip"
-    zip_directory(ROOT, source_bundle, root_name="baldr-router")
+    zip_directory(
+        ROOT,
+        source_bundle,
+        root_name="baldr-router",
+        exclude_parts={"baldr_instrospeccion.md"},
+    )
     zip_selected([(ARTIFACTS, "artifacts"), (METADATA_DIR, "metadata")], artifacts_bundle)
     zip_selected([(VALIDATION_DIR, "validation")], validation_bundle)
     bundles = {"source": source_bundle, "artifacts": artifacts_bundle, "validation_evidence": validation_bundle}

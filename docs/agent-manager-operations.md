@@ -131,7 +131,7 @@ Before an upgrade, stop writers or use the SQLite online backup command:
 baldr-router agent-manager backup \
   --registry company \
   --database /var/lib/baldr/agent-manager.sqlite3 \
-  --output /var/backups/baldr/agent-manager-before-0.19.0.sqlite3
+  --output /var/backups/baldr/agent-manager-before-0.20.0.sqlite3
 ```
 
 Backups are created as new private files and never overwrite an existing path.

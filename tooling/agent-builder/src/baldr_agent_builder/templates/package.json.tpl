@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@baldr/agent-sdk": "^0.19.0"
+    "@baldr/agent-sdk": "^0.20.0"
   },
   "engines": {
     "node": ">=20"

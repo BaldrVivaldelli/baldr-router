@@ -7,9 +7,11 @@ from typing import Any
 from baldr_agent_sdk.contract import ContractError
 
 from .client import BuilderClient
+from .conformance import driver_conformance
 from .config import load_project
 from .diagnostics import project_doctor
 from .drivers import driver_status, register_driver
+from .execution import run_agent
 from .release import activate_version, install_release, publish_release
 from .scaffold import init_project
 
@@ -78,6 +80,25 @@ def _cmd_publish(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_run(args: argparse.Namespace) -> int:
+    result = run_agent(
+        load_project(args.project),
+        role=args.role,
+        workspace=args.workspace,
+        request=args.request,
+        output_dir=args.output_dir,
+        install_root=args.install_root,
+        runtime_command=args.runtime_command,
+        runner_command=args.runner_command,
+        state_path=args.state,
+        driver_version=args.driver_version,
+        driver_digest=args.driver_digest,
+        run_tests=not args.skip_tests,
+    )
+    _print(result)
+    return 0 if result.get("ok") else 2
+
+
 def _cmd_doctor(args: argparse.Namespace) -> int:
     result = project_doctor(
         load_project(args.project), install_root=args.install_root
@@ -107,6 +128,18 @@ def _cmd_driver_doctor(args: argparse.Namespace) -> int:
 def _cmd_driver_register(args: argparse.Namespace) -> int:
     _print(register_driver(args.registration))
     return 0
+
+
+def _cmd_driver_conformance(args: argparse.Namespace) -> int:
+    result = driver_conformance(
+        load_project(args.project),
+        args.driver_id,
+        driver_version=args.driver_version,
+        driver_digest=args.driver_digest,
+        output_root=args.output_root,
+    )
+    _print(result)
+    return 0 if result.get("ok") else 2
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -156,6 +189,23 @@ def build_parser() -> argparse.ArgumentParser:
     command.set_defaults(func=_cmd_publish)
 
     command = sub.add_parser(
+        "run", help="Build and execute one project role through Agent Runner"
+    )
+    command.add_argument("--project", default=".")
+    command.add_argument("--role", required=True)
+    command.add_argument("--workspace", required=True)
+    command.add_argument("--request", required=True)
+    command.add_argument("--output-dir")
+    command.add_argument("--install-root")
+    command.add_argument("--runtime-command")
+    command.add_argument("--runner-command", default="baldr-agent-runner")
+    command.add_argument("--state")
+    command.add_argument("--driver-version")
+    command.add_argument("--driver-digest")
+    command.add_argument("--skip-tests", action="store_true")
+    command.set_defaults(func=_cmd_run)
+
+    command = sub.add_parser(
         "rollback", help="Reactivate one previously published local version"
     )
     command.add_argument("version")
@@ -174,6 +224,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     driver_command.add_argument("registration")
     driver_command.set_defaults(func=_cmd_driver_register)
+    driver_command = driver_sub.add_parser(
+        "conformance", help="Verify one driver against a real agent project"
+    )
+    driver_command.add_argument("driver_id")
+    driver_command.add_argument("--project", default=".")
+    driver_command.add_argument("--driver-version")
+    driver_command.add_argument("--driver-digest")
+    driver_command.add_argument("--output-root")
+    driver_command.set_defaults(func=_cmd_driver_conformance)
     return parser
 
 

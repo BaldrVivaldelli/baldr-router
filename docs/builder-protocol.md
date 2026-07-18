@@ -96,8 +96,16 @@ same contract with:
 ```bash
 baldr-agent driver list
 baldr-agent driver doctor baldr.typescript
+baldr-agent driver conformance baldr.typescript --project /path/to/agent
 baldr-agent driver register /path/to/baldr-builder-driver.json
 ```
+
+`driver conformance` is the neutral compatibility gate for every discovered
+driver. Against a real agent project it requires stable `id + version +
+digest`, rejects an unsupported protocol version, runs tests, verifies artifact
+attestation, compares two byte-identical builds and rejects checkout-path leaks.
+During a side-by-side upgrade, `--driver-version` or `--driver-digest` selects
+the exact candidate under test.
 
 ## Implemented TypeScript slice
 

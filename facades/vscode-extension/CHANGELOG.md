@@ -1,5 +1,12 @@
 # Change Log
 
+## 0.20.0
+
+- Ships the coordinated 0.20 runtime for immutable external agents, Agent Manager team resolution and the independently installed Agent Runner.
+- Keeps existing Codex and Kiro profiles available while presenting compatible external planner, writer and reviewer identities from the shared catalog.
+- Uses the same frozen `setup/status/run` facade as CLI and Kiro, with direct trusted execution for exact write-capable agent manifests.
+- Bundles the 0.20 core wheel and preserves side-by-side managed-runtime rollback from 0.19.
+
 ## 0.19.0
 
 - Replaces internal phase statuses with an understandable **Ahora** card, a three-stage narrative, and a final result that explains what changed, what was checked, and what remains.

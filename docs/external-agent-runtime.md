@@ -91,7 +91,7 @@ explicit `BALDR_AGENT_RUNNER_COMMAND` pointing to its executable).
 ## Repository lifecycle
 
 Agent Builder installs `baldr-agent`, keeps agent code in the owning team's
-repository and reduces the normal workflow to five commands:
+repository and exposes one language-neutral lifecycle:
 
 ```bash
 baldr-agent init ./product-agents \
@@ -101,9 +101,14 @@ baldr-agent init ./product-agents \
   --language python  # or typescript
 cd product-agents
 baldr-agent test
+baldr-agent driver conformance baldr.python
 baldr-agent build
 baldr-agent publish
 baldr-agent doctor
+baldr-agent run \
+  --role implementer \
+  --workspace /ruta/al/workspace \
+  --request "Generá el resultado"
 ```
 
 The generated `baldr-agent.toml` schema v2 declares exact identity, version,
@@ -172,6 +177,13 @@ Publish it through `baldr-router agent publish`/Agent Manager or synchronize a
 manifest source as described in
 [`external-agent-registry.md`](external-agent-registry.md).
 
+`driver conformance` is the release gate for a language implementation. It
+checks stable driver identity, fail-closed protocol negotiation, the project's
+real tests, artifact attestation, reproducible bytes and relocation away from
+the source checkout. `run` builds and installs an ephemeral exact release,
+invokes the selected role through Agent Runner and removes that installation
+after the invocation. It never bypasses the role's declared read/write effect.
+
 ## Author an external TypeScript agent
 
 ```ts
@@ -196,15 +208,16 @@ process.exitCode = await agent.serveStdio();
 
 Register `tooling/agent-builder-typescript/baldr-builder-driver.json`, or place
 its executable on `PATH`, then use the same `baldr-agent test`, `build` and
-`publish` lifecycle. The published manifest selects `node` and pins the `.cjs`
+`publish` lifecycle. Run `baldr-agent driver conformance baldr.typescript`
+before promotion. The published manifest selects `node` and pins the `.cjs`
 artifact digest; Baldr's runner and orchestration path remain language-neutral.
 
 Release artifacts support installation without a source checkout:
 
 ```bash
 npm install --global \
-  ./baldr-agent-sdk-0.19.0.tgz \
-  ./baldr-agent-builder-typescript-0.19.0.tgz
+  ./baldr-agent-sdk-0.20.0.tgz \
+  ./baldr-agent-builder-typescript-0.20.0.tgz
 baldr-agent driver doctor baldr.typescript
 ```
 

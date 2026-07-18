@@ -12,8 +12,8 @@ Install the packaged driver globally so Builder discovers its executable from
 ```bash
 node_package_dir=/path/to/release/artifacts/node
 npm install --global \
-  "$node_package_dir/baldr-agent-sdk-0.19.0.tgz" \
-  "$node_package_dir/baldr-agent-builder-typescript-0.19.0.tgz"
+  "$node_package_dir/baldr-agent-sdk-0.20.0.tgz" \
+  "$node_package_dir/baldr-agent-builder-typescript-0.20.0.tgz"
 baldr-agent driver list
 ```
 

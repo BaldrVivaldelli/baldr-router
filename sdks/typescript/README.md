@@ -13,7 +13,7 @@ Antes de su primera publicación en el registry, el mismo paquete puede
 instalarse desde el artefacto de release:
 
 ```bash
-npm install ./baldr-agent-sdk-0.19.0.tgz
+npm install ./baldr-agent-sdk-0.20.0.tgz
 ```
 
 ```ts

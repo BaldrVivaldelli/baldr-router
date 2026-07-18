@@ -897,7 +897,12 @@ class DurableWorkflowEngine:
                 "reason": str(exc),
             }
 
-        lease_seconds = int(config_snapshot["durability"].get("lease_seconds") or 45)
+        # A shorter workflow lease can expire between local Git/SQLite steps
+        # before the first provider heartbeat has a chance to renew it. Keep
+        # the same operational floor used by recovery and cancellation.
+        lease_seconds = max(
+            15, int(config_snapshot["durability"].get("lease_seconds") or 45)
+        )
         lease = self.store.acquire_lease(run_id, owner, lease_seconds)
         if lease is None:
             return {
@@ -1945,7 +1950,9 @@ class DurableWorkflowEngine:
         identity_fingerprint = str(
             repository_identity.get("repository_fingerprint") or ""
         )
-        lease_seconds = int(config_snapshot["durability"].get("lease_seconds") or 45)
+        lease_seconds = max(
+            15, int(config_snapshot["durability"].get("lease_seconds") or 45)
+        )
         heartbeat_seconds = int(
             config_snapshot["durability"].get("heartbeat_seconds") or 5
         )

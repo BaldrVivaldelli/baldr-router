@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 FEATURE_FREEZE_ACTIVE = True
-FEATURE_FREEZE_LINE = "0.19"
+FEATURE_FREEZE_LINE = "0.20"
 
 FROZEN_CORE_MCP_TOOLS = (
     "context7_cache_clear",

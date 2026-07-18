@@ -27,7 +27,7 @@ import ts from "typescript";
 const DRIVER_CONTRACT = "baldr-builder-driver";
 const PROTOCOL_VERSION = 1;
 const DRIVER_ID = "baldr.typescript";
-const DRIVER_VERSION = "0.19.0";
+const DRIVER_VERSION = "0.20.0";
 const TARGET_PROTOCOL = "agent-execution-v1";
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
 const IGNORED = new Set([

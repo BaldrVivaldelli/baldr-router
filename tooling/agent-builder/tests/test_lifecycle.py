@@ -44,8 +44,8 @@ def test_init_test_and_deterministic_self_contained_build(tmp_path: Path) -> Non
     second = build_project(project, output_dir=tmp_path / "build-two")
 
     assert first.artifact_digest == second.artifact_digest
-    assert first.metadata["builder_version"] == "0.19.0"
-    assert first.metadata["sdk_version"] == "0.19.0"
+    assert first.metadata["builder_version"] == "0.20.0"
+    assert first.metadata["sdk_version"] == "0.20.0"
     with zipfile.ZipFile(first.artifact) as archive:
         assert "baldr_agent_sdk/agent.py" in archive.namelist()
     env = os.environ.copy()
@@ -247,6 +247,18 @@ def test_cli_refuses_to_overwrite_an_initialized_directory(
     assert json.loads(capsys.readouterr().out)["error"]["code"] == (
         "baldr_agent_operation_failed"
     )
+
+
+def test_cli_exposes_run_and_driver_conformance(capsys) -> None:
+    with pytest.raises(SystemExit) as run_help:
+        main(["run", "--help"])
+    assert run_help.value.code == 0
+    assert "--workspace" in capsys.readouterr().out
+
+    with pytest.raises(SystemExit) as conformance_help:
+        main(["driver", "conformance", "--help"])
+    assert conformance_help.value.code == 0
+    assert "driver_id" in capsys.readouterr().out
 
 
 def test_typescript_scaffold_uses_neutral_project_fields(tmp_path: Path) -> None:

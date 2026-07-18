@@ -12,15 +12,18 @@ baldr-agent init ./my-agents \
   --language typescript
 cd my-agents
 baldr-agent test
+baldr-agent driver conformance baldr.typescript
 baldr-agent build
 baldr-agent publish
 baldr-agent doctor
+baldr-agent run --role implementer --workspace ../demo --request "Create the result"
 ```
 
 The Builder reads `baldr-agent.toml`, runs declared tests, creates a
 deterministic self-contained artifact, installs immutable release metadata,
-publishes through the local catalog or Agent Manager and can reactivate a
-previous version with `baldr-agent rollback VERSION`.
+publishes through the local catalog or Agent Manager, executes an ephemeral
+development release through Runner and can reactivate a previous version with
+`baldr-agent rollback VERSION`.
 
 `test`, `build` and `publish` use the versioned
 [`Builder Protocol`](../../docs/builder-protocol.md): the CLI talks to a
@@ -51,6 +54,8 @@ baldr_agent_builder/
 ├── protocol.py         protocol constants and bounded validation
 ├── driver.py           built-in Python JSONL driver
 ├── drivers.py          driver discovery, registration and exact selection
+├── conformance.py      neutral driver compatibility and reproducibility gate
+├── execution.py        exact ephemeral execution through Agent Runner
 ├── inventory.py        language-neutral source inventory and digest
 ├── models.py           immutable project, build and release values
 ├── config.py           baldr-agent.toml parsing and validation

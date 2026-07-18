@@ -5,7 +5,7 @@ import { createInterface } from "node:readline";
 
 export const CONTRACT = "baldr-agent-execution";
 export const VERSION = 1;
-export const SDK_VERSION = "0.19.0";
+export const SDK_VERSION = "0.20.0";
 
 const REF = /^[a-z0-9][a-z0-9._-]{0,95}:\/\/[a-z0-9][a-z0-9._-]{0,95}\/[a-z0-9][a-z0-9._-]{0,95}@[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/;
 const DIGEST = /^sha256:[0-9a-f]{64}$/;

@@ -1,6 +1,6 @@
 {
   "name": "@baldr/agent-sdk",
-  "version": "0.19.0",
+  "version": "0.20.0",
   "description": "TypeScript authoring SDK for externally owned Baldr agents.",
   "keywords": [
     "agents",
