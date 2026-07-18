@@ -32,6 +32,14 @@ agents require a connector that can prove its shared or isolated workspace
 boundary; the Kiro compatibility pilot continues to use the existing provider
 connector for that purpose.
 
+For new endpoints, add `"protocol": "agent-execution-v1"` to the target. The
+request then implements the shared
+[`agent-execution-v1`](../contracts/agent-execution-v1.schema.json) invoke/result
+envelope, including immutable identity, durable ids, timeout and idempotency.
+The workspace root is explicitly `null`, so this HTTP mode remains read-only.
+Endpoints without that target field continue to receive the original
+`baldr-agent-invocation` contract unchanged.
+
 ## Agent Manager v1
 
 The optional Agent Manager is configured without storing a credential value:
@@ -58,6 +66,10 @@ POST /v1/agents
 POST /v1/agents/{namespace}/{name}/versions/{exact-version}/enable
 POST /v1/agents/{namespace}/{name}/versions/{exact-version}/disable
 POST /v1/agents/{namespace}/{name}/versions/{exact-version}/revoke
+GET /v1/audit?after=0&limit=100
+GET /v1/metrics
+GET /livez
+GET /readyz
 ```
 
 Start a loopback instance backed by SQLite and configure the client with:
@@ -74,6 +86,13 @@ baldr-router agent-manager configure --registry manager --base-url http://127.0.
 revocation is irreversible. The service stores only manifests and state, and
 the configured credential is referenced by environment-variable name rather
 than persisted as a value.
+
+For multi-team deployments, pass `--policy` instead of sharing the legacy
+single administrator credential. The versioned policy maps environment-backed
+principals to reader, publisher, operator, auditor or admin roles and scopes
+them by AgentRef namespace (tenant) and manifest owner. Publication files,
+backup/upgrade procedure, probes and audit semantics are documented in
+[`agent-manager-operations.md`](agent-manager-operations.md).
 
 Resolution accepts only the exact requested `AgentRef`. The returned manifest
 must validate its own SHA-256 digest; a durable expected digest must also

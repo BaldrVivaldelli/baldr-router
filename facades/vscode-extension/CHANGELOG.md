@@ -9,6 +9,10 @@
 - Adds clear attention cards and contextual actions for review findings, interruption, conflict, recovery, cancellation, and failure.
 - Improves keyboard navigation, a focus-contained deliverable viewer, screen-reader announcements, reduced motion, zoom and narrow-sidebar layouts, and compatibility with work items created before this release.
 - Uses a compact status path plus adaptive visible-only polling to reduce repeated runtime work and output-channel noise.
+- Adds a simplified external-agent selector with explicit per-stage identities, readiness, version, digest and permission information instead of ambiguous provider/model choices.
+- Adds external-agent administration and deterministic automatic/pinned/configured team modes backed by the shared Baldr catalog used by CLI and Kiro/MCP.
+- Shows a clickable changed-files summary with added/modified/deleted counts and direct navigation to the affected workspace file.
+- Allows a trusted, write-capable external agent to continue directly from its immutable manifest instead of showing a redundant write-authorization interruption.
 
 ## 0.18.0
 

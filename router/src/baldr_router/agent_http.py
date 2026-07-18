@@ -16,6 +16,7 @@ from .agent_api import (
     AgentTransportError,
     ResolvedAgent,
 )
+from .agent_execution import build_execution_invocation, consume_execution_messages
 
 INVOCATION_CONTRACT = "baldr-agent-invocation"
 RESULT_CONTRACT = "baldr-agent-result"
@@ -196,6 +197,31 @@ class HttpJsonAgentConnector:
         if not endpoint:
             raise AgentContractError(
                 f"HTTP agent {resolved.reference} has no target.endpoint."
+            )
+        if target.get("protocol") == "agent-execution-v1":
+            try:
+                timeout = int(str(target.get("timeout_seconds") or "30"))
+            except ValueError as exc:
+                raise AgentContractError(
+                    "Agent HTTP timeout_seconds must be an integer for agent-execution-v1."
+                ) from exc
+            request = build_execution_invocation(
+                resolved,
+                invocation,
+                timeout_seconds=timeout,
+                include_workspace_root=False,
+            )
+            response = self.client.request_json(
+                method="POST",
+                url=endpoint,
+                payload=request,
+                auth_env=str(target.get("authorization_env") or ""),
+                timeout_seconds=timeout,
+            )
+            return consume_execution_messages(
+                [response],
+                request=request,
+                invocation=invocation,
             )
         payload = {
             "contract": INVOCATION_CONTRACT,

@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "baldr-agent-builder"
+version = "0.19.0"
+description = "Language-aware build and release toolchain for external Baldr agents."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "Baldr" }]
+dependencies = ["baldr-agent-sdk>=0.19.0,<0.20.0"]
+
+[project.scripts]
+baldr-agent = "baldr_agent_builder.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/baldr_agent_builder"]
+
+[project.optional-dependencies]
+dev = ["jsonschema>=4.23", "pytest>=8.0", "ruff>=0.9"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "../../sdks/python/src"]
+
+[tool.uv.sources]
+baldr-agent-sdk = { workspace = true }

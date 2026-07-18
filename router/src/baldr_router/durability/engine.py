@@ -9,13 +9,14 @@ import socket
 import time
 import uuid
 from collections.abc import Mapping
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable
 
 from baldr_router import __version__
 from baldr_router.agent_api import AgentResolutionContext
-from baldr_router.agent_gateway import get_agent_gateway
+from baldr_router.agent_gateway import external_agent_catalog_status, get_agent_gateway
 from baldr_router.config import AppConfig, RoleConfig, WorkflowConfig
 from baldr_router.context7 import prepare_context7_bundle
 from baldr_router.execution_profiles import role_execution_plan
@@ -33,6 +34,7 @@ from baldr_router.provider_activity import (
 from baldr_router.redaction import redact_text
 from baldr_router.runtime_guard import child_provider_env, new_run_id
 from baldr_router.telemetry import append_run, utc_now_iso
+from baldr_router.team_resolution import resolve_team
 
 from .evidence import create_workflow_evidence
 from .git_workspace import GitWorkspaceError, GitWorkspaceManager, WorkspaceExecution
@@ -81,7 +83,11 @@ def _owner_id() -> str:
 def _safe_text(value: Any, limit: int = 6000) -> str:
     if value is None:
         return ""
-    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, indent=2)
+    text = (
+        value
+        if isinstance(value, str)
+        else json.dumps(value, ensure_ascii=False, indent=2)
+    )
     return text if len(text) <= limit else text[:limit] + "…"
 
 
@@ -134,6 +140,23 @@ def _write_authorization_request(result: dict[str, Any]) -> str | None:
         return None
     request = str(decisions.get("write_request") or "").strip()
     return request or "Crear o modificar archivos para completar el pedido."
+
+
+def _legacy_write_policy_request(result: dict[str, Any]) -> str | None:
+    """Recognize pre-contract agents that reported the planning boundary as a blocker."""
+
+    text = json.dumps(result, ensure_ascii=False).lower()
+    if any(
+        marker in text
+        for marker in (
+            "regla de no modificar archivos",
+            "bloqueada por la regla de no modificar",
+            "read-only planning boundary",
+            "rule not to modify files",
+        )
+    ):
+        return "Crear o modificar archivos para completar el pedido."
+    return None
 
 
 def _requires_write_authorization(config_snapshot: dict[str, Any]) -> bool:
@@ -231,6 +254,8 @@ Hard rules:
 - Planning starts without permission to change files. When the requested outcome
   needs file creation, editing, deletion, or commands with workspace side effects,
   request the person's authorization instead of treating that need as a failure.
+  Treat this as a restriction of this planning phase, not a blocker.
+- Defer every requested file creation or edit to the implementer after the plan.
 - Do not delegate to Baldr or other agents.
 - Produce a concise implementation plan.
 - Identify risks, likely files, tests, and acceptance criteria.
@@ -238,8 +263,8 @@ Hard rules:
   plan needs workspace changes and `not_required` when the result is read-only.
 - When authorization is required, also include `write_request` with one concise,
   user-facing sentence describing the changes that will be allowed.
-- A pending authorization is not a blocker. Return status `planned` with an empty
-  `blockers` array unless an external condition prevents the plan from proceeding.
+- A pending authorization is not a blocker; return status `planned` with
+  an empty `blockers` array unless an external condition prevents the plan.
 
 Task:
 {task}
@@ -309,7 +334,9 @@ Extra context:
 """.strip()
 
 
-def fix_prompt(task: str, plan_summary: str, review_summary: str, extra_context: str) -> str:
+def fix_prompt(
+    task: str, plan_summary: str, review_summary: str, extra_context: str
+) -> str:
     return f"""
 You are an implementation participant in a Baldr-controlled durable fix round.
 
@@ -384,6 +411,9 @@ def _resolved_snapshot(
     workspace_mode: str | None = None,
     context7_policy: str | None = None,
     execution_preset: str | None = None,
+    team_mode: str | None = None,
+    agent_overrides: Mapping[str, str] | None = None,
+    workspace_root: Path | None = None,
 ) -> dict[str, Any]:
     overrides = {
         "architect": architect_provider,
@@ -396,7 +426,9 @@ def _resolved_snapshot(
         role = copy.deepcopy(cfg.roles[role_name])
         selected_profiles = profile_overrides.get(role_name)
         if selected_profiles:
-            role.profiles = [str(item) for item in selected_profiles if str(item).strip()]
+            role.profiles = [
+                str(item) for item in selected_profiles if str(item).strip()
+            ]
         role_plans[role_name] = role_execution_plan(
             cfg, role_name, role, provider_override=overrides[role_name]
         )
@@ -421,6 +453,21 @@ def _resolved_snapshot(
                 profile["reasoning_effort"] = selected_effort
                 profile["effort"] = selected_effort
 
+    selected_team_mode = str(team_mode or "configured").strip().lower()
+    selected_agent_overrides = dict(agent_overrides or {})
+    catalog = (
+        external_agent_catalog_status(workspace_root=workspace_root)
+        if selected_team_mode in {"auto", "automatic"} or selected_agent_overrides
+        else {"agents": []}
+    )
+    team_resolution = resolve_team(
+        role_plans,
+        catalog,
+        mode=selected_team_mode,
+        overrides=selected_agent_overrides,
+    )
+    role_plans = {role: dict(plan) for role, plan in team_resolution.plans.items()}
+
     # Resolve exact external agent identities before the durable run snapshot
     # is created. A resumed workflow therefore keeps the same manifest digest
     # even if the local registry later changes or moves the transport target.
@@ -444,32 +491,69 @@ def _resolved_snapshot(
                     step_name=role_name,
                     requested_capabilities=requested_capabilities,
                 ),
-                expected_digest=str(
-                    profile.get("agent_manifest_digest") or ""
-                ),
+                expected_digest=str(profile.get("agent_manifest_digest") or ""),
             )
             profile.update(binding)
             if binding.get("provider"):
                 profile["provider"] = binding["provider"]
 
     wf = cfg.workflows.get(cfg.router.default_workflow, WorkflowConfig())
-    rounds = max_rounds if max_rounds is not None else min(wf.max_rounds, cfg.safety.max_rounds)
+    budget_values = {
+        "max_parallel_participants": int(wf.max_parallel_participants),
+        "max_participants_per_phase": int(wf.max_participants_per_phase),
+        "max_total_participant_attempts": int(wf.max_total_participant_attempts),
+    }
+    budget_caps = {
+        "max_parallel_participants": 32,
+        "max_participants_per_phase": 64,
+        "max_total_participant_attempts": 10_000,
+    }
+    for name, value in budget_values.items():
+        if value < 1 or value > budget_caps[name]:
+            raise ValueError(
+                f"Workflow {name} must be between 1 and {budget_caps[name]}."
+            )
+    for role_name, plan in role_plans.items():
+        profile_count = len(plan.get("profiles") or [])
+        if profile_count > budget_values["max_participants_per_phase"]:
+            raise ValueError(
+                f"Role {role_name!r} resolves to {profile_count} participants; "
+                f"the workflow budget allows {budget_values['max_participants_per_phase']}."
+            )
+        if bool(plan.get("can_write")) and profile_count != 1:
+            raise ValueError(
+                f"Role {role_name!r} writes to the workspace and must resolve to "
+                "exactly one participant."
+            )
+        requested_concurrency = max(1, int(plan.get("max_concurrency") or 1))
+        plan["max_concurrency"] = (
+            1
+            if bool(plan.get("can_write"))
+            else min(
+                requested_concurrency,
+                budget_values["max_parallel_participants"],
+                max(1, profile_count),
+            )
+        )
+    rounds = (
+        max_rounds
+        if max_rounds is not None
+        else min(wf.max_rounds, cfg.safety.max_rounds)
+    )
     if selected_preset == "fast":
         rounds = min(int(rounds), 1)
     elif selected_preset == "deep":
         rounds = min(cfg.safety.max_rounds, max(int(rounds), int(wf.max_rounds)))
     workspace_snapshot = asdict(cfg.workspace)
     selected_workspace_mode = str(workspace_mode or "").strip().lower()
-    requested_safety_mode = selected_workspace_mode or "auto"
+    requested_safety_mode = selected_workspace_mode or None
     allow_non_git = selected_workspace_mode == "non-git"
     permission_gated_automatic = selected_workspace_mode in {
-        "",
         "auto",
         "automatic",
     }
     workspace_snapshot.update(
         {
-            "requested_safety_mode": requested_safety_mode,
             "allow_non_git": allow_non_git,
             "effective_require_git_repository": bool(
                 cfg.workspace.require_git_repository
@@ -478,6 +562,8 @@ def _resolved_snapshot(
             ),
         }
     )
+    if requested_safety_mode is not None:
+        workspace_snapshot["requested_safety_mode"] = requested_safety_mode
     if selected_workspace_mode == "worktree":
         workspace_snapshot["write_isolation"] = "worktree"
         workspace_snapshot["dirty_workspace_policy"] = "reject"
@@ -491,7 +577,9 @@ def _resolved_snapshot(
         workspace_snapshot["dirty_workspace_policy"] = "in-place"
         workspace_snapshot["publish_worktree_changes"] = False
     context7_snapshot = asdict(cfg.context7)
-    context7_snapshot["work_item_policy"] = str(context7_policy or "auto").strip().lower()
+    context7_snapshot["work_item_policy"] = (
+        str(context7_policy or "auto").strip().lower()
+    )
     if context7_snapshot["work_item_policy"] == "off":
         context7_snapshot["enabled"] = False
     elif context7_snapshot["work_item_policy"] == "on":
@@ -500,10 +588,31 @@ def _resolved_snapshot(
         if str(context7_snapshot.get("mode") or "off") == "off":
             context7_snapshot["mode"] = "hybrid"
 
+    coordination_policy = {
+        "contract": "baldr-orchestration-policy",
+        "version": 1,
+        "writer_policy": "exactly-one-per-write-phase",
+        "budgets": {
+            **budget_values,
+            "max_rounds": max(0, min(int(rounds), cfg.safety.max_rounds)),
+        },
+        "roles": {
+            role: {
+                "strategy": str(plan.get("strategy") or "first-success"),
+                "participant_count": len(plan.get("profiles") or []),
+                "max_concurrency": int(plan.get("max_concurrency") or 1),
+                "can_write": bool(plan.get("can_write")),
+            }
+            for role, plan in role_plans.items()
+        },
+    }
+
     return {
         "engine_version": __version__,
         "execution_preset": selected_preset,
-        "workflow": asdict(wf),
+        "team_resolution": team_resolution.to_dict(),
+        "coordination": coordination_policy,
+        "workflow": {**asdict(wf), **budget_values},
         "max_rounds": max(0, min(int(rounds), cfg.safety.max_rounds)),
         "role_plans": role_plans,
         "workspace": workspace_snapshot,
@@ -521,6 +630,7 @@ def _role_from_plan(plan: dict[str, Any]) -> RoleConfig:
         min_successes=int(plan.get("min_successes") or 1),
         resolution=str(plan.get("resolution") or ""),
         min_approvals=int(plan.get("min_approvals") or 1),
+        max_concurrency=int(plan.get("max_concurrency") or 1),
         can_write=bool(plan.get("can_write")),
         sandbox=str(plan.get("sandbox") or "read-only"),
         description=str(plan.get("description") or ""),
@@ -616,13 +726,17 @@ class DurableWorkflowEngine:
             ],
         }
 
-    def request_cancel(self, run_id: str, *, reason: str = "Cancellation requested by client.") -> dict[str, Any]:
+    def request_cancel(
+        self, run_id: str, *, reason: str = "Cancellation requested by client."
+    ) -> dict[str, Any]:
         run = self.store.request_cancellation(run_id, reason=reason)
         cleanup = terminate_processes_for_run(run_id, grace_seconds=0.75)
         if run["status"] == "cancelled":
             return self._result_from_snapshot(self.store.snapshot_run(run_id))
         owner = _owner_id()
-        lease = self.store.acquire_lease(run_id, owner, max(15, self.store.config.lease_seconds))
+        lease = self.store.acquire_lease(
+            run_id, owner, max(15, self.store.config.lease_seconds)
+        )
         if lease is not None:
             try:
                 self.store.finalize_cancellation(run_id, lease=lease, reason=reason)
@@ -681,7 +795,9 @@ class DurableWorkflowEngine:
                         "reason": f"Durable run {resume_run_id!r} was not found.",
                     }
                 if run["status"] in TERMINAL_RUN_STATES:
-                    return self._result_from_snapshot(self.store.snapshot_run(resume_run_id))
+                    return self._result_from_snapshot(
+                        self.store.snapshot_run(resume_run_id)
+                    )
                 persisted_root = Path(str(run["workspace_root"])).expanduser().resolve()
                 if workspace_root != persisted_root:
                     return {
@@ -695,7 +811,9 @@ class DurableWorkflowEngine:
                     }
                 actual_identity = workspace_identity(persisted_root)
                 expected_identity = run.get("repository_identity") or {}
-                if expected_identity and not identities_match(expected_identity, actual_identity):
+                if expected_identity and not identities_match(
+                    expected_identity, actual_identity
+                ):
                     return {
                         "ok": False,
                         "run_id": resume_run_id,
@@ -713,10 +831,14 @@ class DurableWorkflowEngine:
                         ),
                     }
                 requested_identity = actual_identity
-                input_value = self.store.load_artifact(run.get("task_artifact_id")) or {}
+                input_value = (
+                    self.store.load_artifact(run.get("task_artifact_id")) or {}
+                )
                 task = str(input_value.get("task") or task)
                 extra_context = str(input_value.get("extra_context") or extra_context)
-                context7_libraries = input_value.get("context7_libraries") or context7_libraries
+                context7_libraries = (
+                    input_value.get("context7_libraries") or context7_libraries
+                )
                 config_snapshot = run["config_snapshot"]
                 run_id = str(run["id"])
             else:
@@ -754,10 +876,14 @@ class DurableWorkflowEngine:
                 run_id = str(run["id"])
                 if not created:
                     if run["status"] in TERMINAL_RUN_STATES:
-                        return self._result_from_snapshot(self.store.snapshot_run(run_id))
+                        return self._result_from_snapshot(
+                            self.store.snapshot_run(run_id)
+                        )
                     config_snapshot = run["config_snapshot"]
                     workspace_root = Path(str(run["workspace_root"])).resolve()
-                    requested_identity = run.get("repository_identity") or requested_identity
+                    requested_identity = (
+                        run.get("repository_identity") or requested_identity
+                    )
         except IdempotencyConflict as exc:
             return {
                 "ok": False,
@@ -787,7 +913,9 @@ class DurableWorkflowEngine:
             run = self.store.get_run(run_id)
             assert run is not None
             if run.get("cancel_requested_at") or run["status"] == "cancelling":
-                self.store.finalize_cancellation(run_id, lease=lease, reason=run.get("cancel_reason"))
+                self.store.finalize_cancellation(
+                    run_id, lease=lease, reason=run.get("cancel_reason")
+                )
                 return self._result_from_snapshot(self.store.snapshot_run(run_id))
 
             if run["status"] == "awaiting_reconciliation":
@@ -809,7 +937,9 @@ class DurableWorkflowEngine:
             elif run["status"] == "recovering":
                 self.store.transition_run(run_id, "running", lease=lease)
 
-            self._fault("workflow.running", {"run_id": run_id, "lease_epoch": lease.epoch})
+            self._fault(
+                "workflow.running", {"run_id": run_id, "lease_epoch": lease.epoch}
+            )
             context7_note, _context7_meta = _context7_note(
                 workspace_root,
                 task + "\n" + extra_context,
@@ -832,9 +962,7 @@ class DurableWorkflowEngine:
                             runner=str(profile.get("runner") or ""),
                             sandbox=str(plan.get("sandbox") or ""),
                             agent_ref=str(profile.get("agent_ref") or ""),
-                            agent_transport=str(
-                                profile.get("agent_transport") or ""
-                            ),
+                            agent_transport=str(profile.get("agent_transport") or ""),
                         )
                         if not status["ok"]:
                             violations.append(
@@ -891,6 +1019,15 @@ class DurableWorkflowEngine:
                 config_snapshot=config_snapshot,
             )
             if not architecture.get("ok"):
+                legacy_request = _legacy_write_policy_request(architecture)
+                if legacy_request:
+                    return self._pause_for_write_authorization(
+                        run_id=run_id,
+                        request=legacy_request,
+                        execution=execution,
+                        lease=lease,
+                        replay_architect=True,
+                    )
                 return self._finish_failed(
                     run_id,
                     started,
@@ -931,16 +1068,20 @@ class DurableWorkflowEngine:
                 round_number=0,
                 plan=config_snapshot["role_plans"]["implementer"],
                 cwd=execution.execution_root,
-                prompt=implementer_prompt(task, plan_summary, extra_context, context7_note),
+                prompt=implementer_prompt(
+                    task, plan_summary, extra_context, context7_note
+                ),
                 report_kind="implementation",
                 lease=lease,
                 config_snapshot=config_snapshot,
-                post_success=lambda step_id, reported: self.workspace_manager.checkpoint(
-                    execution,
-                    step_id=step_id,
-                    label="implementer.implement",
-                    reported_file_changes=reported,
-                    lease=lease,
+                post_success=lambda step_id, reported: (
+                    self.workspace_manager.checkpoint(
+                        execution,
+                        step_id=step_id,
+                        label="implementer.implement",
+                        reported_file_changes=reported,
+                        lease=lease,
+                    )
                 ),
             )
             if not implementation.get("ok"):
@@ -992,8 +1133,7 @@ class DurableWorkflowEngine:
                         review_result,
                         lease,
                         error_code=str(
-                            review_result.get("error_code")
-                            or "workflow_phase_failed"
+                            review_result.get("error_code") or "workflow_phase_failed"
                         ),
                         execution=execution,
                     )
@@ -1013,17 +1153,22 @@ class DurableWorkflowEngine:
                     plan=config_snapshot["role_plans"]["implementer"],
                     cwd=execution.execution_root,
                     prompt=fix_prompt(
-                        task, plan_summary, _extract_summary(review_result), extra_context
+                        task,
+                        plan_summary,
+                        _extract_summary(review_result),
+                        extra_context,
                     ),
                     report_kind="implementation",
                     lease=lease,
                     config_snapshot=config_snapshot,
-                    post_success=lambda step_id, reported, key=fix_key: self.workspace_manager.checkpoint(
-                        execution,
-                        step_id=step_id,
-                        label=key,
-                        reported_file_changes=reported,
-                        lease=lease,
+                    post_success=lambda step_id, reported, key=fix_key: (
+                        self.workspace_manager.checkpoint(
+                            execution,
+                            step_id=step_id,
+                            label=key,
+                            reported_file_changes=reported,
+                            lease=lease,
+                        )
                     ),
                 )
                 if not fix_result.get("ok"):
@@ -1054,7 +1199,9 @@ class DurableWorkflowEngine:
                     payload={"workspace_mode": execution.mode},
                     lease=lease,
                 )
-            if approved and config_snapshot["workspace"].get("publish_worktree_changes", True):
+            if approved and config_snapshot["workspace"].get(
+                "publish_worktree_changes", True
+            ):
                 try:
                     publication = self.workspace_manager.publish(execution, lease=lease)
                 except GitWorkspaceError as exc:
@@ -1198,7 +1345,9 @@ class DurableWorkflowEngine:
                 current_run = self.store.get_run(run_id) or {}
                 checkpoint = self.store.latest_checkpoint(run_id)
                 execution = (
-                    self.workspace_manager.from_checkpoint(checkpoint) if checkpoint else None
+                    self.workspace_manager.from_checkpoint(checkpoint)
+                    if checkpoint
+                    else None
                 )
                 details = (
                     self.workspace_manager.reconciliation_status(execution)
@@ -1351,6 +1500,19 @@ class DurableWorkflowEngine:
                 "resolved_by": action,
                 "resolved_at": utc_now_iso(),
             }
+            if recorded_reconciliation.get("replay_architect") is True:
+                architect_step = self.store.get_step(run_id, "architect.plan")
+                if architect_step and str(architect_step.get("status") or "") in {
+                    "unknown",
+                    "interrupted",
+                    "failed",
+                }:
+                    self.store.reset_step_for_retry(
+                        str(architect_step["id"]),
+                        reason="operator:authorize_changes:legacy-write-policy",
+                        lease=lease,
+                        retry_successful_participants=True,
+                    )
             self.store.transition_run(
                 run_id,
                 "recovering",
@@ -1397,7 +1559,9 @@ class DurableWorkflowEngine:
             action = "continue_from_shadow"
 
         checkpoint = self.store.latest_checkpoint(run_id)
-        execution = self.workspace_manager.from_checkpoint(checkpoint) if checkpoint else None
+        execution = (
+            self.workspace_manager.from_checkpoint(checkpoint) if checkpoint else None
+        )
         workspace_config = (run.get("config_snapshot") or {}).get("workspace") or {}
         repository_identity = run.get("repository_identity") or {}
         non_git_run = bool(
@@ -1441,7 +1605,10 @@ class DurableWorkflowEngine:
                 }
             )
             return {"continue": False, "result": result}
-        if action not in set(details.get("allowed_actions") or []) and action != "mark_failed":
+        if (
+            action not in set(details.get("allowed_actions") or [])
+            and action != "mark_failed"
+        ):
             result = self._result_from_snapshot(self.store.snapshot_run(run_id))
             result.update(
                 {
@@ -1503,7 +1670,9 @@ class DurableWorkflowEngine:
             return {"continue": False, "result": result}
 
         snapshot = self.store.snapshot_run(run_id, include_events=False)
-        unknown_steps = [step for step in snapshot["steps"] if step["status"] == "unknown"]
+        unknown_steps = [
+            step for step in snapshot["steps"] if step["status"] == "unknown"
+        ]
         legacy_architect_step = (
             self.store.get_step(run_id, "architect.plan")
             if authorization_granted
@@ -1517,7 +1686,9 @@ class DurableWorkflowEngine:
             "discard_worktree",
         }:
             if execution is None:
-                raise GitWorkspaceError("No workspace checkpoint exists for reconciliation.")
+                raise GitWorkspaceError(
+                    "No workspace checkpoint exists for reconciliation."
+                )
             self.workspace_manager.restore_checkpoint(execution, lease=lease)
             for step in unknown_steps:
                 self.store.reset_step_for_retry(
@@ -1536,7 +1707,9 @@ class DurableWorkflowEngine:
                     code="shadow_checkpoint_missing",
                 )
             publication = self.workspace_manager.publish(execution, lease=lease)
-            review_approved = bool((run.get("reconciliation") or {}).get("review_approved"))
+            review_approved = bool(
+                (run.get("reconciliation") or {}).get("review_approved")
+            )
             target = "approved" if review_approved else "needs_changes"
             report = {
                 "status": target,
@@ -1626,7 +1799,9 @@ class DurableWorkflowEngine:
                         "files_deleted": [],
                         "commands_run": [],
                         "tests_run": [],
-                        "verification_needed": ["Review the reconciled diff before approval."],
+                        "verification_needed": [
+                            "Review the reconciled diff before approval."
+                        ],
                         "risks": [],
                         "follow_up": [],
                         "decisions": {},
@@ -1691,9 +1866,7 @@ class DurableWorkflowEngine:
         )
         return {"continue": True, "execution": execution}
 
-    def _legacy_write_policy_failure(
-        self, run_id: str, run: dict[str, Any]
-    ) -> bool:
+    def _legacy_write_policy_failure(self, run_id: str, run: dict[str, Any]) -> bool:
         if str(run.get("error_code") or "") not in {
             "workflow_phase_failed",
             "phase_report_blocked",
@@ -1737,6 +1910,259 @@ class DurableWorkflowEngine:
             lease=lease,
         )
 
+    def _execute_participant(
+        self,
+        *,
+        run_id: str,
+        workspace_id: str,
+        repository_identity: dict[str, Any],
+        step_key: str,
+        step_id: str,
+        phase: str,
+        profile: dict[str, Any],
+        participant: dict[str, Any],
+        ordinal: int,
+        cwd: Path,
+        prompt: str,
+        report_kind: str,
+        role: RoleConfig,
+        lease: LeaseToken,
+        config_snapshot: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Run one already-materialized durable participant.
+
+        Each worker uses the store's thread-local SQLite connection. Provider
+        calls may overlap for read-only ``all`` phases while every state
+        transition remains fenced by the workflow lease.
+        """
+
+        self.store.assert_lease(lease)
+        if self.store.is_cancel_requested(run_id):
+            raise WorkflowCancelled(
+                f"Workflow {run_id} was cancelled during {step_key}."
+            )
+        sessions_cfg = config_snapshot.get("sessions") or {}
+        identity_fingerprint = str(
+            repository_identity.get("repository_fingerprint") or ""
+        )
+        lease_seconds = int(config_snapshot["durability"].get("lease_seconds") or 45)
+        heartbeat_seconds = int(
+            config_snapshot["durability"].get("heartbeat_seconds") or 5
+        )
+        session_key = _session_key(
+            workspace_id=workspace_id,
+            run_id=run_id,
+            step_key=step_key,
+            role=phase,
+            profile=profile,
+        )
+        provider_identity = provider_runtime_identity(str(profile["provider"]))
+        provider_version = str(provider_identity.get("version") or "")
+        if profile.get("agent_manifest_digest"):
+            provider_version = f"{provider_version}|{profile['agent_manifest_digest']}"
+        session = self.store.get_valid_session(
+            session_key,
+            identity_fingerprint=identity_fingerprint,
+            provider_version=provider_version,
+            ttl_hours=int(sessions_cfg.get("ttl_hours") or 24),
+            max_turns=int(sessions_cfg.get("max_turns") or 20),
+            invalidate_on_identity=bool(
+                sessions_cfg.get("invalidate_on_repository_identity_change", True)
+            ),
+            invalidate_on_provider_version=bool(
+                sessions_cfg.get("invalidate_on_provider_version_change", True)
+            ),
+        )
+        attempt_number = int(participant.get("attempt_count") or 0) + 1
+        attempt_key = _stable_hash(
+            {
+                "run": run_id,
+                "step": step_key,
+                "profile": profile["name"],
+                "attempt": attempt_number,
+            }
+        )
+        dispatch_fp = _stable_hash(
+            {
+                "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+                "profile": profile,
+                "cwd": str(cwd),
+                "repository_fingerprint": identity_fingerprint,
+            }
+        )
+        attempt, created = self.store.create_attempt(
+            participant_id=str(participant["id"]),
+            idempotency_key=attempt_key,
+            session_key=session_key,
+            owner=lease.owner,
+            lease_seconds=lease_seconds,
+            dispatch_fingerprint=dispatch_fp,
+            lease=lease,
+        )
+        if not created and attempt["status"] == "succeeded":
+            previous = self.store.load_artifact(attempt.get("result_artifact_id"))
+            if isinstance(previous, dict):
+                return {"ordinal": ordinal, "ok": True, "result": previous}
+        attempt_id = str(attempt["id"])
+        self.store.transition_attempt(attempt_id, "running", lease=lease)
+        self.store.transition_participant(
+            str(participant["id"]), "running", lease=lease
+        )
+        env = child_provider_env(
+            run_id=run_id,
+            workflow="architect-implement-review",
+            role=phase,
+            provider=str(profile["provider"]),
+        )
+        env.update(
+            {
+                "BALDR_DURABLE_STEP_ID": step_id,
+                "BALDR_DURABLE_ATTEMPT_ID": attempt_id,
+                "BALDR_EXECUTION_PROFILE": str(profile["name"]),
+                "BALDR_LEASE_EPOCH": str(lease.epoch),
+            }
+        )
+        if profile.get("agent_ref"):
+            env["BALDR_AGENT_REF"] = str(profile["agent_ref"])
+            env["BALDR_AGENT_MANIFEST_DIGEST"] = str(
+                profile.get("agent_manifest_digest") or ""
+            )
+        heartbeat = LeaseHeartbeat(
+            self.store,
+            lease,
+            lease_seconds,
+            heartbeat_seconds,
+            attempt_id=attempt_id,
+        )
+
+        def activity_sink(category: str) -> None:
+            try:
+                self.store.record_phase_activity(
+                    run_id=run_id,
+                    step_id=step_id,
+                    attempt_id=attempt_id,
+                    category=category,
+                    lease=lease,
+                )
+            except Exception:
+                return
+
+        emit_provider_activity(activity_sink, generic_activity_for_role(phase))
+        with heartbeat:
+            try:
+                provider_kwargs: dict[str, Any] = dict(
+                    provider=str(profile["provider"]),
+                    role_name=phase,
+                    role=role,
+                    cwd=cwd,
+                    prompt=prompt,
+                    workflow="architect-implement-review",
+                    report_kind=report_kind,
+                    extra_env=env,
+                    profile_name=str(profile["name"]),
+                    model=str(profile.get("model") or ""),
+                    reasoning_effort=str(profile.get("reasoning_effort") or ""),
+                    agent=str(profile.get("agent") or ""),
+                    effort=str(profile.get("effort") or ""),
+                    runner=str(profile.get("runner") or ""),
+                    session_scope=str(profile.get("session_scope") or ""),
+                    session_key=session_key,
+                    resume_session_id=(session or {}).get("thread_id"),
+                    durable_run_id=run_id,
+                    durable_step_id=step_id,
+                    durable_attempt_id=attempt_id,
+                    agent_ref=str(profile.get("agent_ref") or ""),
+                    agent_manifest_digest=str(
+                        profile.get("agent_manifest_digest") or ""
+                    ),
+                )
+                if _runner_accepts_activity_sink(self.provider_runner):
+                    provider_kwargs["activity_sink"] = activity_sink
+                result = self.provider_runner(**provider_kwargs)
+            except (WorkflowCancelled, LeaseFenceError):
+                raise
+            except Exception as exc:
+                reason = redact_text(f"Provider raised {type(exc).__name__}: {exc}")
+                result = {
+                    "ok": False,
+                    "status": "failed",
+                    "reason": reason,
+                    "error": {
+                        "code": "provider_unexpected_exception",
+                        "message": reason,
+                        "retryable": True,
+                    },
+                }
+        heartbeat.raise_if_unhealthy()
+        self.store.assert_lease(lease)
+        artifact = self.store.store_artifact(
+            run_id=run_id, kind=f"{phase}-provider-result", value=result
+        )
+        thread_id = result.get("thread_id")
+        if thread_id or profile.get("session_scope"):
+            self.store.upsert_session(
+                session_key=session_key,
+                provider=str(profile["provider"]),
+                role=phase,
+                profile_name=str(profile["name"]),
+                model=str(profile.get("model") or ""),
+                runner=str(profile.get("runner") or ""),
+                thread_id=(
+                    str(thread_id) if thread_id else (session or {}).get("thread_id")
+                ),
+                status="active" if result.get("ok") else "stale",
+                metadata={
+                    "last_provider_run_id": result.get("run_id"),
+                    "last_step_id": step_id,
+                },
+                identity_fingerprint=identity_fingerprint,
+                provider_version=provider_version,
+                ttl_hours=int(sessions_cfg.get("ttl_hours") or 24),
+                increment_turn=True,
+                lease=lease,
+                run_id=run_id,
+            )
+        if result.get("ok"):
+            self.store.transition_attempt(
+                attempt_id,
+                "succeeded",
+                provider_run_id=result.get("run_id"),
+                result_artifact_id=artifact,
+                lease=lease,
+            )
+            self.store.transition_participant(
+                str(participant["id"]),
+                "succeeded",
+                result_artifact_id=artifact,
+                lease=lease,
+            )
+            return {"ordinal": ordinal, "ok": True, "result": result}
+
+        code = (
+            (result.get("error") or {}).get("code")
+            if isinstance(result.get("error"), dict)
+            else None
+        )
+        reason = str(result.get("reason") or "provider execution failed")
+        self.store.transition_attempt(
+            attempt_id,
+            "failed",
+            provider_run_id=result.get("run_id"),
+            result_artifact_id=artifact,
+            error_code=code,
+            error_reason=reason,
+            lease=lease,
+        )
+        self.store.transition_participant(
+            str(participant["id"]),
+            "failed",
+            result_artifact_id=artifact,
+            error_code=code,
+            error_reason=reason,
+            lease=lease,
+        )
+        return {"ordinal": ordinal, "ok": False, "result": result}
+
     def _execute_phase(
         self,
         *,
@@ -1757,14 +2183,20 @@ class DurableWorkflowEngine:
         | None = None,
     ) -> dict[str, Any]:
         if self.store.is_cancel_requested(run_id):
-            raise WorkflowCancelled(f"Workflow {run_id} was cancelled before {step_key}.")
+            raise WorkflowCancelled(
+                f"Workflow {run_id} was cancelled before {step_key}."
+            )
         existing = self.store.get_step(run_id, step_key)
         if existing and existing["status"] == "succeeded":
             return self.store.load_artifact(existing.get("output_artifact_id")) or {
                 "ok": False,
                 "reason": "Durable step output artifact is missing.",
             }
-        if existing and existing["status"] == "unknown" and bool(existing.get("can_write")):
+        if (
+            existing
+            and existing["status"] == "unknown"
+            and bool(existing.get("can_write"))
+        ):
             return {
                 "ok": False,
                 "status": "unknown",
@@ -1807,251 +2239,187 @@ class DurableWorkflowEngine:
             {"run_id": run_id, "step_id": step_id, "lease_epoch": lease.epoch},
         )
 
-        role = _role_from_plan(plan)
-        successes: list[dict[str, Any]] = []
-        failures: list[dict[str, Any]] = []
-        strategy = str(plan["strategy"])
-        lease_seconds = int(config_snapshot["durability"].get("lease_seconds") or 45)
-        heartbeat_seconds = int(config_snapshot["durability"].get("heartbeat_seconds") or 5)
-        sessions_cfg = config_snapshot.get("sessions") or {}
-        identity_fingerprint = str(repository_identity.get("repository_fingerprint") or "")
+        profiles = list(plan.get("profiles") or [])
+        strategy = str(plan.get("strategy") or "first-success")
+        max_concurrency = max(1, int(plan.get("max_concurrency") or 1))
+        max_total_attempts = max(
+            1,
+            int(
+                (config_snapshot.get("workflow") or {}).get(
+                    "max_total_participant_attempts", 24
+                )
+            ),
+        )
 
-        for ordinal, profile in enumerate(plan["profiles"]):
+        def fail_before_dispatch(
+            code: str,
+            reason: str,
+            *,
+            participants: list[dict[str, Any]] | None = None,
+        ) -> dict[str, Any]:
+            output = {
+                "ok": False,
+                "status": "blocked",
+                "error_code": code,
+                "reason": reason,
+                "participants": list(participants or []),
+                "resolution": {
+                    "policy": plan.get("resolution"),
+                    "strategy": strategy,
+                    "max_concurrency": max_concurrency,
+                    "attempt_budget": max_total_attempts,
+                },
+            }
+            artifact = self.store.store_artifact(
+                run_id=run_id, kind=f"{phase}-phase-result", value=output
+            )
+            self.store.transition_step(
+                step_id,
+                "failed",
+                output_artifact_id=artifact,
+                error_code=code,
+                error_reason=reason,
+                lease=lease,
+            )
+            materialize_phase_deliverable(
+                self.store,
+                step_id=step_id,
+                phase_output=output,
+                lease=lease,
+            )
+            return output
+
+        if bool(plan.get("can_write")) and len(profiles) != 1:
+            return fail_before_dispatch(
+                "phase_writer_cardinality_invalid",
+                (
+                    f"Phase {phase!r} writes to the workspace and must resolve "
+                    "to exactly one participant."
+                ),
+            )
+        if bool(plan.get("can_write")):
+            max_concurrency = 1
+
+        role = _role_from_plan(plan)
+        prepared: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
+        successful_by_ordinal: dict[int, dict[str, Any]] = {}
+        failed_by_ordinal: dict[int, dict[str, Any]] = {}
+        for ordinal, profile in enumerate(profiles):
             self.store.assert_lease(lease)
             if self.store.is_cancel_requested(run_id):
-                raise WorkflowCancelled(f"Workflow {run_id} was cancelled during {step_key}.")
+                raise WorkflowCancelled(
+                    f"Workflow {run_id} was cancelled during {step_key}."
+                )
             participant = self.store.create_participant(
                 step_id=step_id, ordinal=ordinal, profile=profile, lease=lease
             )
             if participant["status"] == "succeeded":
-                result = self.store.load_artifact(participant.get("result_artifact_id"))
-                if isinstance(result, dict):
-                    successes.append(result)
+                previous = self.store.load_artifact(
+                    participant.get("result_artifact_id")
+                )
+                if isinstance(previous, dict):
+                    successful_by_ordinal[ordinal] = previous
                     if strategy == "first-success":
                         break
                 continue
+            prepared.append((ordinal, profile, participant))
 
-            session_key = _session_key(
+        used_attempts = self.store.count_attempts_for_run(run_id)
+        if strategy == "all" and used_attempts + len(prepared) > max_total_attempts:
+            return fail_before_dispatch(
+                "workflow_attempt_budget_exhausted",
+                (
+                    f"Workflow attempt budget would be exceeded: {used_attempts} "
+                    f"already used, {len(prepared)} requested, "
+                    f"{max_total_attempts} allowed."
+                ),
+            )
+
+        def invoke(entry: tuple[int, dict[str, Any], dict[str, Any]]) -> dict[str, Any]:
+            ordinal, profile, participant = entry
+            return self._execute_participant(
+                run_id=run_id,
                 workspace_id=workspace_id,
-                run_id=run_id,
+                repository_identity=repository_identity,
                 step_key=step_key,
-                role=phase,
+                step_id=step_id,
+                phase=phase,
                 profile=profile,
-            )
-            provider_identity = provider_runtime_identity(str(profile["provider"]))
-            provider_version = str(provider_identity.get("version") or "")
-            if profile.get("agent_manifest_digest"):
-                provider_version = (
-                    f"{provider_version}|{profile['agent_manifest_digest']}"
-                )
-            session = self.store.get_valid_session(
-                session_key,
-                identity_fingerprint=identity_fingerprint,
-                provider_version=provider_version,
-                ttl_hours=int(sessions_cfg.get("ttl_hours") or 24),
-                max_turns=int(sessions_cfg.get("max_turns") or 20),
-                invalidate_on_identity=bool(
-                    sessions_cfg.get("invalidate_on_repository_identity_change", True)
-                ),
-                invalidate_on_provider_version=bool(
-                    sessions_cfg.get("invalidate_on_provider_version_change", True)
-                ),
-            )
-            attempt_number = int(participant.get("attempt_count") or 0) + 1
-            attempt_key = _stable_hash(
-                {
-                    "run": run_id,
-                    "step": step_key,
-                    "profile": profile["name"],
-                    "attempt": attempt_number,
-                }
-            )
-            dispatch_fp = _stable_hash(
-                {
-                    "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
-                    "profile": profile,
-                    "cwd": str(cwd),
-                    "repository_fingerprint": identity_fingerprint,
-                }
-            )
-            attempt, created = self.store.create_attempt(
-                participant_id=str(participant["id"]),
-                idempotency_key=attempt_key,
-                session_key=session_key,
-                owner=lease.owner,
-                lease_seconds=lease_seconds,
-                dispatch_fingerprint=dispatch_fp,
+                participant=participant,
+                ordinal=ordinal,
+                cwd=cwd,
+                prompt=prompt,
+                report_kind=report_kind,
+                role=role,
                 lease=lease,
-            )
-            if not created and attempt["status"] == "succeeded":
-                result = self.store.load_artifact(attempt.get("result_artifact_id"))
-                if isinstance(result, dict):
-                    successes.append(result)
-                    if strategy == "first-success":
-                        break
-                continue
-            attempt_id = str(attempt["id"])
-            self.store.transition_attempt(attempt_id, "running", lease=lease)
-            self.store.transition_participant(str(participant["id"]), "running", lease=lease)
-            env = child_provider_env(
-                run_id=run_id,
-                workflow="architect-implement-review",
-                role=phase,
-                provider=str(profile["provider"]),
-            )
-            env.update(
-                {
-                    "BALDR_DURABLE_STEP_ID": step_id,
-                    "BALDR_DURABLE_ATTEMPT_ID": attempt_id,
-                    "BALDR_EXECUTION_PROFILE": str(profile["name"]),
-                    "BALDR_LEASE_EPOCH": str(lease.epoch),
-                }
-            )
-            if profile.get("agent_ref"):
-                env["BALDR_AGENT_REF"] = str(profile["agent_ref"])
-                env["BALDR_AGENT_MANIFEST_DIGEST"] = str(
-                    profile.get("agent_manifest_digest") or ""
-                )
-            heartbeat = LeaseHeartbeat(
-                self.store,
-                lease,
-                lease_seconds,
-                heartbeat_seconds,
-                attempt_id=attempt_id,
+                config_snapshot=config_snapshot,
             )
 
-            def activity_sink(category: str) -> None:
-                try:
-                    self.store.record_phase_activity(
-                        run_id=run_id,
-                        step_id=step_id,
-                        attempt_id=attempt_id,
-                        category=category,
-                        lease=lease,
-                    )
-                except Exception:
-                    # Activity is observational and must not change provider,
-                    # lease, cancellation, or recovery outcomes.
-                    return
-
-            emit_provider_activity(activity_sink, generic_activity_for_role(phase))
-            with heartbeat:
-                try:
-                    provider_kwargs: dict[str, Any] = dict(
-                        provider=str(profile["provider"]),
-                        role_name=phase,
-                        role=role,
-                        cwd=cwd,
-                        prompt=prompt,
-                        workflow="architect-implement-review",
-                        report_kind=report_kind,
-                        extra_env=env,
-                        profile_name=str(profile["name"]),
-                        model=str(profile.get("model") or ""),
-                        reasoning_effort=str(profile.get("reasoning_effort") or ""),
-                        agent=str(profile.get("agent") or ""),
-                        effort=str(profile.get("effort") or ""),
-                        runner=str(profile.get("runner") or ""),
-                        session_scope=str(profile.get("session_scope") or ""),
-                        session_key=session_key,
-                        resume_session_id=(session or {}).get("thread_id"),
-                        durable_run_id=run_id,
-                        durable_step_id=step_id,
-                        durable_attempt_id=attempt_id,
-                        agent_ref=str(profile.get("agent_ref") or ""),
-                        agent_manifest_digest=str(
-                            profile.get("agent_manifest_digest") or ""
-                        ),
-                    )
-                    if _runner_accepts_activity_sink(self.provider_runner):
-                        provider_kwargs["activity_sink"] = activity_sink
-                    result = self.provider_runner(**provider_kwargs)
-                except (WorkflowCancelled, LeaseFenceError):
-                    raise
-                except Exception as exc:
-                    reason = redact_text(
-                        f"Provider raised {type(exc).__name__}: {exc}"
-                    )
-                    result = {
-                        "ok": False,
-                        "status": "failed",
-                        "reason": reason,
-                        "error": {
-                            "code": "provider_unexpected_exception",
-                            "message": reason,
-                            "retryable": True,
-                        },
-                    }
-            heartbeat.raise_if_unhealthy()
-            self.store.assert_lease(lease)
-            artifact = self.store.store_artifact(
-                run_id=run_id, kind=f"{phase}-provider-result", value=result
+        outcomes: list[dict[str, Any]] = []
+        budget_exhausted = False
+        parallel = (
+            strategy == "all"
+            and not bool(plan.get("can_write"))
+            and max_concurrency > 1
+            and len(prepared) > 1
+        )
+        if parallel:
+            executor = ThreadPoolExecutor(
+                max_workers=min(max_concurrency, len(prepared)),
+                thread_name_prefix=f"baldr-{phase}",
             )
-            thread_id = result.get("thread_id")
-            if thread_id or profile.get("session_scope"):
-                self.store.upsert_session(
-                    session_key=session_key,
-                    provider=str(profile["provider"]),
-                    role=phase,
-                    profile_name=str(profile["name"]),
-                    model=str(profile.get("model") or ""),
-                    runner=str(profile.get("runner") or ""),
-                    thread_id=str(thread_id) if thread_id else (session or {}).get("thread_id"),
-                    status="active" if result.get("ok") else "stale",
-                    metadata={
-                        "last_provider_run_id": result.get("run_id"),
-                        "last_step_id": step_id,
-                    },
-                    identity_fingerprint=identity_fingerprint,
-                    provider_version=provider_version,
-                    ttl_hours=int(sessions_cfg.get("ttl_hours") or 24),
-                    increment_turn=True,
-                    lease=lease,
-                    run_id=run_id,
-                )
-            if result.get("ok"):
-                self.store.transition_attempt(
-                    attempt_id,
-                    "succeeded",
-                    provider_run_id=result.get("run_id"),
-                    result_artifact_id=artifact,
-                    lease=lease,
-                )
-                self.store.transition_participant(
-                    str(participant["id"]),
-                    "succeeded",
-                    result_artifact_id=artifact,
-                    lease=lease,
-                )
-                successes.append(result)
-                if strategy == "first-success":
-                    break
+            futures: set[Future[dict[str, Any]]] = {
+                executor.submit(invoke, entry) for entry in prepared
+            }
+            try:
+                while futures:
+                    if self.store.is_cancel_requested(run_id):
+                        raise WorkflowCancelled(
+                            f"Workflow {run_id} was cancelled during {step_key}."
+                        )
+                    completed, futures = wait(
+                        futures, timeout=0.2, return_when=FIRST_COMPLETED
+                    )
+                    for future in completed:
+                        outcomes.append(future.result())
+            except BaseException:
+                terminate_processes_for_run(run_id, grace_seconds=0.75)
+                for future in futures:
+                    future.cancel()
+                executor.shutdown(wait=False, cancel_futures=True)
+                raise
             else:
-                code = (
-                    (result.get("error") or {}).get("code")
-                    if isinstance(result.get("error"), dict)
-                    else None
-                )
-                reason = str(result.get("reason") or "provider execution failed")
-                self.store.transition_attempt(
-                    attempt_id,
-                    "failed",
-                    provider_run_id=result.get("run_id"),
-                    result_artifact_id=artifact,
-                    error_code=code,
-                    error_reason=reason,
-                    lease=lease,
-                )
-                self.store.transition_participant(
-                    str(participant["id"]),
-                    "failed",
-                    result_artifact_id=artifact,
-                    error_code=code,
-                    error_reason=reason,
-                    lease=lease,
-                )
-                failures.append(result)
+                executor.shutdown(wait=True)
+        else:
+            for entry in prepared:
+                if self.store.count_attempts_for_run(run_id) >= max_total_attempts:
+                    budget_exhausted = True
+                    break
+                outcome = invoke(entry)
+                outcomes.append(outcome)
+                if strategy == "first-success" and outcome.get("ok"):
+                    break
 
+        for outcome in outcomes:
+            ordinal = int(outcome["ordinal"])
+            result = dict(outcome["result"])
+            if outcome.get("ok"):
+                successful_by_ordinal[ordinal] = result
+            else:
+                failed_by_ordinal[ordinal] = result
+        successes = [
+            successful_by_ordinal[ordinal] for ordinal in sorted(successful_by_ordinal)
+        ]
+        failures = [failed_by_ordinal[ordinal] for ordinal in sorted(failed_by_ordinal)]
+        if budget_exhausted and not successes:
+            return fail_before_dispatch(
+                "workflow_attempt_budget_exhausted",
+                (
+                    f"Workflow attempt budget of {max_total_attempts} was exhausted "
+                    f"during phase {phase!r}."
+                ),
+                participants=failures,
+            )
         required = int(plan.get("min_successes") or 1)
         if len(successes) < required:
             output = {
@@ -2066,6 +2434,11 @@ class DurableWorkflowEngine:
                 "resolution": {
                     "policy": plan.get("resolution"),
                     "min_successes": required,
+                    "strategy": strategy,
+                    "max_concurrency": max_concurrency,
+                    "parallel": parallel,
+                    "attempt_budget": max_total_attempts,
+                    "attempts_consumed": self.store.count_attempts_for_run(run_id),
                 },
             }
             artifact = self.store.store_artifact(
@@ -2093,6 +2466,15 @@ class DurableWorkflowEngine:
             policy=str(plan.get("resolution") or ""),
             min_successes=required,
             min_approvals=int(plan.get("min_approvals") or 1),
+        )
+        output.setdefault("resolution", {}).update(
+            {
+                "strategy": strategy,
+                "max_concurrency": max_concurrency,
+                "parallel": parallel,
+                "attempt_budget": max_total_attempts,
+                "attempts_consumed": self.store.count_attempts_for_run(run_id),
+            }
         )
         if not output.get("ok"):
             artifact = self.store.store_artifact(
@@ -2188,6 +2570,7 @@ class DurableWorkflowEngine:
         request: str,
         execution: WorkspaceExecution,
         lease: LeaseToken,
+        replay_architect: bool = False,
     ) -> dict[str, Any]:
         details = self.workspace_manager.reconciliation_status(execution)
         self.store.transition_run(
@@ -2203,6 +2586,7 @@ class DurableWorkflowEngine:
                 "write_request": request,
                 "allowed_actions": ["authorize_changes", "decline_changes"],
                 "authorization": "pending",
+                "replay_architect": replay_architect,
             },
             lease=lease,
         )
@@ -2279,6 +2663,7 @@ class DurableWorkflowEngine:
                     "status": step.get("status"),
                     "strategy": step.get("strategy"),
                     "resolution": step.get("resolution"),
+                    "coordination": output.get("resolution"),
                     "profiles": profiles,
                     "final_report": output.get("final_report"),
                     "reason": output.get("reason"),
@@ -2301,6 +2686,15 @@ class DurableWorkflowEngine:
             "lease_epoch": run.get("lease_epoch"),
             "cancel_requested_at": run.get("cancel_requested_at"),
             "reconciliation": run.get("reconciliation") or {},
+            "coordination": (run.get("config_snapshot") or {}).get("coordination"),
+            "error": (
+                {
+                    "code": run.get("error_code"),
+                    "message": run.get("error_reason"),
+                }
+                if run.get("error_code")
+                else None
+            ),
             "steps": steps,
             "final_report": final,
             "durable": {
@@ -2323,7 +2717,9 @@ class DurableWorkflowEngine:
                     "workflow": result.get("workflow"),
                     "started_at": result.get("started_at") or utc_now_iso(),
                     "status": result.get("status"),
-                    "durable_schema_version": result.get("durable", {}).get("schema_version"),
+                    "durable_schema_version": result.get("durable", {}).get(
+                        "schema_version"
+                    ),
                     "lease_epoch": result.get("lease_epoch"),
                     "steps": [
                         {

@@ -11,6 +11,32 @@
 - Added strict contract, privacy, retry, intervention, restart, legacy-compatibility, UI, packaging, and adversarial regression coverage.
 - Preserved the frozen providers, roles, workflow, MCP tools, prompts, and public `setup/status/run` facade contract.
 
+### External Agent Platform
+
+- Added immutable external-agent identities based on exact `AgentRef + digest`, including lifecycle state, provenance, health diagnostics, deterministic team resolution, explicit per-stage overrides, and idempotent catalog synchronization.
+- Added the language-neutral `agent-execution-v1` contract, the separately distributed Python authoring SDK, and the independently deployable `baldr-agent-runner` local data plane.
+- Added persistent execution status, bounded events, cancellation, retries, idempotency, artifact SHA-256 attestation, and conservative reconciliation for uncertain write effects.
+- Added least-privilege workspace boundaries: read-only roles receive disposable reduced snapshots, while exactly one write participant receives only the explicitly selected workspace.
+- Made read-only snapshots usable in normal Python, Node, Rust and similar repositories by omitting generated dependency/build directories, symlinks and special entries without following or copying them.
+- Added local-process and versioned HTTP execution connectors while preserving existing Codex and Kiro provider profiles as compatible fallbacks.
+- Added Agent Manager operations, file/Kiro/manager discovery sources, safe preview/apply synchronization, immutable publication, RBAC/tenant policy, audit, metrics, backup and recovery support.
+- Added automatic compatible-agent selection plus clear planner, writer and reviewer identities in VS Code, CLI and MCP clients; write-capable external agents run directly when their manifest and trusted workspace already grant the required scope.
+- Added a separately owned `baldr-agents-pilot` repository demonstrating planning, writing and review through one external artifact, with a single `make pilot` test and real successful runs through CLI, VS Code and Kiro/MCP.
+- Added the public `baldr-agent` lifecycle CLI with `init`, `test`, `build`, `publish`, `doctor` and rollback; generated agent repositories build deterministic self-contained artifacts and require no relative dependency on a Baldr checkout.
+- Added stable per-version installation, local-catalog or Agent Manager publication, automatic exact-version activation, previous-version rollback and rejection of changed source, definitions or manifests under an immutable AgentRef.
+- Split external-agent development into `Baldr Agent SDK`, containing only the language authoring/runtime API, and the separately distributed `Baldr Agent Builder`, which owns `baldr-agent`, project templates, deterministic builds, publication, diagnostics and rollback.
+- Refactored Agent Builder into explicit configuration, models, scaffold, build, release and diagnostics modules; moved generated-project content into packaged templates and removed the monolithic internal `project.py` surface.
+- Added Builder Protocol v1 with separate service and JSONL driver contracts, exact driver identity, source/artifact digests, idempotent job identities and a transport-neutral Python client.
+- Routed `baldr-agent test`, `build` and `publish` through the local Builder backend and the built-in Python process driver, establishing the extension boundary for TypeScript and future language drivers without coupling authoring SDKs to Builder.
+- Added neutral `baldr-agent.toml` schema v2 fields (`language`, `entrypoint`, `driver`) while preserving schema v1 Python projects without migration.
+- Added bounded driver discovery from explicit registration paths, persisted registrations and `PATH`, with exact id/version/digest selection plus `driver list`, `doctor` and `register` commands.
+- Added the public `@baldr/agent-sdk` TypeScript runtime, the external `baldr.typescript` Builder driver and a generated TypeScript agent template that produces deterministic self-contained Node artifacts.
+- Added a real polyglot vertical gate covering TypeScript scaffold, tests, reproducible builds, immutable installation, local-catalog publication and Baldr-coordinated architect/implementer/reviewer execution through the independent Runner.
+- Made the TypeScript SDK and Builder driver independently installable npm artifacts, with public-package metadata, licenses and a global driver executable discovered automatically from `PATH`.
+- Fixed TypeScript driver identity so its digest is invariant across checkout, tarball and global installation paths.
+- Added a clean-install release gate that installs only packaged wheels and tarballs, then validates discovery, reproducible builds, publication, immutable-version rejection, update and rollback.
+- Added an opt-in trusted-publishing path for the two npm packages and a real external TypeScript pilot exercised through Agent Manager and the same facade contract used by VS Code and Kiro.
+
 ## 0.18.0 — Automatic Workspace Protection
 
 - Made **Automatic protection** the recommended default: exact Git roots use managed worktrees, while non-Git folders and selected repository subdirectories use durable BALDR-managed shadow workspaces.

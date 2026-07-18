@@ -10,6 +10,9 @@ resolution-markers = [
 
 [manifest]
 members = [
+    "baldr-agent-builder",
+    "baldr-agent-runner",
+    "baldr-agent-sdk",
     "baldr-kiro-adapter",
     "baldr-router",
 ]
@@ -44,6 +47,70 @@ sdist = { url = "https://files.pythonhosted.org/packages/9a/8e/82a0fe20a541c0314
 wheels = [
     { url = "https://files.pythonhosted.org/packages/64/b4/17d4b0b2a2dc85a6df63d1157e028ed19f90d4cd97c36717afef2bc2f395/attrs-26.1.0-py3-none-any.whl", hash = "sha256:c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309", size = 67548, upload-time = "2026-03-19T14:22:23.645Z" },
 ]
+
+[[package]]
+name = "baldr-agent-builder"
+version = "0.19.0"
+source = { editable = "tooling/agent-builder" }
+dependencies = [
+    { name = "baldr-agent-sdk" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "jsonschema" },
+    { name = "pytest" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "baldr-agent-sdk", editable = "sdks/python" },
+    { name = "jsonschema", marker = "extra == 'dev'", specifier = ">=4.23" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.9" },
+]
+provides-extras = ["dev"]
+
+[[package]]
+name = "baldr-agent-runner"
+version = "0.19.0"
+source = { editable = "runtimes/agent-runner" }
+dependencies = [
+    { name = "baldr-agent-sdk" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "baldr-agent-sdk", editable = "sdks/python" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.9" },
+]
+provides-extras = ["dev"]
+
+[[package]]
+name = "baldr-agent-sdk"
+version = "0.19.0"
+source = { editable = "sdks/python" }
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.9" },
+]
+provides-extras = ["dev"]
 
 [[package]]
 name = "baldr-kiro-adapter"
@@ -82,12 +149,16 @@ codex-sdk = [
     { name = "openai-codex" },
 ]
 dev = [
+    { name = "baldr-agent-runner" },
+    { name = "baldr-agent-sdk" },
     { name = "pytest" },
     { name = "ruff" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "baldr-agent-runner", marker = "extra == 'dev'", editable = "runtimes/agent-runner" },
+    { name = "baldr-agent-sdk", marker = "extra == 'dev'", editable = "sdks/python" },
     { name = "mcp", specifier = ">=1.10.0" },
     { name = "openai-codex", marker = "extra == 'codex-sdk'" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },

@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tarfile
 import time
 import zipfile
 from datetime import datetime, timezone
@@ -19,6 +20,7 @@ VERSION = "0.19.0"
 DIST = ROOT / "dist"
 ARTIFACTS = DIST / "artifacts"
 PYTHON_DIST = ARTIFACTS / "python"
+NODE_DIST = ARTIFACTS / "node"
 VALIDATION_DIR = DIST / "validation"
 METADATA_DIR = DIST / "metadata"
 EXTENSION = ROOT / "facades" / "vscode-extension"
@@ -37,6 +39,14 @@ def executable(name: str) -> str:
 def require_zip_members(archive: Path, expected: set[str], *, label: str) -> None:
     with zipfile.ZipFile(archive) as bundle:
         members = set(bundle.namelist())
+    missing = sorted(expected - members)
+    if missing:
+        raise SystemExit(f"{label} is missing required files: {', '.join(missing)}")
+
+
+def require_tar_members(archive: Path, expected: set[str], *, label: str) -> None:
+    with tarfile.open(archive, "r:gz") as bundle:
+        members = set(bundle.getnames())
     missing = sorted(expected - members)
     if missing:
         raise SystemExit(f"{label} is missing required files: {', '.join(missing)}")
@@ -229,15 +239,37 @@ def bootstrap_runtime_validation(node: str) -> None:
             raise SystemExit(f"Private runtime version mismatch: {reported!r}")
 
 
-def isolated_python_validation(uv: str, core_wheel: Path, adapter_wheel: Path) -> None:
+def isolated_python_validation(
+    uv: str,
+    core_wheel: Path,
+    adapter_wheel: Path,
+    sdk_wheel: Path,
+    builder_wheel: Path,
+    runner_wheel: Path,
+) -> None:
     with tempfile.TemporaryDirectory(prefix="baldr-isolated-") as temp:
         root = Path(temp)
         venv = root / "venv"
         run(uv, "venv", str(venv), label="isolated Python environment")
         python = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-        run(uv, "pip", "install", "--python", str(python), str(core_wheel), str(adapter_wheel), label="isolated wheel install")
+        run(
+            uv,
+            "pip",
+            "install",
+            "--python",
+            str(python),
+            str(core_wheel),
+            str(adapter_wheel),
+            str(sdk_wheel),
+            str(builder_wheel),
+            str(runner_wheel),
+            label="isolated wheel install",
+        )
         code = f"""
 import asyncio, json
+from baldr_agent_runner import __version__ as runner_version
+from baldr_agent_sdk import __version__ as sdk_version
+from baldr_agent_builder import __version__ as builder_version
 from baldr_router import __version__
 from baldr_router.extensions import load_installed_extensions, extension_status
 from baldr_router.server import mcp
@@ -245,11 +277,368 @@ load_installed_extensions(mcp)
 tools = sorted(tool.name for tool in asyncio.run(mcp.list_tools()))
 status = extension_status()
 assert __version__ == {VERSION!r}
+assert sdk_version == {VERSION!r}
+assert builder_version == {VERSION!r}
+assert runner_version == {VERSION!r}
 assert any(item.get('adapter') == 'kiro' for item in status.get('results', [])), status
 assert 'kiro_install_workspace' in tools
-print(json.dumps({{'version': __version__, 'kiro_tool_loaded': True}}))
+print(json.dumps({{'version': __version__, 'sdk': sdk_version, 'builder': builder_version, 'runner': runner_version, 'kiro_tool_loaded': True}}))
 """
         run(str(python), "-c", code, label="isolated adapter discovery")
+        runner = venv / (
+            "Scripts/baldr-agent-runner.exe"
+            if os.name == "nt"
+            else "bin/baldr-agent-runner"
+        )
+        health = parse_json_output(
+            run(str(runner), "health", label="isolated agent runner health"),
+            label="isolated agent runner health",
+        )
+        if health.get("status") != "ok" or 1 not in health.get("protocols", []):
+            raise SystemExit(f"Agent runner health failed: {health}")
+        agent_cli = venv / (
+            "Scripts/baldr-agent.exe" if os.name == "nt" else "bin/baldr-agent"
+        )
+        help_text = run(
+            str(agent_cli), "--help", label="isolated external agent CLI"
+        )
+        for command in ("init", "test", "build", "publish", "doctor"):
+            if command not in help_text:
+                raise SystemExit(
+                    f"External agent CLI does not expose {command!r}: {help_text}"
+                )
+
+
+def isolated_typescript_distribution_validation(
+    uv: str,
+    npm: str,
+    node: str,
+    core_wheel: Path,
+    sdk_wheel: Path,
+    builder_wheel: Path,
+    runner_wheel: Path,
+    typescript_sdk_package: Path,
+    typescript_driver_package: Path,
+) -> None:
+    """Prove the published Node packages work without a source checkout."""
+
+    with tempfile.TemporaryDirectory(prefix="baldr-typescript-distribution-") as temp:
+        root = Path(temp)
+        venv = root / "venv"
+        npm_prefix = root / "npm-prefix"
+        project = root / "external-agent"
+        install_root = root / "installed-agents"
+        run(uv, "venv", str(venv), label="TypeScript distribution Python environment")
+        python = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+        scripts = python.parent
+        run(
+            uv,
+            "pip",
+            "install",
+            "--python",
+            str(python),
+            str(core_wheel),
+            str(sdk_wheel),
+            str(builder_wheel),
+            str(runner_wheel),
+            label="TypeScript distribution wheel install",
+        )
+        npm_env = {
+            **os.environ,
+            "npm_config_cache": str(root / "npm-cache"),
+        }
+        run(
+            npm,
+            "install",
+            "--global",
+            "--prefix",
+            str(npm_prefix),
+            "--ignore-scripts",
+            "--no-audit",
+            "--no-fund",
+            str(typescript_sdk_package),
+            str(typescript_driver_package),
+            cwd=root,
+            env=npm_env,
+            label="isolated TypeScript package install",
+        )
+        npm_bin = npm_prefix if os.name == "nt" else npm_prefix / "bin"
+        env = {
+            **os.environ,
+            "PATH": os.pathsep.join(
+                (str(npm_bin), str(scripts), os.environ.get("PATH", ""))
+            ),
+            "XDG_CONFIG_HOME": str(root / "config"),
+            "XDG_CACHE_HOME": str(root / "cache"),
+            "XDG_STATE_HOME": str(root / "state"),
+            "XDG_DATA_HOME": str(root / "data"),
+            "BALDR_AGENT_REGISTRY_PATH": str(root / "catalog" / "agents.json"),
+            "BALDR_AGENT_INSTALL_ROOT": str(install_root),
+        }
+        agent_cli = scripts / (
+            "baldr-agent.exe" if os.name == "nt" else "baldr-agent"
+        )
+        router_cli = scripts / (
+            "baldr-router.exe" if os.name == "nt" else "baldr-router"
+        )
+        source_driver = (
+            ROOT / "tooling" / "agent-builder-typescript" / "dist" / "driver.js"
+        )
+        descriptor_code = (
+            f"const m = await import({json.dumps(source_driver.as_uri())}); "
+            "console.log(JSON.stringify(m.descriptor()));"
+        )
+        source_descriptor = parse_json_output(
+            run(
+                node,
+                "--input-type=module",
+                "--eval",
+                descriptor_code,
+                label="source TypeScript driver identity",
+            ),
+            label="source TypeScript driver identity",
+        )
+        installed_status = parse_json_output(
+            run(
+                str(agent_cli),
+                "driver",
+                "doctor",
+                "baldr.typescript",
+                cwd=root,
+                env=env,
+                label="PATH-discovered TypeScript driver",
+            ),
+            label="PATH-discovered TypeScript driver",
+        )
+        installed_drivers = installed_status.get("drivers") or []
+        if len(installed_drivers) != 1:
+            raise SystemExit(
+                f"Expected one installed TypeScript driver: {installed_status}"
+            )
+        installed_descriptor = installed_drivers[0]
+        if installed_descriptor.get("origin") != "PATH":
+            raise SystemExit(
+                f"Packaged TypeScript driver was not discovered on PATH: {installed_descriptor}"
+            )
+        if installed_descriptor.get("digest") != source_descriptor.get("digest"):
+            raise SystemExit(
+                "TypeScript driver identity changed after package installation: "
+                f"{source_descriptor=} {installed_descriptor=}"
+            )
+
+        run(
+            str(agent_cli),
+            "init",
+            str(project),
+            "--name",
+            "distribution-agent",
+            "--owner",
+            "release-test",
+            "--namespace",
+            "distribution",
+            "--language",
+            "typescript",
+            cwd=root,
+            env=env,
+            label="isolated TypeScript agent scaffold",
+        )
+        run(
+            str(agent_cli),
+            "test",
+            "--project",
+            str(project),
+            cwd=root,
+            env=env,
+            label="isolated TypeScript agent tests",
+        )
+        first = parse_json_output(
+            run(
+                str(agent_cli),
+                "build",
+                "--project",
+                str(project),
+                "--output-dir",
+                str(root / "build-one"),
+                cwd=root,
+                env=env,
+                label="first isolated TypeScript build",
+            ),
+            label="first isolated TypeScript build",
+        )
+        second = parse_json_output(
+            run(
+                str(agent_cli),
+                "build",
+                "--project",
+                str(project),
+                "--output-dir",
+                str(root / "build-two"),
+                cwd=root,
+                env=env,
+                label="second isolated TypeScript build",
+            ),
+            label="second isolated TypeScript build",
+        )
+        first_artifact = Path(str(first.get("artifact") or ""))
+        second_artifact = Path(str(second.get("artifact") or ""))
+        if (
+            first.get("artifact_digest") != second.get("artifact_digest")
+            or not first_artifact.is_file()
+            or first_artifact.read_bytes() != second_artifact.read_bytes()
+        ):
+            raise SystemExit("Installed TypeScript packages produced a non-reproducible build")
+
+        first_publication = parse_json_output(
+            run(
+                str(agent_cli),
+                "publish",
+                "--project",
+                str(project),
+                "--install-root",
+                str(install_root),
+                cwd=root,
+                env=env,
+                label="publish isolated TypeScript agent 1.0.0",
+            ),
+            label="publish isolated TypeScript agent 1.0.0",
+        )
+        doctor = parse_json_output(
+            run(
+                str(agent_cli),
+                "doctor",
+                "--project",
+                str(project),
+                "--install-root",
+                str(install_root),
+                cwd=root,
+                env=env,
+                label="diagnose isolated TypeScript agent",
+            ),
+            label="diagnose isolated TypeScript agent",
+        )
+        if first_publication.get("ok") is not True or doctor.get("ok") is not True:
+            raise SystemExit(
+                f"Initial TypeScript release is unhealthy: {first_publication=} {doctor=}"
+            )
+
+        config = project / "baldr-agent.toml"
+        configured = config.read_text(encoding="utf-8")
+        if 'version = "1.0.0"' not in configured:
+            raise SystemExit("Generated project did not declare version 1.0.0")
+        config.write_text(
+            configured.replace('version = "1.0.0"', 'version = "1.1.0"', 1),
+            encoding="utf-8",
+        )
+        entrypoint = project / "src" / "agent.ts"
+        entrypoint.write_text(
+            entrypoint.read_text(encoding="utf-8")
+            + "\n// Distribution update 1.1.0.\n",
+            encoding="utf-8",
+        )
+        second_publication = parse_json_output(
+            run(
+                str(agent_cli),
+                "publish",
+                "--project",
+                str(project),
+                "--install-root",
+                str(install_root),
+                cwd=root,
+                env=env,
+                label="publish isolated TypeScript agent 1.1.0",
+            ),
+            label="publish isolated TypeScript agent 1.1.0",
+        )
+        entrypoint.write_text(
+            entrypoint.read_text(encoding="utf-8")
+            + "// Illegal replacement without a version bump.\n",
+            encoding="utf-8",
+        )
+        immutable_failure = parse_json_output(
+            run(
+                str(agent_cli),
+                "publish",
+                "--project",
+                str(project),
+                "--install-root",
+                str(install_root),
+                cwd=root,
+                env=env,
+                label="reject changed immutable TypeScript release",
+                allowed_returncodes=(2,),
+            ),
+            label="reject changed immutable TypeScript release",
+        )
+        if "bump version" not in str(
+            (immutable_failure.get("error") or {}).get("message") or ""
+        ):
+            raise SystemExit(
+                f"Changed immutable release was not rejected: {immutable_failure}"
+            )
+        rollback = parse_json_output(
+            run(
+                str(agent_cli),
+                "rollback",
+                "1.0.0",
+                "--project",
+                str(project),
+                cwd=root,
+                env=env,
+                label="rollback isolated TypeScript agent",
+            ),
+            label="rollback isolated TypeScript agent",
+        )
+        catalog = parse_json_output(
+            run(
+                str(router_cli),
+                "agent",
+                "list",
+                "--workspace",
+                str(project),
+                cwd=root,
+                env=env,
+                label="inspect rolled back TypeScript catalog",
+            ),
+            label="inspect rolled back TypeScript catalog",
+        )
+        agents = [item for item in catalog.get("agents", []) if isinstance(item, dict)]
+        enabled_versions = {
+            str(item.get("version")) for item in agents if item.get("enabled")
+        }
+        if (
+            second_publication.get("ok") is not True
+            or rollback.get("version") != "1.0.0"
+            or enabled_versions != {"1.0.0"}
+        ):
+            raise SystemExit(
+                f"TypeScript update/rollback validation failed: {rollback=} {agents=}"
+            )
+
+        installed_text = "\n".join(
+            path.read_text(encoding="utf-8", errors="replace")
+            for path in sorted(install_root.rglob("*"))
+            if path.is_file()
+        )
+        if str(ROOT) in installed_text:
+            raise SystemExit("Installed TypeScript release leaked the source checkout path")
+        write_json(
+            VALIDATION_DIR / "typescript-distribution.json",
+            {
+                "ok": True,
+                "packages": {
+                    "sdk": typescript_sdk_package.name,
+                    "driver": typescript_driver_package.name,
+                },
+                "driver": installed_descriptor,
+                "artifact_digest": first.get("artifact_digest"),
+                "published_versions": ["1.0.0", "1.1.0"],
+                "immutable_replacement_rejected": True,
+                "rollback": rollback,
+                "checkout_path_leaked": False,
+                "platform": "windows" if os.name == "nt" else "linux-posix",
+            },
+            replacements={str(root): "<isolated-distribution>"},
+        )
 
 
 def write_json(path: Path, value: Any, *, replacements: dict[str, str] | None = None) -> Path:
@@ -329,7 +718,13 @@ def main() -> int:
 
     if DIST.exists() and not args.keep_dist:
         shutil.rmtree(DIST)
-    for directory in (PYTHON_DIST, VALIDATION_DIR, METADATA_DIR, EXTENSION_RUNTIME):
+    for directory in (
+        PYTHON_DIST,
+        NODE_DIST,
+        VALIDATION_DIR,
+        METADATA_DIR,
+        EXTENSION_RUNTIME,
+    ):
         directory.mkdir(parents=True, exist_ok=True)
     for old_wheel in EXTENSION_RUNTIME.glob("baldr_router-*.whl"):
         old_wheel.unlink()
@@ -409,11 +804,33 @@ def main() -> int:
 
     run(uv, "build", "router", "--out-dir", str(PYTHON_DIST), label="build core wheel and sdist")
     run(uv, "build", "facades/kiro/adapter", "--out-dir", str(PYTHON_DIST), label="build Kiro adapter wheel and sdist")
+    run(uv, "build", "sdks/python", "--out-dir", str(PYTHON_DIST), label="build agent SDK wheel and sdist")
+    run(uv, "build", "tooling/agent-builder", "--out-dir", str(PYTHON_DIST), label="build Agent Builder wheel and sdist")
+    run(uv, "build", "runtimes/agent-runner", "--out-dir", str(PYTHON_DIST), label="build agent runner wheel and sdist")
     core_wheels = sorted(PYTHON_DIST.glob(f"baldr_router-{VERSION}-*.whl"))
     adapter_wheels = sorted(PYTHON_DIST.glob(f"baldr_kiro_adapter-{VERSION}-*.whl"))
-    if len(core_wheels) != 1 or len(adapter_wheels) != 1:
-        raise SystemExit(f"Expected one core and adapter wheel: {core_wheels=} {adapter_wheels=}")
+    sdk_wheels = sorted(PYTHON_DIST.glob(f"baldr_agent_sdk-{VERSION}-*.whl"))
+    builder_wheels = sorted(PYTHON_DIST.glob(f"baldr_agent_builder-{VERSION}-*.whl"))
+    runner_wheels = sorted(PYTHON_DIST.glob(f"baldr_agent_runner-{VERSION}-*.whl"))
+    if not all(
+        len(items) == 1
+        for items in (
+            core_wheels,
+            adapter_wheels,
+            sdk_wheels,
+            builder_wheels,
+            runner_wheels,
+        )
+    ):
+        raise SystemExit(
+            "Expected one core, adapter, SDK, Builder, and runner wheel: "
+            f"{core_wheels=} {adapter_wheels=} {sdk_wheels=} "
+            f"{builder_wheels=} {runner_wheels=}"
+        )
     core_wheel, adapter_wheel = core_wheels[0], adapter_wheels[0]
+    sdk_wheel = sdk_wheels[0]
+    builder_wheel = builder_wheels[0]
+    runner_wheel = runner_wheels[0]
     require_zip_members(
         core_wheel,
         {
@@ -427,8 +844,63 @@ def main() -> int:
             "baldr_router/contracts/agent-registry-v1.schema.json",
             "baldr_router/contracts/agent-transport-http-v1.schema.json",
             "baldr_router/contracts/agent-manager-v1.schema.json",
+            "baldr_router/contracts/agent-source-v1.schema.json",
+            "baldr_router/contracts/agent-catalog-sync-v1.schema.json",
+            "baldr_router/contracts/agent-team-resolution-v1.schema.json",
+            "baldr_router/contracts/orchestration-policy-v1.schema.json",
+            "baldr_router/contracts/agent-execution-v1.schema.json",
         },
         label="Core wheel",
+    )
+    require_zip_members(
+        sdk_wheel,
+        {
+            "baldr_agent_sdk/__init__.py",
+            "baldr_agent_sdk/agent.py",
+            "baldr_agent_sdk/contract.py",
+        },
+        label="Agent SDK wheel",
+    )
+    require_zip_members(
+        builder_wheel,
+        {
+            "baldr_agent_builder/__init__.py",
+            "baldr_agent_builder/backend.py",
+            "baldr_agent_builder/build.py",
+            "baldr_agent_builder/client.py",
+            "baldr_agent_builder/cli.py",
+            "baldr_agent_builder/config.py",
+            "baldr_agent_builder/diagnostics.py",
+            "baldr_agent_builder/driver.py",
+            "baldr_agent_builder/drivers.py",
+            "baldr_agent_builder/inventory.py",
+            "baldr_agent_builder/models.py",
+            "baldr_agent_builder/protocol.py",
+            "baldr_agent_builder/release.py",
+            "baldr_agent_builder/scaffold.py",
+            "baldr_agent_builder/templates/Makefile.tpl",
+            "baldr_agent_builder/templates/README.md.tpl",
+            "baldr_agent_builder/templates/README.typescript.md.tpl",
+            "baldr_agent_builder/templates/agent.py.tpl",
+            "baldr_agent_builder/templates/agent.ts.tpl",
+            "baldr_agent_builder/templates/baldr-agent.toml.tpl",
+            "baldr_agent_builder/templates/baldr-agent.typescript.toml.tpl",
+            "baldr_agent_builder/templates/package.json.tpl",
+            "baldr_agent_builder/templates/test_agent.py.tpl",
+            "baldr_agent_builder/templates/test_agent.mjs.tpl",
+            "baldr_agent_builder/templates/tsconfig.json.tpl",
+        },
+        label="Agent Builder wheel",
+    )
+    require_zip_members(
+        runner_wheel,
+        {
+            "baldr_agent_runner/__init__.py",
+            "baldr_agent_runner/cli.py",
+            "baldr_agent_runner/runner.py",
+            "baldr_agent_runner/store.py",
+        },
+        label="Agent runner wheel",
     )
     for hidden in PYTHON_DIST.glob(".*"):
         if hidden.is_file():
@@ -436,7 +908,86 @@ def main() -> int:
     shutil.copy2(core_wheel, EXTENSION_RUNTIME / core_wheel.name)
 
     bootstrap_runtime_validation(node)
-    isolated_python_validation(uv, core_wheel, adapter_wheel)
+    isolated_python_validation(
+        uv,
+        core_wheel,
+        adapter_wheel,
+        sdk_wheel,
+        builder_wheel,
+        runner_wheel,
+    )
+
+    npm_env = {
+        **os.environ,
+        "npm_config_cache": os.environ.get("npm_config_cache")
+        or str(Path(tempfile.gettempdir()) / "baldr-router-npm-cache"),
+    }
+    run(npm, "run", "build:agents", env=npm_env, label="build TypeScript agent packages")
+    run(
+        npm,
+        "pack",
+        "--pack-destination",
+        str(NODE_DIST),
+        "--workspace",
+        "@baldr/agent-sdk",
+        env=npm_env,
+        label="package TypeScript agent SDK",
+    )
+    run(
+        npm,
+        "pack",
+        "--pack-destination",
+        str(NODE_DIST),
+        "--workspace",
+        "@baldr/agent-builder-typescript",
+        env=npm_env,
+        label="package TypeScript Builder driver",
+    )
+    typescript_sdk_packages = sorted(
+        NODE_DIST.glob(f"baldr-agent-sdk-{VERSION}.tgz")
+    )
+    typescript_driver_packages = sorted(
+        NODE_DIST.glob(f"baldr-agent-builder-typescript-{VERSION}.tgz")
+    )
+    if len(typescript_sdk_packages) != 1 or len(typescript_driver_packages) != 1:
+        raise SystemExit(
+            "Expected one TypeScript SDK and Builder driver package: "
+            f"{typescript_sdk_packages=} {typescript_driver_packages=}"
+        )
+    require_tar_members(
+        typescript_sdk_packages[0],
+        {
+            "package/LICENSE",
+            "package/package.json",
+            "package/src/index.ts",
+            "package/dist/index.js",
+            "package/dist/index.d.ts",
+        },
+        label="TypeScript agent SDK package",
+    )
+    require_tar_members(
+        typescript_driver_packages[0],
+        {
+            "package/LICENSE",
+            "package/package.json",
+            "package/baldr-builder-driver.json",
+            "package/bin/baldr-builder-driver-typescript.mjs",
+            "package/src/driver.ts",
+            "package/dist/driver.js",
+        },
+        label="TypeScript Builder driver package",
+    )
+    isolated_typescript_distribution_validation(
+        uv,
+        npm,
+        node,
+        core_wheel,
+        sdk_wheel,
+        builder_wheel,
+        runner_wheel,
+        typescript_sdk_packages[0],
+        typescript_driver_packages[0],
+    )
 
     run(npm, "run", "compile", cwd=EXTENSION, label="compile VS Code extension")
     extension_manifest = json.loads((EXTENSION / "package.json").read_text(encoding="utf-8"))

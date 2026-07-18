@@ -42,8 +42,23 @@ def _synthetic_artifacts(
     agent_http_schema = (
         ROOT / "contracts" / "agent-transport-http-v1.schema.json"
     ).read_bytes()
+    agent_execution_schema = (
+        ROOT / "contracts" / "agent-execution-v1.schema.json"
+    ).read_bytes()
     agent_manager_schema = (
         ROOT / "contracts" / "agent-manager-v1.schema.json"
+    ).read_bytes()
+    agent_source_schema = (
+        ROOT / "contracts" / "agent-source-v1.schema.json"
+    ).read_bytes()
+    agent_sync_schema = (
+        ROOT / "contracts" / "agent-catalog-sync-v1.schema.json"
+    ).read_bytes()
+    agent_team_schema = (
+        ROOT / "contracts" / "agent-team-resolution-v1.schema.json"
+    ).read_bytes()
+    orchestration_schema = (
+        ROOT / "contracts" / "orchestration-policy-v1.schema.json"
     ).read_bytes()
     with zipfile.ZipFile(wheel, "w") as archive:
         archive.writestr("baldr_router/phase_deliverables.py", "VERSION = 1\n")
@@ -73,8 +88,28 @@ def _synthetic_artifacts(
             agent_http_schema,
         )
         archive.writestr(
+            "baldr_router/contracts/agent-execution-v1.schema.json",
+            agent_execution_schema,
+        )
+        archive.writestr(
             "baldr_router/contracts/agent-manager-v1.schema.json",
             agent_manager_schema,
+        )
+        archive.writestr(
+            "baldr_router/contracts/agent-source-v1.schema.json",
+            agent_source_schema,
+        )
+        archive.writestr(
+            "baldr_router/contracts/agent-catalog-sync-v1.schema.json",
+            agent_sync_schema,
+        )
+        archive.writestr(
+            "baldr_router/contracts/agent-team-resolution-v1.schema.json",
+            agent_team_schema,
+        )
+        archive.writestr(
+            "baldr_router/contracts/orchestration-policy-v1.schema.json",
+            orchestration_schema,
         )
         archive.writestr(
             f"baldr_router-{version}.dist-info/METADATA",

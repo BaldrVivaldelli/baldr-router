@@ -18,7 +18,12 @@ DELIVERABLE_INDEX_PAGE_SCHEMA_PATH = (
 )
 AGENT_REGISTRY_SCHEMA_PATH = ROOT / "contracts" / "agent-registry-v1.schema.json"
 AGENT_HTTP_SCHEMA_PATH = ROOT / "contracts" / "agent-transport-http-v1.schema.json"
+AGENT_EXECUTION_SCHEMA_PATH = ROOT / "contracts" / "agent-execution-v1.schema.json"
 AGENT_MANAGER_SCHEMA_PATH = ROOT / "contracts" / "agent-manager-v1.schema.json"
+AGENT_SOURCE_SCHEMA_PATH = ROOT / "contracts" / "agent-source-v1.schema.json"
+AGENT_SYNC_SCHEMA_PATH = ROOT / "contracts" / "agent-catalog-sync-v1.schema.json"
+AGENT_TEAM_SCHEMA_PATH = ROOT / "contracts" / "agent-team-resolution-v1.schema.json"
+ORCHESTRATION_SCHEMA_PATH = ROOT / "contracts" / "orchestration-policy-v1.schema.json"
 
 
 def rendered_json(path: Path) -> str:
@@ -109,7 +114,12 @@ def outputs() -> dict[Path, str]:
     )
     agent_registry_schema_json = rendered_json(AGENT_REGISTRY_SCHEMA_PATH)
     agent_http_schema_json = rendered_json(AGENT_HTTP_SCHEMA_PATH)
+    agent_execution_schema_json = rendered_json(AGENT_EXECUTION_SCHEMA_PATH)
     agent_manager_schema_json = rendered_json(AGENT_MANAGER_SCHEMA_PATH)
+    agent_source_schema_json = rendered_json(AGENT_SOURCE_SCHEMA_PATH)
+    agent_sync_schema_json = rendered_json(AGENT_SYNC_SCHEMA_PATH)
+    agent_team_schema_json = rendered_json(AGENT_TEAM_SCHEMA_PATH)
+    orchestration_schema_json = rendered_json(ORCHESTRATION_SCHEMA_PATH)
     table = docs_table(contract)
 
     out: dict[Path, str] = {
@@ -128,7 +138,17 @@ def outputs() -> dict[Path, str]:
         ROOT
         / "router/src/baldr_router/contracts/agent-transport-http-v1.schema.json": agent_http_schema_json,
         ROOT
+        / "router/src/baldr_router/contracts/agent-execution-v1.schema.json": agent_execution_schema_json,
+        ROOT
         / "router/src/baldr_router/contracts/agent-manager-v1.schema.json": agent_manager_schema_json,
+        ROOT
+        / "router/src/baldr_router/contracts/agent-source-v1.schema.json": agent_source_schema_json,
+        ROOT
+        / "router/src/baldr_router/contracts/agent-catalog-sync-v1.schema.json": agent_sync_schema_json,
+        ROOT
+        / "router/src/baldr_router/contracts/agent-team-resolution-v1.schema.json": agent_team_schema_json,
+        ROOT
+        / "router/src/baldr_router/contracts/orchestration-policy-v1.schema.json": orchestration_schema_json,
         ROOT / "facades/vscode-extension/resources/facade-v1.json": contract_json,
         ROOT / "facades/vscode-extension/resources/facade-v1.schema.json": schema_json,
         ROOT

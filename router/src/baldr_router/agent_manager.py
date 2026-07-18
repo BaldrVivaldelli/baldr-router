@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import urllib.parse
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 from .agent_api import (
@@ -21,7 +23,12 @@ RESOLUTION_CONTRACT = "baldr-agent-resolution"
 CATALOG_CONTRACT = "baldr-agent-catalog"
 HEALTH_CONTRACT = "baldr-agent-manager-health"
 ADMIN_CONTRACT = "baldr-agent-manager-admin"
+AUDIT_CONTRACT = "baldr-agent-manager-audit"
+METRICS_CONTRACT = "baldr-agent-manager-metrics"
+PROBE_CONTRACT = "baldr-agent-manager-probe"
+PUBLICATION_CONTRACT = "baldr-agent-publication"
 AGENT_MANAGER_CONTRACT_VERSION = 1
+MAX_PUBLICATION_BYTES = 2 * 1024 * 1024
 
 
 def _registry_name(value: str) -> str:
@@ -148,10 +155,17 @@ class HttpAgentManagerResolver:
         status = str(response.get("status") or "").strip().lower()
         if status not in {"ok", "degraded"}:
             raise AgentContractError("Agent Manager returned an invalid health status.")
-        return {
+        result: dict[str, Any] = {
             "status": status,
             "service_version": str(response.get("service_version") or "")[:128],
         }
+        if "schema_version" in response:
+            result["schema_version"] = int(response.get("schema_version") or 0)
+        if "policy_mode" in response:
+            result["policy_mode"] = str(response.get("policy_mode") or "")[:64]
+        if "principal" in response:
+            result["principal"] = str(response.get("principal") or "")[:96]
+        return result
 
 
 class HttpAgentManagerAdmin(HttpAgentManagerResolver):
@@ -211,6 +225,124 @@ class HttpAgentManagerAdmin(HttpAgentManagerResolver):
             f"{urllib.parse.quote(reference.version, safe='')}/revoke"
         )
         return self._post(path)
+
+    def audit(self, *, after: int = 0, limit: int = 100) -> dict[str, Any]:
+        bounded_after = max(0, int(after))
+        bounded_limit = max(1, min(int(limit), 200))
+        response = self._get(f"/v1/audit?after={bounded_after}&limit={bounded_limit}")
+        if (
+            response.get("contract") != AUDIT_CONTRACT
+            or response.get("version") != AGENT_MANAGER_CONTRACT_VERSION
+            or not isinstance(response.get("events"), list)
+        ):
+            raise AgentContractError(
+                "Agent Manager audit does not implement baldr-agent-manager-audit v1."
+            )
+        return response
+
+    def metrics(self) -> dict[str, Any]:
+        response = self._get("/v1/metrics")
+        if (
+            response.get("contract") != METRICS_CONTRACT
+            or response.get("version") != AGENT_MANAGER_CONTRACT_VERSION
+        ):
+            raise AgentContractError(
+                "Agent Manager metrics do not implement baldr-agent-manager-metrics v1."
+            )
+        return response
+
+
+def agent_publication_document(manifest: AgentManifest) -> dict[str, Any]:
+    return {
+        "contract": PUBLICATION_CONTRACT,
+        "version": AGENT_MANAGER_CONTRACT_VERSION,
+        "manifest": {**manifest.canonical_payload(), "digest": manifest.digest},
+    }
+
+
+def load_agent_publication(path: Path) -> AgentManifest:
+    candidate = path.expanduser()
+    if candidate.is_symlink() or not candidate.is_file():
+        raise AgentContractError(
+            "Agent publication must be a regular, non-symlink JSON file."
+        )
+    try:
+        size = candidate.stat().st_size
+    except OSError as exc:
+        raise AgentContractError("Agent publication is unavailable.") from exc
+    if size <= 0 or size > MAX_PUBLICATION_BYTES:
+        raise AgentContractError("Agent publication size is invalid.")
+    try:
+        value = json.loads(candidate.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise AgentContractError("Agent publication must be UTF-8 JSON.") from exc
+    if not isinstance(value, Mapping):
+        raise AgentContractError("Agent publication must be an object.")
+    if set(value) != {"contract", "version", "manifest"}:
+        raise AgentContractError("Agent publication has unexpected or missing fields.")
+    if (
+        value.get("contract") != PUBLICATION_CONTRACT
+        or value.get("version") != AGENT_MANAGER_CONTRACT_VERSION
+    ):
+        raise AgentContractError(
+            "Agent publication must implement baldr-agent-publication v1."
+        )
+    raw_manifest = value.get("manifest")
+    if not isinstance(raw_manifest, Mapping):
+        raise AgentContractError("Agent publication requires a manifest object.")
+    return AgentManifest.from_dict(raw_manifest)
+
+
+def write_agent_publication(
+    path: Path,
+    manifest: AgentManifest,
+    *,
+    overwrite: bool = False,
+) -> Path:
+    target = path.expanduser()
+    if target.is_symlink():
+        raise AgentContractError("Agent publication output cannot be a symbolic link.")
+    if target.exists() and not overwrite:
+        raise AgentContractError("Agent publication output already exists.")
+    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    document = agent_publication_document(manifest)
+    mode = "w" if overwrite else "x"
+    try:
+        with target.open(mode, encoding="utf-8") as handle:
+            json.dump(document, handle, ensure_ascii=False, indent=2, sort_keys=True)
+            handle.write("\n")
+        target.chmod(0o600)
+    except FileExistsError as exc:
+        raise AgentContractError("Agent publication output already exists.") from exc
+    except OSError as exc:
+        raise AgentContractError("Agent publication output could not be written.") from exc
+    return target.resolve()
+
+
+class AgentManagerPublisher:
+    """Small SDK surface for validating and publishing versioned manifest files."""
+
+    def __init__(
+        self,
+        config: AgentManagerConfig,
+        *,
+        client: JsonHttpClient | None = None,
+    ) -> None:
+        self.admin = HttpAgentManagerAdmin(config, client=client)
+
+    @staticmethod
+    def validate_file(path: Path) -> dict[str, Any]:
+        manifest = load_agent_publication(path)
+        return {
+            "ok": True,
+            "reference": str(manifest.reference),
+            "digest": manifest.digest,
+            "owner": manifest.owner,
+            "effect_mode": manifest.effect_mode,
+        }
+
+    def publish_file(self, path: Path) -> dict[str, Any]:
+        return self.admin.publish(load_agent_publication(path))
 
 
 def _safe_manifest(manifest: AgentManifest) -> dict[str, Any]:

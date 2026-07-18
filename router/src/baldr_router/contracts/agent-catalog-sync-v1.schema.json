@@ -1,0 +1,383 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://baldr.dev/contracts/agent-catalog-sync-v1.schema.json",
+  "title": "Baldr agent catalog synchronization v1",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/plan"
+    },
+    {
+      "$ref": "#/$defs/state"
+    }
+  ],
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "agentRef": {
+      "type": "string",
+      "maxLength": 320,
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,95}://[a-z0-9][a-z0-9._-]{0,95}/[a-z0-9][a-z0-9._-]{0,95}@[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$"
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "label"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,95}$"
+        },
+        "kind": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{0,31}$"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "absent",
+        "conflict",
+        "disabled",
+        "new",
+        "new-version",
+        "revoked",
+        "unavailable",
+        "unchanged",
+        "total",
+        "changes"
+      ],
+      "properties": {
+        "absent": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "conflict": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "disabled": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "new": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "new-version": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "revoked": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unavailable": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unchanged": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "changes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ref",
+        "digest",
+        "status",
+        "suggested_action",
+        "management"
+      ],
+      "properties": {
+        "ref": {
+          "$ref": "#/$defs/agentRef"
+        },
+        "digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "registered_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "status": {
+          "enum": [
+            "new",
+            "new-version",
+            "unchanged",
+            "disabled",
+            "revoked",
+            "unavailable",
+            "absent",
+            "conflict"
+          ]
+        },
+        "suggested_action": {
+          "enum": [
+            "none",
+            "publish",
+            "track",
+            "enable",
+            "disable",
+            "revoke",
+            "blocked"
+          ]
+        },
+        "management": {
+          "enum": [
+            "managed",
+            "observed",
+            "untracked"
+          ]
+        },
+        "source_state": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 240
+        },
+        "label": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 512
+        }
+      }
+    },
+    "plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "version",
+        "source",
+        "registry",
+        "complete",
+        "summary",
+        "items",
+        "plan_digest"
+      ],
+      "properties": {
+        "contract": {
+          "const": "baldr-agent-sync-plan"
+        },
+        "version": {
+          "const": 1
+        },
+        "source": {
+          "$ref": "#/$defs/source"
+        },
+        "registry": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "path",
+            "fingerprint"
+          ],
+          "properties": {
+            "path": {
+              "type": "string",
+              "maxLength": 2048
+            },
+            "fingerprint": {
+              "$ref": "#/$defs/digest"
+            }
+          }
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "summary": {
+          "$ref": "#/$defs/summary"
+        },
+        "items": {
+          "type": "array",
+          "maxItems": 2000,
+          "items": {
+            "$ref": "#/$defs/item"
+          }
+        },
+        "plan_digest": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "digest",
+        "management"
+      ],
+      "properties": {
+        "digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "management": {
+          "enum": [
+            "managed",
+            "observed"
+          ]
+        }
+      }
+    },
+    "change": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action",
+        "ref",
+        "digest"
+      ],
+      "properties": {
+        "action": {
+          "enum": [
+            "publish",
+            "track",
+            "enable",
+            "disable",
+            "revoke"
+          ]
+        },
+        "ref": {
+          "$ref": "#/$defs/agentRef"
+        },
+        "digest": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "event_id",
+        "occurred_at",
+        "source_id",
+        "source_kind",
+        "actor",
+        "plan_digest",
+        "changes"
+      ],
+      "properties": {
+        "event_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "source_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,95}$"
+        },
+        "source_kind": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{0,31}$"
+        },
+        "actor": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "plan_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "changes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2000,
+          "items": {
+            "$ref": "#/$defs/change"
+          }
+        }
+      }
+    },
+    "state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "version",
+        "sources",
+        "events"
+      ],
+      "properties": {
+        "contract": {
+          "const": "baldr-agent-sync-state"
+        },
+        "version": {
+          "const": 1
+        },
+        "sources": {
+          "type": "object",
+          "maxProperties": 1000,
+          "propertyNames": {
+            "pattern": "^[a-z0-9][a-z0-9._-]{0,95}$"
+          },
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "references"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,31}$"
+              },
+              "references": {
+                "type": "object",
+                "maxProperties": 1000,
+                "propertyNames": {
+                  "pattern": "^[a-z0-9][a-z0-9._-]{0,95}://[a-z0-9][a-z0-9._-]{0,95}/[a-z0-9][a-z0-9._-]{0,95}@[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$"
+                },
+                "additionalProperties": {
+                  "$ref": "#/$defs/binding"
+                }
+              }
+            }
+          }
+        },
+        "events": {
+          "type": "array",
+          "maxItems": 1000,
+          "items": {
+            "$ref": "#/$defs/event"
+          }
+        }
+      }
+    }
+  }
+}

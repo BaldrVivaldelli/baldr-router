@@ -57,12 +57,20 @@ def _workspace_package_version(lock: dict[str, Any], package_name: str) -> str:
 def source_version_values(root: Path = ROOT) -> dict[str, str]:
     core_project = _toml(root / "router" / "pyproject.toml")
     adapter_project = _toml(root / "facades" / "kiro" / "adapter" / "pyproject.toml")
+    sdk_project = _toml(root / "sdks" / "python" / "pyproject.toml")
+    typescript_sdk = _json(root / "sdks" / "typescript" / "package.json")
+    builder_project = _toml(root / "tooling" / "agent-builder" / "pyproject.toml")
+    typescript_builder = _json(
+        root / "tooling" / "agent-builder-typescript" / "package.json"
+    )
+    runner_project = _toml(root / "runtimes" / "agent-runner" / "pyproject.toml")
     launcher = _json(root / "launcher" / "package.json")
     extension = _json(root / "facades" / "vscode-extension" / "package.json")
     extension_lock = _json(root / "facades" / "vscode-extension" / "package-lock.json")
     plugin = _json(root / "facades" / "vscode-agent-plugin" / "plugin.json")
     plugin_mcp = _json(root / "facades" / "vscode-agent-plugin" / ".mcp.json")
     uv_lock = _toml(root / "uv.lock")
+    npm_lock = _json(root / "package-lock.json")
 
     lock_root = extension_lock.get("packages", {}).get("", {})
     plugin_server = plugin_mcp.get("mcpServers", {}).get("baldr-router", {})
@@ -85,6 +93,52 @@ def source_version_values(root: Path = ROOT) -> dict[str, str]:
             root / "facades" / "kiro" / "adapter" / "src" / "baldr_kiro_adapter" / "__init__.py",
             r'^__version__\s*=\s*["\']([^"\']+)["\']',
             label="adapter module version",
+        ),
+        "agent SDK project": str(sdk_project.get("project", {}).get("version") or ""),
+        "agent SDK module": _extract(
+            root / "sdks" / "python" / "src" / "baldr_agent_sdk" / "__init__.py",
+            r'^__version__\s*=\s*["\']([^"\']+)["\']',
+            label="agent SDK module version",
+        ),
+        "TypeScript agent SDK package": str(typescript_sdk.get("version") or ""),
+        "TypeScript agent SDK lock": str(
+            npm_lock.get("packages", {})
+            .get("sdks/typescript", {})
+            .get("version", "")
+        ),
+        "agent builder project": str(
+            builder_project.get("project", {}).get("version") or ""
+        ),
+        "agent builder module": _extract(
+            root
+            / "tooling"
+            / "agent-builder"
+            / "src"
+            / "baldr_agent_builder"
+            / "__init__.py",
+            r'^__version__\s*=\s*["\']([^"\']+)["\']',
+            label="agent builder module version",
+        ),
+        "TypeScript Builder driver package": str(
+            typescript_builder.get("version") or ""
+        ),
+        "TypeScript Builder driver lock": str(
+            npm_lock.get("packages", {})
+            .get("tooling/agent-builder-typescript", {})
+            .get("version", "")
+        ),
+        "agent runner project": str(
+            runner_project.get("project", {}).get("version") or ""
+        ),
+        "agent runner module": _extract(
+            root
+            / "runtimes"
+            / "agent-runner"
+            / "src"
+            / "baldr_agent_runner"
+            / "__init__.py",
+            r'^__version__\s*=\s*["\']([^"\']+)["\']',
+            label="agent runner module version",
         ),
         "launcher package": str(launcher.get("version") or ""),
         "launcher bootstrap": _extract(
@@ -119,6 +173,13 @@ def source_version_values(root: Path = ROOT) -> dict[str, str]:
         ),
         "uv core workspace": _workspace_package_version(uv_lock, "baldr-router"),
         "uv adapter workspace": _workspace_package_version(uv_lock, "baldr-kiro-adapter"),
+        "uv agent SDK workspace": _workspace_package_version(uv_lock, "baldr-agent-sdk"),
+        "uv agent builder workspace": _workspace_package_version(
+            uv_lock, "baldr-agent-builder"
+        ),
+        "uv agent runner workspace": _workspace_package_version(
+            uv_lock, "baldr-agent-runner"
+        ),
     }
 
 
@@ -137,6 +198,65 @@ def check_source_consistency(root: Path = ROOT) -> str:
         raise ReleaseConsistencyError(
             f"Kiro adapter must depend on {expected_dependency!r}; got {dependencies!r}"
         )
+
+    runner = _toml(root / "runtimes" / "agent-runner" / "pyproject.toml")
+    runner_dependencies = runner.get("project", {}).get("dependencies", [])
+    expected_sdk_dependency = (
+        f"baldr-agent-sdk>={version},<{major}.{int(minor) + 1}.0"
+    )
+    if expected_sdk_dependency not in runner_dependencies:
+        raise ReleaseConsistencyError(
+            "Agent runner must depend on "
+            f"{expected_sdk_dependency!r}; got {runner_dependencies!r}"
+        )
+
+    builder = _toml(root / "tooling" / "agent-builder" / "pyproject.toml")
+    builder_dependencies = builder.get("project", {}).get("dependencies", [])
+    if expected_sdk_dependency not in builder_dependencies:
+        raise ReleaseConsistencyError(
+            "Agent Builder must depend on "
+            f"{expected_sdk_dependency!r}; got {builder_dependencies!r}"
+        )
+
+    typescript_builder = _json(
+        root / "tooling" / "agent-builder-typescript" / "package.json"
+    )
+    typescript_dependencies = typescript_builder.get("dependencies", {})
+    if typescript_dependencies.get("@baldr/agent-sdk") != version:
+        raise ReleaseConsistencyError(
+            "TypeScript Builder driver must depend on the exact release of "
+            f"@baldr/agent-sdk ({version}); got {typescript_dependencies!r}"
+        )
+    typescript_sdk = _json(root / "sdks" / "typescript" / "package.json")
+    for label, package in (
+        ("TypeScript SDK", typescript_sdk),
+        ("TypeScript Builder driver", typescript_builder),
+    ):
+        if package.get("publishConfig") != {"access": "public"}:
+            raise ReleaseConsistencyError(
+                f"{label} must declare public npm publication metadata"
+            )
+    expected_bin = {
+        "baldr-builder-driver-typescript": (
+            "./bin/baldr-builder-driver-typescript.mjs"
+        )
+    }
+    if typescript_builder.get("bin") != expected_bin:
+        raise ReleaseConsistencyError(
+            "TypeScript Builder driver must expose the PATH discovery executable"
+        )
+    if typescript_builder.get("scripts", {}).get("build") != "tsc -p .":
+        raise ReleaseConsistencyError(
+            "TypeScript Builder driver build must not depend on monorepo paths"
+        )
+    for license_path in (
+        root / "sdks" / "typescript" / "LICENSE",
+        root / "tooling" / "agent-builder-typescript" / "LICENSE",
+    ):
+        if license_path.read_bytes() != (root / "LICENSE").read_bytes():
+            raise ReleaseConsistencyError(
+                f"Packaged license differs from root LICENSE: {license_path}"
+            )
 
     freeze_line = _extract(
         root / "router" / "src" / "baldr_router" / "release_policy.py",
@@ -187,7 +307,12 @@ def check_source_consistency(root: Path = ROOT) -> str:
     for schema_name in (
         "agent-registry-v1.schema.json",
         "agent-transport-http-v1.schema.json",
+        "agent-execution-v1.schema.json",
         "agent-manager-v1.schema.json",
+        "agent-source-v1.schema.json",
+        "agent-catalog-sync-v1.schema.json",
+        "agent-team-resolution-v1.schema.json",
+        "orchestration-policy-v1.schema.json",
     ):
         canonical = json.loads(
             (root / "contracts" / schema_name).read_text(encoding="utf-8")
@@ -240,7 +365,12 @@ def check_artifact_consistency(
         "baldr_router/contracts/work-item-progress-v1.schema.json",
         "baldr_router/contracts/agent-registry-v1.schema.json",
         "baldr_router/contracts/agent-transport-http-v1.schema.json",
+        "baldr_router/contracts/agent-execution-v1.schema.json",
         "baldr_router/contracts/agent-manager-v1.schema.json",
+        "baldr_router/contracts/agent-source-v1.schema.json",
+        "baldr_router/contracts/agent-catalog-sync-v1.schema.json",
+        "baldr_router/contracts/agent-team-resolution-v1.schema.json",
+        "baldr_router/contracts/orchestration-policy-v1.schema.json",
         f"baldr_router-{release}.dist-info/METADATA",
     }
     _require_members(core_wheel, wheel_members, label="Core wheel")
@@ -274,8 +404,25 @@ def check_artifact_consistency(
     canonical_agent_http_schema = json.loads(
         (root / "contracts" / "agent-transport-http-v1.schema.json").read_text(encoding="utf-8")
     )
+    canonical_agent_execution_schema = json.loads(
+        (root / "contracts" / "agent-execution-v1.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
     canonical_agent_manager_schema = json.loads(
         (root / "contracts" / "agent-manager-v1.schema.json").read_text(encoding="utf-8")
+    )
+    canonical_agent_source_schema = json.loads(
+        (root / "contracts" / "agent-source-v1.schema.json").read_text(encoding="utf-8")
+    )
+    canonical_agent_sync_schema = json.loads(
+        (root / "contracts" / "agent-catalog-sync-v1.schema.json").read_text(encoding="utf-8")
+    )
+    canonical_agent_team_schema = json.loads(
+        (root / "contracts" / "agent-team-resolution-v1.schema.json").read_text(encoding="utf-8")
+    )
+    canonical_orchestration_schema = json.loads(
+        (root / "contracts" / "orchestration-policy-v1.schema.json").read_text(encoding="utf-8")
     )
     with zipfile.ZipFile(core_wheel) as wheel_archive:
         metadata = wheel_archive.read(f"baldr_router-{release}.dist-info/METADATA").decode()
@@ -297,8 +444,23 @@ def check_artifact_consistency(
         wheel_agent_http_schema = json.loads(
             wheel_archive.read("baldr_router/contracts/agent-transport-http-v1.schema.json")
         )
+        wheel_agent_execution_schema = json.loads(
+            wheel_archive.read("baldr_router/contracts/agent-execution-v1.schema.json")
+        )
         wheel_agent_manager_schema = json.loads(
             wheel_archive.read("baldr_router/contracts/agent-manager-v1.schema.json")
+        )
+        wheel_agent_source_schema = json.loads(
+            wheel_archive.read("baldr_router/contracts/agent-source-v1.schema.json")
+        )
+        wheel_agent_sync_schema = json.loads(
+            wheel_archive.read("baldr_router/contracts/agent-catalog-sync-v1.schema.json")
+        )
+        wheel_agent_team_schema = json.loads(
+            wheel_archive.read("baldr_router/contracts/agent-team-resolution-v1.schema.json")
+        )
+        wheel_orchestration_schema = json.loads(
+            wheel_archive.read("baldr_router/contracts/orchestration-policy-v1.schema.json")
         )
     if f"Version: {release}\n" not in metadata.replace("\r\n", "\n"):
         raise ReleaseConsistencyError("Core wheel metadata does not match the release version")
@@ -314,8 +476,18 @@ def check_artifact_consistency(
         raise ReleaseConsistencyError("Core wheel contains a stale agent registry schema")
     if wheel_agent_http_schema != canonical_agent_http_schema:
         raise ReleaseConsistencyError("Core wheel contains a stale agent HTTP schema")
+    if wheel_agent_execution_schema != canonical_agent_execution_schema:
+        raise ReleaseConsistencyError("Core wheel contains a stale agent execution schema")
     if wheel_agent_manager_schema != canonical_agent_manager_schema:
         raise ReleaseConsistencyError("Core wheel contains a stale Agent Manager schema")
+    if wheel_agent_source_schema != canonical_agent_source_schema:
+        raise ReleaseConsistencyError("Core wheel contains a stale agent source schema")
+    if wheel_agent_sync_schema != canonical_agent_sync_schema:
+        raise ReleaseConsistencyError("Core wheel contains a stale agent catalog sync schema")
+    if wheel_agent_team_schema != canonical_agent_team_schema:
+        raise ReleaseConsistencyError("Core wheel contains a stale team resolution schema")
+    if wheel_orchestration_schema != canonical_orchestration_schema:
+        raise ReleaseConsistencyError("Core wheel contains a stale orchestration policy schema")
 
     with zipfile.ZipFile(vsix) as vsix_archive:
         runtime_wheels = sorted(

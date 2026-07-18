@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://baldr.dev/contracts/agent-team-resolution-v1.schema.json",
+  "title": "Baldr team resolution v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "version",
+    "mode",
+    "roles"
+  ],
+  "properties": {
+    "contract": {
+      "const": "baldr-team-resolution"
+    },
+    "version": {
+      "const": 1
+    },
+    "mode": {
+      "enum": [
+        "automatic",
+        "configured"
+      ]
+    },
+    "roles": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "architect",
+        "implementer",
+        "reviewer"
+      ],
+      "properties": {
+        "architect": {
+          "$ref": "#/$defs/role"
+        },
+        "implementer": {
+          "$ref": "#/$defs/role"
+        },
+        "reviewer": {
+          "$ref": "#/$defs/role"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "role": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "selection",
+        "message",
+        "considered",
+        "rejected"
+      ],
+      "properties": {
+        "selection": {
+          "enum": [
+            "automatic-agent",
+            "explicit-override",
+            "configured-profile"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "considered": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100000
+        },
+        "agent_ref": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9+.-]*://[A-Za-z0-9._-]+/[A-Za-z0-9._-]+@[A-Za-z0-9._+-]+$"
+        },
+        "agent_manifest_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "profile_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "rejected": {
+          "type": "array",
+          "maxItems": 20,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "ref",
+              "reason"
+            ],
+            "properties": {
+              "ref": {
+                "type": "string",
+                "maxLength": 512
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "selection": {
+                "enum": [
+                  "automatic-agent",
+                  "explicit-override"
+                ]
+              }
+            },
+            "required": [
+              "selection"
+            ]
+          },
+          "then": {
+            "required": [
+              "agent_ref",
+              "agent_manifest_digest"
+            ]
+          },
+          "else": {
+            "required": [
+              "profile_name"
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

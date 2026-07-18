@@ -1,20 +1,227 @@
 # Baldr Router
 
-**Baldr Router es un runtime local MCP para orquestar agentes con roles.** El core no depende de Kiro, VS Code ni otro cliente: las integraciones son fachadas finas que traducen la UX de cada producto al mismo contrato versionado.
+**Baldr es un control plane local para coordinar trabajo con agentes.** Puede
+usar Codex o Kiro directamente, como hasta ahora, y también descubrir agentes
+externos escritos en Python o TypeScript sin incorporar su código al Router.
+El core se expone por MCP y no depende de VS Code, Kiro ni de otro cliente en
+particular.
+
+Este repositorio es el monorepo de la infraestructura de Baldr: Router, Agent
+Manager, Runner, Agent Builder, SDKs y fachadas de producto. Los agentes de cada
+equipo continúan viviendo, versionándose y publicándose desde sus propios
+repositorios.
 
 ```text
-VS Code / Kiro / Codex / Claude Desktop / otro cliente MCP
-  -> facade opcional
-  -> baldr-router MCP
-       -> architect
-       -> implementer
-       -> reviewer
-       -> providers: Codex, Kiro CLI opcional
-       -> Context7 opcional
-       -> structured output + telemetry + verification
+VS Code / Kiro / Codex / otro cliente MCP
+                     |
+                     v
+                Baldr Router
+                     |
+          +----------+-----------+
+          |                      |
+          v                      v
+ Codex / Kiro normal       Agent Manager
+                                  |
+                         AgentRef + digest
+                                  |
+                                  v
+                           Agent Runner
+                                  |
+                                  v
+                       artefacto Python / TS
+
+repositorio externo -> SDK -> Agent Builder -> driver -> artefacto + manifiesto
 ```
 
-> **v0.19.0 — Progreso narrativo.** La consola explica en lenguaje cotidiano qué entendió Baldr, qué está haciendo, qué produjo Planificación, Ejecución y Revisión, qué comprobó y cuándo necesita una decisión. La protección automática de v0.18 continúa siendo la opción recomendada.
+## Qué incluye el monorepo
+
+| Pieza | Responsabilidad | Ubicación |
+| --- | --- | --- |
+| Router | MCP, workflows durables, políticas y coordinación | [`router/`](router/) |
+| Agent Manager | Catálogo, resolución de equipos e identidades inmutables | [`router/src/baldr_router/agent_manager.py`](router/src/baldr_router/agent_manager.py) |
+| Agent Runner | Ejecutar artefactos externos fuera del proceso del Router | [`runtimes/agent-runner/`](runtimes/agent-runner/) |
+| Agent Builder | Crear, probar, construir, publicar y hacer rollback | [`tooling/agent-builder/`](tooling/agent-builder/) |
+| SDK Python | API de autoría para agentes Python | [`sdks/python/`](sdks/python/) |
+| SDK TypeScript | API de autoría para agentes TypeScript | [`sdks/typescript/`](sdks/typescript/) |
+| Driver TypeScript | Implementación externa de Builder Protocol para Node | [`tooling/agent-builder-typescript/`](tooling/agent-builder-typescript/) |
+| Fachadas | Integraciones de VS Code, Kiro y otros clientes | [`facades/`](facades/) |
+
+Los SDK son APIs de autoría: el agente importa solamente el SDK de su lenguaje.
+Agent Builder es la toolchain de desarrollo y no forma parte del código del
+agente. Los drivers traducen el protocolo neutral de Builder al toolchain de un
+lenguaje. Baldr almacena la identidad y ubicación del release; no se convierte
+en dueño del código fuente del agente.
+
+## Dos formas de usar Baldr
+
+### 1. Codex o Kiro directamente
+
+La experiencia existente no cambia. La extensión de VS Code, el Power de Kiro,
+Codex y las integraciones MCP pueden seguir usando los perfiles normales sin
+instalar Agent Builder, los SDKs ni drivers externos.
+
+### 2. Agentes externos coordinados por Baldr
+
+Un equipo desarrolla el agente con el SDK de su lenguaje. Agent Builder
+descubre un driver compatible, produce un artefacto reproducible y publica
+manifiestos con `AgentRef + digest`. Agent Manager resuelve las identidades y el
+Runner ejecuta el artefacto durante las fases de planificación, implementación
+o revisión.
+
+La arquitectura completa está en
+[`docs/external-agent-runtime.md`](docs/external-agent-runtime.md). La frontera
+políglota está definida por
+[`Builder Protocol v1`](docs/builder-protocol.md).
+
+## Preparar un checkout limpio
+
+Requisitos para desarrollar todo el monorepo:
+
+- Python 3.11 o posterior;
+- [`uv`](https://docs.astral.sh/uv/);
+- Node.js 20 o posterior para el SDK y driver TypeScript;
+- Git.
+
+Desde la raíz del repositorio:
+
+```bash
+make deps
+make install-agent-runtime
+npm run build:agents
+
+baldr-agent --help
+baldr-agent-runner health
+```
+
+`make deps` instala las dependencias de desarrollo de los paquetes Python y
+Node. `make install-agent-runtime` expone `baldr-agent` y
+`baldr-agent-runner`. El último comando construye el SDK y el driver TypeScript
+antes de registrarlo.
+
+Para instalar también la CLI del Router desde este checkout:
+
+```bash
+uv tool install --force --editable ./router
+baldr-router --help
+```
+
+La extensión de VS Code incluye su propio runtime privado del Router. No exige
+esta instalación para continuar usando los providers normales. Para ejecutar
+agentes externos de proceso local sí necesita encontrar `baldr-agent-runner` en
+`PATH`, o recibir su ruta mediante `BALDR_AGENT_RUNNER_COMMAND`.
+
+## Quickstart: agente TypeScript
+
+Durante desarrollo, construí el driver y exponé su binario desde la raíz del
+monorepo:
+
+```bash
+npm run build:agents
+export PATH="$PWD/tooling/agent-builder-typescript/bin:$PATH"
+baldr-agent driver doctor baldr.typescript
+```
+
+Una release se instala sin conservar el checkout:
+
+```bash
+node_package_dir=/ruta/a/release/artifacts/node
+npm install --global \
+  "$node_package_dir/baldr-agent-sdk-0.19.0.tgz" \
+  "$node_package_dir/baldr-agent-builder-typescript-0.19.0.tgz"
+baldr-agent driver doctor baldr.typescript
+```
+
+Después de publicar los paquetes en el registry, la instalación equivalente es
+`npm install --global @baldr/agent-builder-typescript`; npm instala su
+dependencia exacta de `@baldr/agent-sdk`. El ejecutable
+`baldr-builder-driver-typescript` queda en `PATH`, por lo que no hace falta
+registrar una ruta al checkout. `baldr-agent driver register` continúa
+disponible para drivers privados distribuidos mediante un manifiesto.
+
+Después creá el agente en el repositorio que será propiedad de tu equipo:
+
+```bash
+baldr-agent init ./my-typescript-agent \
+  --name my-typescript-agent \
+  --owner my-team \
+  --namespace product \
+  --language typescript
+
+cd my-typescript-agent
+baldr-agent test
+baldr-agent build
+baldr-agent publish
+baldr-agent doctor
+```
+
+El proyecto importa `@baldr/agent-sdk`; el driver `baldr.typescript` genera un
+artefacto Node `.cjs` autocontenido y determinístico. Al instalar el paquete
+globalmente, cambiar al directorio del agente no rompe su descubrimiento.
+
+## Quickstart: agente Python
+
+Python dispone de un driver incorporado y no necesita registro adicional:
+
+```bash
+baldr-agent init ./my-python-agent \
+  --name my-python-agent \
+  --owner my-team \
+  --namespace product \
+  --language python
+
+cd my-python-agent
+baldr-agent test
+baldr-agent build
+baldr-agent publish
+baldr-agent doctor
+```
+
+Los proyectos Python anteriores con `schema_version = 1` y `entry_module`
+siguen siendo compatibles. Los proyectos nuevos usan la configuración neutral
+v2 con `language`, `entrypoint` y `driver` opcional.
+
+## Verificar el vertical políglota
+
+La prueba oficial crea un agente TypeScript temporal, descubre el driver, lo
+prueba, genera dos builds byte a byte idénticos, instala y publica el release y
+ejecuta un workflow real con planner, writer y reviewer mediante Baldr:
+
+```bash
+npm run build:agents
+uv run python scripts/test_typescript_agent_vertical.py
+```
+
+Un segundo piloto usa un agente real mantenido fuera de este monorepo, lo
+publica en un Agent Manager temporal y ejecuta las tres fases mediante Runner:
+
+```bash
+uv run python scripts/test_typescript_external_pilot.py \
+  --project /ruta/a/baldr-agents-pilot/typescript-repository-report
+```
+
+Validaciones más amplias:
+
+```bash
+npm run check:agents
+npm run test:agents
+make check
+```
+
+## Estado del vertical políglota
+
+- Python y TypeScript comparten configuración y contratos neutrales.
+- El driver Python está incorporado; el driver TypeScript se descubre como un
+  proceso externo JSONL.
+- La selección de drivers fija exactamente `id + version + digest`.
+- Los artefactos publicados son inmutables por versión y digest.
+- El primer artefacto TypeScript es CommonJS autocontenido y requiere Node 20+.
+- Agregar otro lenguaje requiere un SDK de autoría y un driver compatible; no
+  requiere modificar Router, Agent Manager ni Runner.
+
+> **v0.19.0 — Progreso narrativo.** La consola explica en lenguaje cotidiano
+> qué entendió Baldr, qué está haciendo, qué produjo Planificación, Ejecución y
+> Revisión, qué comprobó y cuándo necesita una decisión. La protección
+> automática de v0.18 continúa siendo la opción recomendada.
 
 
 ## Real Environment Qualification
@@ -222,6 +429,9 @@ continúan funcionando por la ruta anterior cuando el perfil no declara
 [`docs/external-agent-registry.md`](docs/external-agent-registry.md).
 El transporte HTTP independiente y la frontera de Agent Manager están
 documentados en [`docs/external-agent-http.md`](docs/external-agent-http.md).
+La publicación por equipos, RBAC/tenancy, auditoría, backups y operación del
+servicio están en
+[`docs/agent-manager-operations.md`](docs/agent-manager-operations.md).
 
 ## Consistencia y control operativo
 
@@ -248,18 +458,17 @@ Detalle: [`docs/consistency-operator-control.md`](docs/consistency-operator-cont
 
 ## Autorización de cambios en el workspace
 
-La opción recomendada y predeterminada es **Pedir autorización** (`automatic`):
+La opción recomendada y predeterminada es **Trabajar directamente** (`current`):
 
 ```text
 arquitectura   -> solo lectura
-necesita editar archivos -> decisión explícita de la persona
-autorizar      -> implementación directa en la carpeta seleccionada
-no autorizar   -> cierre durable sin modificar archivos
+implementación -> escritura directa en la carpeta seleccionada
+revisión       -> comprobación del diff y de las verificaciones
 ```
 
-Este es el mismo modelo operativo visible de Codex/Kiro: el provider recibe únicamente el workspace elegido y su sandbox, pero los cambios aparecen directamente en esa carpeta después de la autorización. Baldr no publica una copia completa al terminar ni exige que el resto del repositorio permanezca congelado. Git y los checkpoints durables registran el resultado; si una escritura se interrumpe con efectos inciertos, la sesión pide reconciliación en vez de repetirla silenciosamente.
+Este es el mismo modelo operativo visible de Codex/Kiro: el provider recibe únicamente el workspace elegido y su sandbox, y los cambios aparecen directamente en esa carpeta sin una pausa de autorización por tarea. Baldr no publica una copia completa al terminar ni exige que el resto del repositorio permanezca congelado. Git y los checkpoints durables registran el resultado; si una escritura se interrumpe con efectos inciertos, la sesión pide reconciliación en vez de repetirla silenciosamente.
 
-**Trabajar directamente** (`current`) conserva el consentimiento persistente y no introduce una pausa de autorización por tarea. **Sin protección** (`non-git`) permite el mismo modelo sin exigir Git y mantiene su confirmación modal. Los worktrees y workspaces sombra siguen soportados para configuraciones y sesiones aisladas existentes, incluidas sus acciones de recuperación, pero ya no son el comportamiento predeterminado de un work item nuevo.
+**Pedir autorización** (`automatic`) queda disponible como elección explícita para quien prefiera una pausa antes de la primera escritura. **Sin protección** (`non-git`) permite el mismo modelo directo sin exigir Git y mantiene su confirmación modal. Los worktrees y workspaces sombra siguen soportados para configuraciones y sesiones aisladas existentes, incluidas sus acciones de recuperación, pero ya no son el comportamiento predeterminado de un work item nuevo.
 
 Detalle: [`docs/durable-orchestration.md`](docs/durable-orchestration.md)
 

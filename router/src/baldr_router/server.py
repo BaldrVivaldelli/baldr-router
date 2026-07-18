@@ -59,9 +59,7 @@ def baldr_status_prompt(workspace_root: str = "") -> str:
 )
 def baldr_run_prompt(task: str, workspace_root: str = "") -> str:
     """Shared run intent used by every client facade."""
-    return render_facade_prompt(
-        "run", workspace_root=workspace_root or None, task=task
-    )
+    return render_facade_prompt("run", workspace_root=workspace_root or None, task=task)
 
 
 @mcp.tool()
@@ -219,6 +217,8 @@ def run_workflow(
     reconciliation_action: str | None = None,
     cancel: bool = False,
     cancel_reason: str = "Cancellation requested by client.",
+    team_mode: str | None = None,
+    agent_overrides: dict[str, str] | None = None,
     client_name: str = "generic-mcp",
 ) -> dict[str, Any]:
     """Run or resume the durable Baldr-led workflow.
@@ -245,6 +245,8 @@ def run_workflow(
             reviewer_provider=reviewer_provider,
             max_rounds=max_rounds,
             context7_libraries=context7_libraries,
+            team_mode=team_mode,
+            agent_overrides=agent_overrides,
             client_name=client_name,
         )
     return run_workflow_impl(
@@ -263,6 +265,8 @@ def run_workflow(
         reconciliation_action=reconciliation_action,
         cancel=cancel,
         cancel_reason=cancel_reason,
+        team_mode=team_mode,
+        agent_overrides=agent_overrides,
         client_name=client_name,
     )
 
@@ -283,6 +287,8 @@ def run_architect_implement_review(
     reconciliation_action: str | None = None,
     cancel: bool = False,
     cancel_reason: str = "Cancellation requested by client.",
+    team_mode: str | None = None,
+    agent_overrides: dict[str, str] | None = None,
     client_name: str = "generic-mcp",
 ) -> dict[str, Any]:
     """Convenience wrapper for the durable architect -> implementer -> reviewer workflow."""
@@ -302,6 +308,8 @@ def run_architect_implement_review(
             reviewer_provider=reviewer_provider,
             max_rounds=max_rounds,
             context7_libraries=context7_libraries,
+            team_mode=team_mode,
+            agent_overrides=agent_overrides,
             client_name=client_name,
         )
     return run_workflow_impl(
@@ -320,6 +328,8 @@ def run_architect_implement_review(
         reconciliation_action=reconciliation_action,
         cancel=cancel,
         cancel_reason=cancel_reason,
+        team_mode=team_mode,
+        agent_overrides=agent_overrides,
         client_name=client_name,
     )
 

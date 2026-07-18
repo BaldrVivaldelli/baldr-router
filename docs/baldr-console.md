@@ -92,7 +92,7 @@ Son aliases de `setup`, `status` y `run`; no amplían el contrato público.
 Los chips debajo del composer reflejan la configuración persistida del workspace:
 
 ```text
-Pedir autorización
+Trabajar directamente
 Estándar
 Equipo estándar
 Ayuda automática
@@ -103,11 +103,11 @@ Cada chip abre un Quick Pick y guarda la selección a través del core.
 ## Protección de cambios
 
 ```text
-Pedir autorización
-  recomendada y predeterminada; planifica en solo lectura y pregunta antes de modificar archivos.
-
 Trabajar directamente
-  modifica la carpeta elegida sin una pausa de autorización por tarea.
+  recomendada y predeterminada; modifica la carpeta elegida sin una pausa de autorización por tarea.
+
+Pedir autorización
+  planifica en solo lectura y pregunta antes de modificar archivos.
 
 Sin protección
   modifica la carpeta directamente, sin exigir Git ni ofrecer recuperación automática.
@@ -117,7 +117,7 @@ Con **Pedir autorización**, arquitectura trabaja en solo lectura. Si el plan ne
 
 **Sin protección** requiere confirmación modal explícita. Después se recuerda para ese workspace como `intentional_non_git`; la excepción se aplica sólo a esa carpeta y no desactiva la política global. El texto de la tarea se conserva si la persona cancela la confirmación.
 
-Las preferencias nuevas usan `automatic`. Las tareas antiguas guardadas como `worktree`, `current` o `non-git` mantienen su comportamiento y pueden seguir reanudándose sin una migración silenciosa.
+Las preferencias nuevas usan `current`. Las tareas y preferencias ya guardadas como `automatic`, `worktree`, `current` o `non-git` mantienen su comportamiento y pueden seguir reanudándose sin una migración silenciosa.
 
 ## Perfiles por fase
 

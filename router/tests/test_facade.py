@@ -12,6 +12,7 @@ from baldr_router.facade import (
     facade_status_report,
     render_facade_prompt,
 )
+from baldr_router.cli import _parse_agent_overrides, build_parser
 
 
 def test_facade_contract_is_frozen_and_packaged():
@@ -56,7 +57,9 @@ def test_facade_run_dry_run_uses_existing_workflow(tmp_path: Path, monkeypatch):
     workspace = tmp_path / "repo"
     workspace.mkdir()
     subprocess.run(["git", "init", "-q", str(workspace)], check=True)
-    monkeypatch.setenv("BALDR_TRUSTED_WORKSPACE_ROOTS_JSON", json.dumps([str(workspace)]))
+    monkeypatch.setenv(
+        "BALDR_TRUSTED_WORKSPACE_ROOTS_JSON", json.dumps([str(workspace)])
+    )
     result = facade_run(
         str(workspace),
         "Implement a small feature",
@@ -71,6 +74,45 @@ def test_facade_run_dry_run_uses_existing_workflow(tmp_path: Path, monkeypatch):
         "client": "test",
         "contract_version": "1.0.0",
     }
+
+
+def test_facade_team_preferences_and_cli_flags_round_trip(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    subprocess.run(["git", "init", "-q", str(workspace)], check=True)
+    reference = "local://kiro/planner@1.0.0"
+
+    result = facade_setup_plan(
+        str(workspace),
+        client="test",
+        team_mode="automatic",
+        agent_overrides={"architect": reference},
+    )
+    arguments = build_parser().parse_args(
+        [
+            "facade",
+            "setup",
+            str(workspace),
+            "--team-mode",
+            "automatic",
+            "--agent-override",
+            f"architect={reference}",
+        ]
+    )
+
+    preferences = result["workbench"]["preferences"]
+    assert preferences["team_mode"] == "automatic"
+    assert preferences["agent_overrides"] == {
+        "architect": reference
+    }
+    assert arguments.team_mode == "automatic"
+    assert _parse_agent_overrides(arguments.agent_override) == {"architect": reference}
+    assert _parse_agent_overrides(None, clear=True) == {}
 
 
 def test_source_contract_matches_packaged_copy():

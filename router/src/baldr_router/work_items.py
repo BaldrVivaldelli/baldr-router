@@ -19,6 +19,7 @@ from .phase_deliverables import (
     phase_deliverable_index_metadata,
 )
 from .platforming import normalize_path_for_runtime
+from .team_resolution import normalize_agent_overrides, normalize_team_mode
 from .work_item_progress import (
     compact_execution_profiles,
     compact_list_item,
@@ -46,10 +47,11 @@ WORK_ITEM_STATUSES = {
     "archived",
 }
 TERMINAL_ITEM_STATUSES = {"completed", "failed", "cancelled", "archived"}
-# ``automatic`` is the canonical default. The other values remain accepted so
+# ``current`` is the canonical default. The other values remain accepted so
 # already-persisted items keep their exact execution semantics:
-# ``worktree`` is the legacy isolated-Git mode, ``current`` works in place in a
-# Git repository, and ``non-git`` is the explicitly confirmed unprotected mode.
+# ``automatic`` asks before the first write, ``worktree`` is the legacy
+# isolated-Git mode, and ``non-git`` is the explicitly confirmed unprotected
+# mode.
 SAFETY_MODES = {"automatic", "worktree", "current", "non-git"}
 SAFETY_MODE_ALIASES = {"auto": "automatic"}
 EXECUTION_PRESETS = {"fast", "balanced", "deep", "custom"}
@@ -70,7 +72,7 @@ RECONCILIATION_ACTION_ORDER = (
 
 _PUBLIC_WORK_ITEM_COLUMNS = """
     id, workspace_id, title, task_artifact_id, status, safety_mode, preset,
-    context_mode, current_run_id, idempotency_key, revision, error_code,
+    context_mode, team_mode, current_run_id, idempotency_key, revision, error_code,
     created_at, updated_at, started_at, completed_at, archived_at
 """
 
@@ -101,7 +103,9 @@ def _workspace(path: str | Path) -> tuple[Path, dict[str, Any]]:
 
 
 def _title(task: str) -> str:
-    first = next((line.strip() for line in task.splitlines() if line.strip()), "New Baldr item")
+    first = next(
+        (line.strip() for line in task.splitlines() if line.strip()), "New Baldr item"
+    )
     first = re.sub(r"^[/#*\-\s]+", "", first).strip()
     return first[:96] or "New Baldr item"
 
@@ -222,19 +226,19 @@ def _item_row(value: Any, *, include_internal: bool = True) -> dict[str, Any]:
     item = dict(value)
     if not include_internal:
         item.pop("role_profiles_json", None)
+        item.pop("agent_overrides_json", None)
         item.pop("repository_identity_json", None)
         item.pop("config_json", None)
         item["context7_policy"] = str(item.get("context_mode") or "auto")
         return item
     item["role_profiles"] = _parse_json(item.pop("role_profiles_json", None), {})
+    item["agent_overrides"] = _parse_json(item.pop("agent_overrides_json", None), {})
     item["repository_identity"] = _parse_json(
         item.pop("repository_identity_json", None), {}
     )
     item["config"] = _parse_json(item.pop("config_json", None), {})
     item["context7_policy"] = str(item.get("context_mode") or "auto")
     return item
-
-
 
 
 def _context_with_attachments(item: dict[str, Any]) -> str:
@@ -255,7 +259,9 @@ def _context_with_attachments(item: dict[str, Any]) -> str:
         display_path = ""
         if path_value:
             try:
-                candidate = normalize_path_for_runtime(path_value).expanduser().resolve()
+                candidate = (
+                    normalize_path_for_runtime(path_value).expanduser().resolve()
+                )
                 display_path = candidate.relative_to(root).as_posix()
             except (OSError, RuntimeError, ValueError):
                 # Never instruct a provider to read outside the authorized workspace.
@@ -299,7 +305,9 @@ def _phase_summary(snapshot: dict[str, Any] | None) -> list[dict[str, Any]]:
     return phases
 
 
-def _allowed_actions(item: dict[str, Any], snapshot: dict[str, Any] | None) -> list[str]:
+def _allowed_actions(
+    item: dict[str, Any], snapshot: dict[str, Any] | None
+) -> list[str]:
     status = str(item.get("status") or "draft")
     if status == "archived":
         return ["restore", "delete"]
@@ -373,14 +381,14 @@ def workbench_options() -> dict[str, Any]:
             {
                 "id": "automatic",
                 "label": "Pedir autorización",
-                "description": "Recomendada y predeterminada: Baldr planifica en solo lectura y te pregunta antes de modificar esta carpeta.",
-                "recommended": True,
-                "default": True,
+                "description": "Baldr planifica en solo lectura y te pregunta antes de modificar esta carpeta.",
             },
             {
                 "id": "current",
                 "label": "Trabajar directamente",
-                "description": "Permite cambios directos sin una pausa de autorización por tarea y usa Git para revisarlos.",
+                "description": "Recomendada y predeterminada: permite cambios directos sin una pausa de autorización por tarea y usa Git para revisarlos.",
+                "recommended": True,
+                "default": True,
             },
             {
                 "id": "non-git",
@@ -390,31 +398,117 @@ def workbench_options() -> dict[str, Any]:
             },
         ],
         "presets": [
-            {"id": "fast", "label": "Rápido", "description": "Resuelve tareas simples con menos análisis."},
-            {"id": "balanced", "label": "Estándar", "description": "Equilibra rapidez y profundidad."},
-            {"id": "deep", "label": "Detallado", "description": "Dedica más análisis a trabajos complejos."},
-            {"id": "custom", "label": "A medida", "description": "Usa el equipo elegido para cada etapa."},
+            {
+                "id": "fast",
+                "label": "Rápido",
+                "description": "Resuelve tareas simples con menos análisis.",
+            },
+            {
+                "id": "balanced",
+                "label": "Estándar",
+                "description": "Equilibra rapidez y profundidad.",
+            },
+            {
+                "id": "deep",
+                "label": "Detallado",
+                "description": "Dedica más análisis a trabajos complejos.",
+            },
+            {
+                "id": "custom",
+                "label": "A medida",
+                "description": "Usa el equipo elegido para cada etapa.",
+            },
         ],
         "context_modes": [
             {"id": "auto", "label": "Ayuda automática"},
             {"id": "on", "label": "Ayuda activa"},
             {"id": "off", "label": "Ayuda desactivada"},
         ],
+        "team_modes": [
+            {
+                "id": "automatic",
+                "label": "Automático",
+                "description": "Elige por etapa un agente compatible y listo; si no hay uno, usa la configuración normal.",
+                "recommended": True,
+                "default": True,
+            },
+            {
+                "id": "configured",
+                "label": "Codex o Kiro normal",
+                "description": "Conserva las configuraciones elegidas para cada etapa.",
+            },
+        ],
         "slash_commands": [
-            {"id": "setup", "usage": "/setup", "description": "Abrir las opciones de Baldr."},
-            {"id": "new", "usage": "/new <tarea>", "description": "Guardar una sesión para después."},
-            {"id": "run", "usage": "/run [tarea]", "description": "Empezar la sesión elegida o crear una nueva."},
-            {"id": "status", "usage": "/status", "description": "Actualizar el estado de las sesiones."},
-            {"id": "profile", "usage": "/profile <fast|balanced|deep|custom>", "description": "Cambiar el nivel de detalle."},
-            {"id": "git", "usage": "/git <automatic|current|off>", "description": "Elegí cómo proteger los cambios de esta carpeta."},
-            {"id": "context", "usage": "/context <auto|on|off>", "description": "Configurar la ayuda adicional."},
-            {"id": "roles", "usage": "/roles", "description": "Elegir el equipo para cada etapa."},
-            {"id": "cancel", "usage": "/cancel", "description": "Detener la sesión en curso."},
-            {"id": "resume", "usage": "/resume", "description": "Continuar una sesión interrumpida."},
-            {"id": "archive", "usage": "/archive", "description": "Archivar la sesión elegida."},
-            {"id": "restore", "usage": "/restore", "description": "Restaurar la sesión archivada elegida."},
-            {"id": "delete", "usage": "/delete", "description": "Eliminar permanentemente la sesión archivada elegida."},
-            {"id": "help", "usage": "/help", "description": "Ver los comandos disponibles."},
+            {
+                "id": "setup",
+                "usage": "/setup",
+                "description": "Abrir las opciones de Baldr.",
+            },
+            {
+                "id": "new",
+                "usage": "/new <tarea>",
+                "description": "Guardar una sesión para después.",
+            },
+            {
+                "id": "run",
+                "usage": "/run [tarea]",
+                "description": "Empezar la sesión elegida o crear una nueva.",
+            },
+            {
+                "id": "status",
+                "usage": "/status",
+                "description": "Actualizar el estado de las sesiones.",
+            },
+            {
+                "id": "profile",
+                "usage": "/profile <fast|balanced|deep|custom>",
+                "description": "Cambiar el nivel de detalle.",
+            },
+            {
+                "id": "git",
+                "usage": "/git <automatic|current|off>",
+                "description": "Elegí cómo proteger los cambios de esta carpeta.",
+            },
+            {
+                "id": "context",
+                "usage": "/context <auto|on|off>",
+                "description": "Configurar la ayuda adicional.",
+            },
+            {
+                "id": "roles",
+                "usage": "/roles",
+                "description": "Elegir el equipo para cada etapa.",
+            },
+            {
+                "id": "cancel",
+                "usage": "/cancel",
+                "description": "Detener la sesión en curso.",
+            },
+            {
+                "id": "resume",
+                "usage": "/resume",
+                "description": "Continuar una sesión interrumpida.",
+            },
+            {
+                "id": "archive",
+                "usage": "/archive",
+                "description": "Archivar la sesión elegida.",
+            },
+            {
+                "id": "restore",
+                "usage": "/restore",
+                "description": "Restaurar la sesión archivada elegida.",
+            },
+            {
+                "id": "delete",
+                "usage": "/delete",
+                "description": "Eliminar permanentemente la sesión archivada elegida.",
+            },
+            {
+                "id": "help",
+                "usage": "/help",
+                "description": "Ver los comandos disponibles.",
+            },
         ],
     }
 
@@ -474,15 +568,19 @@ class WorkItemService:
         self, item_id: str, *, include_internal: bool
     ) -> list[dict[str, Any]]:
         limit = 500 if include_internal else 100
-        rows = self.store.connect().execute(
-            """
+        rows = (
+            self.store.connect()
+            .execute(
+                """
             SELECT id, ordinal, item_revision, request_artifact_id,
                    context_artifact_id, run_id, source, created_at
             FROM work_item_turns WHERE item_id=?
             ORDER BY ordinal DESC LIMIT ?
             """,
-            (item_id, limit),
-        ).fetchall()
+                (item_id, limit),
+            )
+            .fetchall()
+        )
         turns: list[dict[str, Any]] = []
         for row in reversed(rows):
             value = dict(row)
@@ -534,19 +632,25 @@ class WorkItemService:
     def _preferences_for_identity(
         self, root: Path, identity: dict[str, Any]
     ) -> dict[str, Any]:
-        row = self.store.connect().execute(
-            "SELECT * FROM workspace_preferences WHERE workspace_id = ?",
-            (identity["workspace_id"],),
-        ).fetchone()
+        row = (
+            self.store.connect()
+            .execute(
+                "SELECT * FROM workspace_preferences WHERE workspace_id = ?",
+                (identity["workspace_id"],),
+            )
+            .fetchone()
+        )
         if row is None:
             cfg = load_config()
             return {
                 "workspace_id": identity["workspace_id"],
                 "workspace_root": str(root),
-                "safety_mode": "automatic",
+                "safety_mode": "current",
                 "preset": "balanced",
                 "context_mode": "auto",
                 "context7_policy": "auto",
+                "team_mode": "automatic",
+                "agent_overrides": {},
                 "role_profiles": {
                     role: list(cfg.roles[role].profiles) for role in ROLE_NAMES
                 },
@@ -557,6 +661,9 @@ class WorkItemService:
             }
         value = dict(row)
         value["role_profiles"] = _parse_json(value.pop("role_profiles_json", None), {})
+        value["agent_overrides"] = _parse_json(
+            value.pop("agent_overrides_json", None), {}
+        )
         value["context7_policy"] = str(value.get("context_mode") or "auto")
         value["persisted"] = True
         value["non_git_confirmed"] = bool(
@@ -586,16 +693,28 @@ class WorkItemService:
         context_mode: str | None = None,
         context7_policy: str | None = None,
         role_profiles: dict[str, list[str]] | None = None,
+        team_mode: str | None = None,
+        agent_overrides: dict[str, str] | None = None,
         allow_non_git: bool = False,
     ) -> dict[str, Any]:
         root, identity = _workspace(workspace_root)
         current = self.preferences(root)
         selected_safety = _safety_mode(safety_mode or current["safety_mode"])
         selected_preset = str(preset or current["preset"]).strip().lower()
-        selected_context = str(
-            context7_policy or context_mode or current["context_mode"]
-        ).strip().lower()
-        selected_roles = _normalize_role_profiles(role_profiles or current.get("role_profiles"))
+        selected_context = (
+            str(context7_policy or context_mode or current["context_mode"])
+            .strip()
+            .lower()
+        )
+        selected_roles = _normalize_role_profiles(
+            role_profiles or current.get("role_profiles")
+        )
+        selected_team_mode = normalize_team_mode(team_mode or current.get("team_mode"))
+        selected_agent_overrides = normalize_agent_overrides(
+            agent_overrides
+            if agent_overrides is not None
+            else current.get("agent_overrides")
+        )
         if selected_safety not in SAFETY_MODES:
             raise ValueError(f"Invalid safety mode: {selected_safety}")
         if selected_preset not in EXECUTION_PRESETS:
@@ -644,14 +763,17 @@ class WorkItemService:
                 """
                 INSERT INTO workspace_preferences(
                     workspace_id, workspace_root, safety_mode, preset, context_mode,
-                    role_profiles_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    role_profiles_json, team_mode, agent_overrides_json,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(workspace_id) DO UPDATE SET
                     workspace_root = excluded.workspace_root,
                     safety_mode = excluded.safety_mode,
                     preset = excluded.preset,
                     context_mode = excluded.context_mode,
                     role_profiles_json = excluded.role_profiles_json,
+                    team_mode = excluded.team_mode,
+                    agent_overrides_json = excluded.agent_overrides_json,
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -661,6 +783,8 @@ class WorkItemService:
                     selected_preset,
                     selected_context,
                     _json(selected_roles),
+                    selected_team_mode,
+                    _json(selected_agent_overrides),
                     now,
                     now,
                 ),
@@ -680,6 +804,8 @@ class WorkItemService:
         context_mode: str | None = None,
         context7_policy: str | None = None,
         role_profiles: dict[str, list[str]] | None = None,
+        team_mode: str | None = None,
+        agent_overrides: dict[str, str] | None = None,
         config: dict[str, Any] | None = None,
         allow_non_git: bool = False,
         source: str = "create",
@@ -691,10 +817,18 @@ class WorkItemService:
         defaults = self.preferences(root)
         safety = _safety_mode(safety_mode or defaults["safety_mode"])
         selected_preset = str(preset or defaults["preset"]).strip().lower()
-        context = str(
-            context7_policy or context_mode or defaults["context_mode"]
-        ).strip().lower()
+        context = (
+            str(context7_policy or context_mode or defaults["context_mode"])
+            .strip()
+            .lower()
+        )
         roles = _normalize_role_profiles(role_profiles or defaults.get("role_profiles"))
+        selected_team_mode = normalize_team_mode(team_mode or defaults.get("team_mode"))
+        selected_agent_overrides = normalize_agent_overrides(
+            agent_overrides
+            if agent_overrides is not None
+            else defaults.get("agent_overrides")
+        )
         if safety not in SAFETY_MODES:
             raise ValueError(f"Invalid safety mode: {safety}")
         if selected_preset not in EXECUTION_PRESETS:
@@ -709,7 +843,10 @@ class WorkItemService:
                 if not trust_result.get("ok"):
                     raise WorkspacePolicyError(
                         str(trust_result.get("reason") or "Workspace trust failed."),
-                        code=str((trust_result.get("error") or {}).get("code") or "workspace_trust_failed"),
+                        code=str(
+                            (trust_result.get("error") or {}).get("code")
+                            or "workspace_trust_failed"
+                        ),
                         details=trust_result,
                     )
         # A draft can be materialized before Non-Git consent. Provider access
@@ -749,9 +886,10 @@ class WorkItemService:
                 INSERT INTO work_items(
                     id, workspace_id, workspace_root, repository_identity_json,
                     title, task_artifact_id, extra_context_artifact_id, status,
-                    safety_mode, preset, context_mode, role_profiles_json, config_json,
+                    safety_mode, preset, context_mode, role_profiles_json,
+                    team_mode, agent_overrides_json, config_json,
                     idempotency_key, revision, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     item_id,
@@ -765,6 +903,8 @@ class WorkItemService:
                     selected_preset,
                     context,
                     _json(roles),
+                    selected_team_mode,
+                    _json(selected_agent_overrides),
                     _json(metadata),
                     idempotency_key,
                     revision,
@@ -897,7 +1037,11 @@ class WorkItemService:
                 connection,
                 item_id,
                 "work_item.turn_appended",
-                {"ordinal": turn_count + 1, "revision": revision, "source": source[:64]},
+                {
+                    "ordinal": turn_count + 1,
+                    "revision": revision,
+                    "source": source[:64],
+                },
             )
         return self.get(item_id)
 
@@ -914,6 +1058,8 @@ class WorkItemService:
         context_mode: str | None = None,
         context7_policy: str | None = None,
         role_profiles: dict[str, list[str]] | None = None,
+        team_mode: str | None = None,
+        agent_overrides: dict[str, str] | None = None,
         config: dict[str, Any] | None = None,
         allow_non_git: bool = False,
     ) -> dict[str, Any]:
@@ -922,10 +1068,20 @@ class WorkItemService:
             raise ValueError("A running work item cannot be edited.")
         selected_safety = _safety_mode(safety_mode or current["safety_mode"])
         selected_preset = str(preset or current["preset"]).strip().lower()
-        selected_context = str(
-            context7_policy or context_mode or current["context_mode"]
-        ).strip().lower()
-        selected_roles = _normalize_role_profiles(role_profiles or current["role_profiles"])
+        selected_context = (
+            str(context7_policy or context_mode or current["context_mode"])
+            .strip()
+            .lower()
+        )
+        selected_roles = _normalize_role_profiles(
+            role_profiles or current["role_profiles"]
+        )
+        selected_team_mode = normalize_team_mode(team_mode or current.get("team_mode"))
+        selected_agent_overrides = normalize_agent_overrides(
+            agent_overrides
+            if agent_overrides is not None
+            else current.get("agent_overrides")
+        )
         if selected_safety not in SAFETY_MODES:
             raise ValueError(f"Invalid safety mode: {selected_safety}")
         if selected_preset not in EXECUTION_PRESETS:
@@ -940,13 +1096,18 @@ class WorkItemService:
                 if not trust_result.get("ok"):
                     raise WorkspacePolicyError(
                         str(trust_result.get("reason") or "Workspace trust failed."),
-                        code=str((trust_result.get("error") or {}).get("code") or "workspace_trust_failed"),
+                        code=str(
+                            (trust_result.get("error") or {}).get("code")
+                            or "workspace_trust_failed"
+                        ),
                         details=trust_result,
                     )
 
         clean_task = (task if task is not None else current["task"]).strip()
         clean_context = (
-            extra_context if extra_context is not None else current.get("extra_context", "")
+            extra_context
+            if extra_context is not None
+            else current.get("extra_context", "")
         )
         if not clean_task:
             raise ValueError("A work item task must not be empty.")
@@ -958,11 +1119,14 @@ class WorkItemService:
         execution_changed = any(
             [
                 task is not None and clean_task != current["task"],
-                extra_context is not None and clean_context != current.get("extra_context", ""),
+                extra_context is not None
+                and clean_context != current.get("extra_context", ""),
                 selected_safety != current["safety_mode"],
                 selected_preset != current["preset"],
                 selected_context != current["context_mode"],
                 selected_roles != current["role_profiles"],
+                selected_team_mode != current.get("team_mode"),
+                selected_agent_overrides != current.get("agent_overrides"),
             ]
         )
         revision = int(current["revision"]) + (1 if execution_changed else 0)
@@ -981,7 +1145,9 @@ class WorkItemService:
                     redact=False,
                 )
             extra_artifact_id = current.get("extra_context_artifact_id")
-            if extra_context is not None and clean_context != current.get("extra_context", ""):
+            if extra_context is not None and clean_context != current.get(
+                "extra_context", ""
+            ):
                 extra_artifact_id = None
                 if clean_context.strip():
                     extra_artifact_id = self.store._insert_artifact(
@@ -998,7 +1164,8 @@ class WorkItemService:
                 UPDATE work_items
                 SET title=?, task_artifact_id=?, extra_context_artifact_id=?,
                     safety_mode=?, preset=?, context_mode=?, role_profiles_json=?,
-                    config_json=?, revision=?, idempotency_key=?,
+                    team_mode=?, agent_overrides_json=?, config_json=?,
+                    revision=?, idempotency_key=?,
                     status=CASE WHEN ? THEN 'draft' ELSE status END,
                     current_run_id=CASE WHEN ? THEN NULL ELSE current_run_id END,
                     error_code=CASE WHEN ? THEN NULL ELSE error_code END,
@@ -1015,6 +1182,8 @@ class WorkItemService:
                     selected_preset,
                     selected_context,
                     _json(selected_roles),
+                    selected_team_mode,
+                    _json(selected_agent_overrides),
                     _json(metadata),
                     revision,
                     idempotency_key,
@@ -1117,8 +1286,7 @@ class WorkItemService:
             or item.get("status") != desired
             or item.get("error_code") != run.get("error_code")
             or (
-                include_internal
-                and item.get("error_reason") != run.get("error_reason")
+                include_internal and item.get("error_reason") != run.get("error_reason")
             )
         )
         if changed and not include_internal:
@@ -1132,9 +1300,7 @@ class WorkItemService:
                 "updated_at": run.get("updated_at") or item.get("updated_at"),
             }
             if desired in TERMINAL_ITEM_STATUSES and not item.get("completed_at"):
-                item["completed_at"] = run.get("completed_at") or run.get(
-                    "updated_at"
-                )
+                item["completed_at"] = run.get("completed_at") or run.get("updated_at")
             changed = False
         if changed:
             terminal = desired in TERMINAL_ITEM_STATUSES
@@ -1182,11 +1348,17 @@ class WorkItemService:
                     connection,
                     item["id"],
                     "work_item.synced",
-                    {"run_id": run.get("id"), "run_status": run.get("status"), "status": desired},
+                    {
+                        "run_id": run.get("id"),
+                        "run_status": run.get("status"),
+                        "status": desired,
+                    },
                 )
-            row = self.store.connect().execute(
-                "SELECT * FROM work_items WHERE id=?", (item["id"],)
-            ).fetchone()
+            row = (
+                self.store.connect()
+                .execute("SELECT * FROM work_items WHERE id=?", (item["id"],))
+                .fetchone()
+            )
             assert row is not None
             item = self._load_item(
                 row,
@@ -1282,9 +1454,7 @@ class WorkItemService:
         )
         item["progress"] = project_work_item_progress(item, snapshot)
         item["progress_summary"] = progress_summary(item, item["progress"])
-        item["turns"] = self._load_turns(
-            item_id, include_internal=include_internal
-        )
+        item["turns"] = self._load_turns(item_id, include_internal=include_internal)
         if snapshot and include_internal:
             item["workflow"] = {
                 "run": snapshot.get("run"),
@@ -1294,10 +1464,14 @@ class WorkItemService:
             }
         if include_timeline and include_internal:
             timeline: list[dict[str, Any]] = []
-            for event in self.store.connect().execute(
-                "SELECT * FROM work_item_events WHERE item_id=? ORDER BY sequence",
-                (item_id,),
-            ).fetchall():
+            for event in (
+                self.store.connect()
+                .execute(
+                    "SELECT * FROM work_item_events WHERE item_id=? ORDER BY sequence",
+                    (item_id,),
+                )
+                .fetchall()
+            ):
                 value = dict(event)
                 value["source"] = "work-item"
                 value["payload"] = _parse_json(value.pop("payload_json", None), {})
@@ -1329,9 +1503,11 @@ class WorkItemService:
 
         _root, identity = _workspace(workspace_root)
         workspace_id = str(identity["workspace_id"])
-        row = self.store.connect().execute(
-            "SELECT workspace_id FROM work_items WHERE id = ?", (item_id,)
-        ).fetchone()
+        row = (
+            self.store.connect()
+            .execute("SELECT workspace_id FROM work_items WHERE id = ?", (item_id,))
+            .fetchone()
+        )
         if row is None or str(row["workspace_id"]) != workspace_id:
             # Keep cross-workspace and unknown-item responses indistinguishable.
             raise PhaseDeliverableError(
@@ -1361,9 +1537,11 @@ class WorkItemService:
 
         _root, identity = _workspace(workspace_root)
         workspace_id = str(identity["workspace_id"])
-        row = self.store.connect().execute(
-            "SELECT workspace_id FROM work_items WHERE id = ?", (item_id,)
-        ).fetchone()
+        row = (
+            self.store.connect()
+            .execute("SELECT workspace_id FROM work_items WHERE id = ?", (item_id,))
+            .fetchone()
+        )
         if row is None or str(row["workspace_id"]) != workspace_id:
             raise PhaseDeliverableError(
                 "phase_deliverable_not_found",
@@ -1430,7 +1608,9 @@ class WorkItemService:
 
     def record_result(self, item_id: str, result: dict[str, Any]) -> dict[str, Any]:
         run_id = result.get("run_id")
-        run_status = result.get("status") or (result.get("final_report") or {}).get("status")
+        run_status = result.get("status") or (result.get("final_report") or {}).get(
+            "status"
+        )
         status = _run_to_item_status(str(run_status or "failed"))
         if result.get("ok") is False and status == "draft":
             status = "failed"
@@ -1514,7 +1694,8 @@ class WorkItemService:
                 implementer_provider=execution.get("implementer_provider"),
                 reviewer_provider=execution.get("reviewer_provider"),
                 max_rounds=execution.get("max_rounds"),
-                context7_libraries=context7_libraries or execution.get("context7_libraries"),
+                context7_libraries=context7_libraries
+                or execution.get("context7_libraries"),
                 dry_run=True,
                 client_name=client_name,
                 workspace_mode=str(item["safety_mode"]),
@@ -1525,6 +1706,8 @@ class WorkItemService:
                 # convenience preset. Real starts apply the persisted preset.
                 execution_preset=None,
                 work_item_id=item_id,
+                team_mode=str(item.get("team_mode") or "configured"),
+                agent_overrides=dict(item.get("agent_overrides") or {}),
             )
             result["work_item"] = self.get(item_id)
             return result
@@ -1541,7 +1724,8 @@ class WorkItemService:
             implementer_provider=execution.get("implementer_provider"),
             reviewer_provider=execution.get("reviewer_provider"),
             max_rounds=execution.get("max_rounds"),
-            context7_libraries=context7_libraries or execution.get("context7_libraries"),
+            context7_libraries=context7_libraries
+            or execution.get("context7_libraries"),
             dry_run=False,
             idempotency_key=str(item["idempotency_key"]),
             client_name=client_name,
@@ -1550,6 +1734,8 @@ class WorkItemService:
             role_profile_overrides=dict(item.get("role_profiles") or {}),
             execution_preset=str(item["preset"]),
             work_item_id=item_id,
+            team_mode=str(item.get("team_mode") or "configured"),
+            agent_overrides=dict(item.get("agent_overrides") or {}),
         )
         result["work_item"] = self.record_result(item_id, result)
         return result
@@ -1628,26 +1814,38 @@ class WorkItemService:
         if current["status"] != "archived":
             raise ValueError("Only an archived work item can be restored.")
 
-        previous = self.store.connect().execute(
-            """
+        previous = (
+            self.store.connect()
+            .execute(
+                """
             SELECT payload_json FROM work_item_events
             WHERE item_id=? AND event_type='work_item.archived'
             ORDER BY sequence DESC LIMIT 1
             """,
-            (item_id,),
-        ).fetchone()
+                (item_id,),
+            )
+            .fetchone()
+        )
         archived_payload = _parse_json(
             str(previous["payload_json"]) if previous else None,
             {},
         )
         restored_status = str(archived_payload.get("previous_status") or "")
         if restored_status not in WORK_ITEM_STATUSES - {"archived"}:
-            run = self.store.get_run(str(current["current_run_id"])) if current.get("current_run_id") else None
+            run = (
+                self.store.get_run(str(current["current_run_id"]))
+                if current.get("current_run_id")
+                else None
+            )
             restored_status = _run_to_item_status(str((run or {}).get("status") or ""))
             if restored_status in {"running", "cancelling"}:
-                raise ValueError("A running work item cannot be restored from the archive.")
+                raise ValueError(
+                    "A running work item cannot be restored from the archive."
+                )
             if restored_status not in WORK_ITEM_STATUSES - {"archived"}:
-                restored_status = "completed" if current.get("completed_at") else "draft"
+                restored_status = (
+                    "completed" if current.get("completed_at") else "draft"
+                )
 
         now = utc_now_iso()
         with self.store.transaction(immediate=True) as connection:
@@ -1729,7 +1927,9 @@ class WorkItemService:
             clauses.append("run_id IN (" + ",".join("?" for _ in run_ids) + ")")
             params.extend(sorted(run_ids))
         if private_artifact_ids:
-            clauses.append("id IN (" + ",".join("?" for _ in private_artifact_ids) + ")")
+            clauses.append(
+                "id IN (" + ",".join("?" for _ in private_artifact_ids) + ")"
+            )
             params.extend(sorted(private_artifact_ids))
 
         removed_paths: list[str] = []
@@ -1755,9 +1955,11 @@ class WorkItemService:
 
         referenced_paths = {
             str(row["storage_path"])
-            for row in self.store.connect().execute(
+            for row in self.store.connect()
+            .execute(
                 "SELECT storage_path FROM artifacts WHERE storage_path IS NOT NULL"
-            ).fetchall()
+            )
+            .fetchall()
         }
         for raw_path in sorted(set(removed_paths) - referenced_paths):
             try:
@@ -1800,9 +2002,14 @@ class WorkItemService:
         selected = None
         selected_error = None
         if selected_item_id:
-            selected_row = self.store.connect().execute(
-                "SELECT workspace_id FROM work_items WHERE id=?", (selected_item_id,)
-            ).fetchone()
+            selected_row = (
+                self.store.connect()
+                .execute(
+                    "SELECT workspace_id FROM work_items WHERE id=?",
+                    (selected_item_id,),
+                )
+                .fetchone()
+            )
             expected_workspace_id = (
                 str(resolved_identity["workspace_id"])
                 if resolved_identity is not None

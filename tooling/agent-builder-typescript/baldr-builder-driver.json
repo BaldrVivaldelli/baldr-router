@@ -1,0 +1,5 @@
+{
+  "contract": "baldr-builder-driver-registration",
+  "version": 1,
+  "command": ["node", "./dist/driver.js"]
+}

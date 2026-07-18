@@ -317,7 +317,8 @@ def test_projection_groups_rounds_and_exposes_only_whitelisted_reports() -> None
     assert progress["final_report"]["summary"] == "Review fix applied"  # type: ignore[index]
     assert progress["final_report"]["tests_run"] == ["pytest tests/test_feature.py"]  # type: ignore[index]
     assert progress["final_report"]["decisions"] == [  # type: ignore[index]
-        {"key": "approach", "value": "Use the smallest safe change."}
+        {"key": "approach", "value": "Use the smallest safe change."},
+        {"key": "write_authorization", "value": "not_required"},
     ]
 
 
@@ -705,6 +706,29 @@ def test_attention_exposes_retry_only_with_explicit_attempt_evidence(
 
     assert attention["retryable"] is retryable  # type: ignore[index]
     assert [action["id"] for action in attention["actions"]] == expected_actions  # type: ignore[index]
+
+
+def test_preflight_failure_without_a_run_exposes_safe_retry() -> None:
+    item = _item("failed")
+    item.update(
+        {
+            "allowed_actions": ["start", "continue", "archive"],
+            "current_run_id": None,
+            "error_code": "agent_not_found",
+        }
+    )
+
+    progress = project_work_item_progress(item, None)
+    attention = progress["attention"]
+
+    assert attention["retryable"] is True  # type: ignore[index]
+    assert [action["id"] for action in attention["actions"]] == [  # type: ignore[index]
+        "start",
+        "archive",
+    ]
+    assert attention["action_label"] == "Volver a intentar"  # type: ignore[index]
+    assert attention["title"] == "El agente elegido ya no está disponible"  # type: ignore[index]
+    assert "no modificó ningún archivo" in attention["summary"]  # type: ignore[index]
 
 
 def test_read_only_architecture_report_block_exposes_safe_retry() -> None:

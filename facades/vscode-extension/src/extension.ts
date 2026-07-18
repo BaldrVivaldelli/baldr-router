@@ -138,7 +138,7 @@ function createChatHandler(
         itemId = String(item.id ?? '');
         if (!itemId) throw new Error('Baldr did not return a work item id.');
         stream.progress('Baldr is planning, implementing, and reviewing…');
-        result = await runtime.startWorkItem(workspaceRoot, itemId, token);
+        result = await runtime.startWorkItem(workspaceRoot, itemId, {}, token);
       }
       const completed = record(result.work_item);
       output.info(`Chat work item completed: ${JSON.stringify({

@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "baldr-agent-runner"
+version = "0.19.0"
+description = "Local workspace runner for externally owned Baldr agents."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "Baldr" }]
+dependencies = ["baldr-agent-sdk>=0.19.0,<0.20.0"]
+
+[project.scripts]
+baldr-agent-runner = "baldr_agent_runner.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/baldr_agent_runner"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.9"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "../../sdks/python/src"]
+
+[tool.uv.sources]
+baldr-agent-sdk = { workspace = true }

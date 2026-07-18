@@ -31,6 +31,8 @@ def setup_facade(
     execution_preset: str | None = None,
     context7_policy: str | None = None,
     role_profiles: dict[str, list[str]] | None = None,
+    team_mode: str | None = None,
+    agent_overrides: dict[str, str] | None = None,
     allow_non_git: bool = False,
     profile_definition: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -70,6 +72,8 @@ def setup_facade(
                 execution_preset,
                 context7_policy,
                 role_profiles,
+                team_mode,
+                agent_overrides,
             )
         ):
             workbench_preferences = service.set_preferences(
@@ -78,6 +82,8 @@ def setup_facade(
                 preset=execution_preset,
                 context_mode=context7_policy,
                 role_profiles=role_profiles,
+                team_mode=team_mode,
+                agent_overrides=agent_overrides,
                 allow_non_git=allow_non_git,
             )
             workspace_trust = inspect_workspace(
@@ -92,11 +98,11 @@ def setup_facade(
             workspace_trust = trust_workspace(
                 workspace_root,
                 force=bool(allow_non_git and workspace_safety_mode == "non-git"),
-                # Setup follows the default protected path when the caller did
-                # not choose an explicit direct/non-Git mode. This trusts the
-                # original folder without recording consent for unprotected
-                # writes in ``trusted_non_git_roots``.
-                protected_non_git=workspace_safety_mode in {None, "automatic", "auto"},
+                # ``current`` is the default when the caller omits a mode.
+                # Non-Git workspaces therefore still require the explicit
+                # ``non-git`` choice; only ``automatic`` opts into a later
+                # per-task authorization prompt.
+                protected_non_git=workspace_safety_mode in {"automatic", "auto"},
             )
 
     cfg = load_config()
@@ -142,7 +148,9 @@ def setup_facade(
     }
     if workspace_root:
         service = WorkItemService()
-        workbench["preferences"] = workbench_preferences or service.preferences(workspace_root)
+        workbench["preferences"] = workbench_preferences or service.preferences(
+            workspace_root
+        )
         workbench["profiles"] = service.summary(workspace_root, limit=1).get("profiles")
 
     effective_safety_mode = str(
@@ -329,6 +337,8 @@ def run_facade(
     execution_preset: str | None = None,
     context7_policy: str | None = None,
     role_profiles: dict[str, list[str]] | None = None,
+    team_mode: str | None = None,
+    agent_overrides: dict[str, str] | None = None,
     remember_workspace: bool = False,
     allow_non_git: bool = False,
     attachments: list[dict[str, Any]] | None = None,
@@ -381,6 +391,8 @@ def run_facade(
                 preset=execution_preset,
                 context_mode=context7_policy,
                 role_profiles=role_profiles,
+                team_mode=team_mode,
+                agent_overrides=agent_overrides,
                 allow_non_git=allow_non_git,
             )
 
@@ -404,6 +416,8 @@ def run_facade(
                 preset=execution_preset,
                 context_mode=context7_policy,
                 role_profiles=role_profiles,
+                team_mode=team_mode,
+                agent_overrides=agent_overrides,
                 config=execution,
                 allow_non_git=allow_non_git,
                 source=client_name,
@@ -423,6 +437,8 @@ def run_facade(
                 preset=execution_preset,
                 context_mode=context7_policy,
                 role_profiles=role_profiles,
+                team_mode=team_mode,
+                agent_overrides=agent_overrides,
                 config=execution,
                 allow_non_git=allow_non_git,
             )
@@ -505,9 +521,7 @@ def run_facade(
 
         if action == "list-item-deliverables":
             if not work_item_id:
-                raise ValueError(
-                    "work_item_id is required for list-item-deliverables."
-                )
+                raise ValueError("work_item_id is required for list-item-deliverables.")
             page = service.list_deliverables(
                 work_item_id,
                 workspace_root=workspace_root,
@@ -567,6 +581,8 @@ def run_facade(
                 context7_policy=context7_policy,
                 role_profile_overrides=role_profiles,
                 execution_preset=execution_preset,
+                team_mode=team_mode,
+                agent_overrides=agent_overrides,
             )
             result.setdefault("intent", "run")
             result["operation"] = "execute"
@@ -585,6 +601,8 @@ def run_facade(
                 preset=execution_preset,
                 context_mode=context7_policy,
                 role_profiles=role_profiles,
+                team_mode=team_mode,
+                agent_overrides=agent_overrides,
                 config=execution,
                 allow_non_git=allow_non_git,
                 source=client_name,
@@ -592,7 +610,14 @@ def run_facade(
             work_item_id = str(item["id"])
         elif execution or any(
             value is not None
-            for value in (workspace_mode, execution_preset, context7_policy, role_profiles)
+            for value in (
+                workspace_mode,
+                execution_preset,
+                context7_policy,
+                role_profiles,
+                team_mode,
+                agent_overrides,
+            )
         ):
             service.update(
                 work_item_id,
@@ -600,6 +625,8 @@ def run_facade(
                 preset=execution_preset,
                 context_mode=context7_policy,
                 role_profiles=role_profiles,
+                team_mode=team_mode,
+                agent_overrides=agent_overrides,
                 config=execution,
                 allow_non_git=allow_non_git,
             )
@@ -669,6 +696,8 @@ def execute_facade_intent(
     execution_preset: str | None = None,
     context7_policy: str | None = None,
     role_profiles: dict[str, list[str]] | None = None,
+    team_mode: str | None = None,
+    agent_overrides: dict[str, str] | None = None,
     remember_workspace: bool = False,
     allow_non_git: bool = False,
     attachments: list[dict[str, Any]] | None = None,
@@ -683,12 +712,22 @@ def execute_facade_intent(
 ) -> dict[str, Any]:
     intent = get_facade_intent(intent_id)
     if intent.id == "setup":
-        return setup_facade(workspace_root)
+        return setup_facade(
+            workspace_root,
+            team_mode=team_mode,
+            agent_overrides=agent_overrides,
+        )
     if intent.id == "status":
-        return status_facade(workspace_root, run_limit=recent_limit, work_item_id=work_item_id)
+        return status_facade(
+            workspace_root, run_limit=recent_limit, work_item_id=work_item_id
+        )
     if intent.id == "run":
         if not workspace_root:
-            return {"ok": False, "intent": "run", "reason": "workspace_root is required"}
+            return {
+                "ok": False,
+                "intent": "run",
+                "reason": "workspace_root is required",
+            }
         return run_facade(
             workspace_root=workspace_root,
             task=task or "",
@@ -712,6 +751,8 @@ def execute_facade_intent(
             execution_preset=execution_preset,
             context7_policy=context7_policy,
             role_profiles=role_profiles,
+            team_mode=team_mode,
+            agent_overrides=agent_overrides,
             remember_workspace=remember_workspace,
             allow_non_git=allow_non_git,
             attachments=attachments,

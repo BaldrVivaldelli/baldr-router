@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from baldr_router.context7 import _write_cache
+from baldr_router.redaction import redact_value
 from baldr_router.run import run_command
 from baldr_router.telemetry import append_run, runs_jsonl_path
 
@@ -59,3 +60,15 @@ def test_context7_cache_hides_query_and_response_secrets(tmp_path: Path, monkeyp
     assert secret not in raw
     assert payload["params"]["query"] == "<query-redacted>"
     assert payload["body"]["echo"] == "<redacted>"
+
+
+def test_write_authorization_decision_is_safe_but_credentials_remain_redacted() -> None:
+    redacted = redact_value(
+        {
+            "decisions": {"write_authorization": "not_required"},
+            "authorization": "Bearer synthetic-secret-value",
+        }
+    )
+
+    assert redacted["decisions"]["write_authorization"] == "not_required"
+    assert redacted["authorization"] == "<redacted>"

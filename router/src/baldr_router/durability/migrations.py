@@ -648,7 +648,16 @@ MIGRATIONS: tuple[Migration, ...] = (
             "CREATE INDEX IF NOT EXISTS idx_step_participants_agent_ref ON step_participants(agent_ref)",
         ),
     ),
-
+    Migration(
+        14,
+        "workspace-team-resolution-preferences",
+        (
+            "ALTER TABLE workspace_preferences ADD COLUMN team_mode TEXT NOT NULL DEFAULT 'configured'",
+            "ALTER TABLE workspace_preferences ADD COLUMN agent_overrides_json TEXT NOT NULL DEFAULT '{}'",
+            "ALTER TABLE work_items ADD COLUMN team_mode TEXT NOT NULL DEFAULT 'configured'",
+            "ALTER TABLE work_items ADD COLUMN agent_overrides_json TEXT NOT NULL DEFAULT '{}'",
+        ),
+    ),
 )
 
 

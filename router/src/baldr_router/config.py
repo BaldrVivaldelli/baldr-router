@@ -283,6 +283,9 @@ class RoleConfig:
     # Deterministic reducer applied when a phase has multiple successful profiles.
     resolution: str = ""
     min_approvals: int = 1
+    # Read-only ``all`` roles may dispatch participants concurrently. Write
+    # roles are always clamped to one by the durable engine.
+    max_concurrency: int = 4
 
     can_write: bool = False
     sandbox: str = "read-only"
@@ -297,6 +300,11 @@ class WorkflowConfig:
     max_rounds: int = 2
     require_structured_output: bool = True
     require_review: bool = True
+    # Durable, count-based orchestration budgets. Provider adapters retain
+    # their own wall-clock timeouts; these limits bound fan-out and retries.
+    max_parallel_participants: int = 4
+    max_participants_per_phase: int = 8
+    max_total_participant_attempts: int = 24
     description: str = ""
 
 

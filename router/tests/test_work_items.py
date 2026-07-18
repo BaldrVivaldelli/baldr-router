@@ -37,7 +37,11 @@ def _git_repo(path: Path) -> Path:
         "GIT_COMMITTER_NAME": "Baldr Tests",
         "GIT_COMMITTER_EMAIL": "baldr-tests@example.invalid",
     }
-    subprocess.run(["git", "-C", str(path), "add", "README.md"], check=True, env={**os.environ, **env})
+    subprocess.run(
+        ["git", "-C", str(path), "add", "README.md"],
+        check=True,
+        env={**os.environ, **env},
+    )
     subprocess.run(
         ["git", "-C", str(path), "commit", "-q", "-m", "fixture"],
         check=True,
@@ -101,7 +105,42 @@ def test_generated_dotted_profile_names_survive_sequential_saves(
     }
 
 
-def test_work_item_schema_and_private_task_artifact(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_team_preferences_are_explicit_and_frozen_into_each_work_item(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _isolated_runtime(tmp_path, monkeypatch)
+    repo = _git_repo(tmp_path / "repo")
+    monkeypatch.setenv(RUNTIME_ROOTS_ENV, json.dumps([str(repo)]))
+    service = WorkItemService()
+
+    defaults = service.preferences(repo)
+    assert defaults["team_mode"] == "automatic"
+    assert defaults["agent_overrides"] == {}
+
+    reference = "local://kiro/planner@1.0.0"
+    saved = service.set_preferences(
+        repo,
+        team_mode="automatic",
+        agent_overrides={"architect": reference},
+    )
+    item = service.create(workspace_root=repo, task="Plan the change")
+    service.set_preferences(
+        repo,
+        team_mode="configured",
+        agent_overrides={},
+    )
+
+    assert saved["agent_overrides"] == {"architect": reference}
+    assert item["team_mode"] == "automatic"
+    assert item["agent_overrides"] == {"architect": reference}
+    assert service.get(item["id"])["agent_overrides"] == {"architect": reference}
+    assert service.preferences(repo)["team_mode"] == "configured"
+    assert service.preferences(repo)["agent_overrides"] == {}
+
+
+def test_work_item_schema_and_private_task_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     _isolated_runtime(tmp_path, monkeypatch)
     repo = _git_repo(tmp_path / "repo")
     monkeypatch.setenv(RUNTIME_ROOTS_ENV, json.dumps([str(repo)]))
@@ -111,11 +150,13 @@ def test_work_item_schema_and_private_task_artifact(tmp_path: Path, monkeypatch:
         workspace_root=repo,
         task="Implement refresh token rotation",
         extra_context="Use the current auth service.",
-        attachments=[{"kind": "file", "label": "README", "path": str(repo / "README.md")}],
+        attachments=[
+            {"kind": "file", "label": "README", "path": str(repo / "README.md")}
+        ],
     )
 
     assert item["status"] == "draft"
-    assert item["safety_mode"] == "automatic"
+    assert item["safety_mode"] == "current"
     assert item["title"] == "Implement refresh token rotation"
     assert item["task"] == "Implement refresh token rotation"
     assert item["extra_context"] == "Use the current auth service."
@@ -124,8 +165,14 @@ def test_work_item_schema_and_private_task_artifact(tmp_path: Path, monkeypatch:
 
     store = service.store
     schema = store.schema_status()
-    assert schema["schema_version"] == max(migration.version for migration in MIGRATIONS)
-    row = store.connect().execute("SELECT * FROM work_items WHERE id=?", (item["id"],)).fetchone()
+    assert schema["schema_version"] == max(
+        migration.version for migration in MIGRATIONS
+    )
+    row = (
+        store.connect()
+        .execute("SELECT * FROM work_items WHERE id=?", (item["id"],))
+        .fetchone()
+    )
     assert row is not None
     # The full task and extra context are referenced through private artifacts
     # rather than duplicated as materialized work-item columns. The title is a
@@ -134,14 +181,20 @@ def test_work_item_schema_and_private_task_artifact(tmp_path: Path, monkeypatch:
     assert "extra_context" not in row.keys()
     assert row["task_artifact_id"]
     assert row["extra_context_artifact_id"]
-    artifact = store.connect().execute(
-        "SELECT kind, redaction_level, inline_text, storage_path FROM artifacts WHERE id=?",
-        (item["task_artifact_id"],),
-    ).fetchone()
+    artifact = (
+        store.connect()
+        .execute(
+            "SELECT kind, redaction_level, inline_text, storage_path FROM artifacts WHERE id=?",
+            (item["task_artifact_id"],),
+        )
+        .fetchone()
+    )
     assert artifact is not None
     assert artifact["kind"] == "work-item-task-private"
     assert artifact["redaction_level"] == "private"
-    assert (artifact["inline_text"] is not None) ^ (artifact["storage_path"] is not None)
+    assert (artifact["inline_text"] is not None) ^ (
+        artifact["storage_path"] is not None
+    )
 
 
 def test_archived_work_items_can_be_restored_or_deleted_with_their_private_history(
@@ -172,7 +225,10 @@ def test_archived_work_items_can_be_restored_or_deleted_with_their_private_histo
         include_archived=True,
         workbench_only=True,
     )
-    assert public_history["workbench"]["items"][0]["allowed_actions"] == ["restore", "delete"]
+    assert public_history["workbench"]["items"][0]["allowed_actions"] == [
+        "restore",
+        "delete",
+    ]
 
     restored = service.restore(item["id"])
     assert restored["status"] == "draft"
@@ -183,10 +239,15 @@ def test_archived_work_items_can_be_restored_or_deleted_with_their_private_histo
     assert deleted == {"id": item["id"], "deleted": True}
     with pytest.raises(KeyError):
         service.get(item["id"])
-    assert service.store.connect().execute(
-        "SELECT 1 FROM artifacts WHERE id IN (?, ?)",
-        (task_artifact_id, context_artifact_id),
-    ).fetchall() == []
+    assert (
+        service.store.connect()
+        .execute(
+            "SELECT 1 FROM artifacts WHERE id IN (?, ?)",
+            (task_artifact_id, context_artifact_id),
+        )
+        .fetchall()
+        == []
+    )
 
 
 def test_permanent_deletion_requires_an_archived_work_item(
@@ -234,7 +295,7 @@ def test_non_git_mode_requires_explicit_consent_and_is_remembered(
     assert item["safety_mode"] == "non-git"
 
 
-def test_automatic_is_the_default_and_auto_alias_is_canonicalized(
+def test_current_is_the_default_and_auto_alias_is_canonicalized(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     _isolated_runtime(tmp_path, monkeypatch)
@@ -247,7 +308,7 @@ def test_automatic_is_the_default_and_auto_alias_is_canonicalized(
     saved = service.set_preferences(workspace, safety_mode="auto")
     item = service.create(workspace_root=workspace, task="Protected task")
 
-    assert defaults["safety_mode"] == "automatic"
+    assert defaults["safety_mode"] == "current"
     assert defaults["non_git_confirmed"] is False
     assert saved["safety_mode"] == "automatic"
     assert saved["non_git_confirmed"] is False
@@ -310,19 +371,35 @@ def test_frozen_run_intent_restores_and_deletes_archived_items(
     item_id = created["work_item"]["id"]
 
     archived = facade_run(
-        str(repo), "", client="vscode-extension", work_item_action="archive-item", work_item_id=item_id
+        str(repo),
+        "",
+        client="vscode-extension",
+        work_item_action="archive-item",
+        work_item_id=item_id,
     )
     assert archived["work_item"]["status"] == "archived"
     restored = facade_run(
-        str(repo), "", client="vscode-extension", work_item_action="restore", work_item_id=item_id
+        str(repo),
+        "",
+        client="vscode-extension",
+        work_item_action="restore",
+        work_item_id=item_id,
     )
     assert restored["operation"] == "restore-item"
     assert restored["work_item"]["status"] == "draft"
     facade_run(
-        str(repo), "", client="vscode-extension", work_item_action="archive", work_item_id=item_id
+        str(repo),
+        "",
+        client="vscode-extension",
+        work_item_action="archive",
+        work_item_id=item_id,
     )
     deleted = facade_run(
-        str(repo), "", client="vscode-extension", work_item_action="delete-item", work_item_id=item_id
+        str(repo),
+        "",
+        client="vscode-extension",
+        work_item_action="delete-item",
+        work_item_id=item_id,
     )
     assert deleted["deleted_work_item"] == {"id": item_id, "deleted": True}
 
@@ -353,9 +430,11 @@ def test_console_options_are_aliases_over_setup_status_run():
     }
     safety = {entry["id"]: entry for entry in options["safety_modes"]}
     assert safety["automatic"]["label"] == "Pedir autorización"
-    assert safety["automatic"]["recommended"] is True
-    assert safety["automatic"]["default"] is True
     assert safety["current"]["label"] == "Trabajar directamente"
+    assert safety["current"]["recommended"] is True
+    assert safety["current"]["default"] is True
+    assert "recommended" not in safety["automatic"]
+    assert "default" not in safety["automatic"]
     assert safety["non-git"]["label"] == "Sin protección"
     assert {entry["id"] for entry in options["presets"]} == {
         "fast",
@@ -441,6 +520,7 @@ def test_automatic_mode_allows_a_trusted_non_git_workspace_without_direct_consen
         "Create a small generated file",
         client="vscode-extension",
         work_item_action="execute",
+        workspace_mode="automatic",
         dry_run=True,
     )
 
@@ -468,7 +548,11 @@ def test_provider_context_includes_only_workspace_scoped_attachments(
 
     def fake_run_workflow_impl(**kwargs):
         captured.update(kwargs)
-        return {"ok": True, "status": "approved", "final_report": {"status": "approved"}}
+        return {
+            "ok": True,
+            "status": "approved",
+            "final_report": {"status": "approved"},
+        }
 
     monkeypatch.setattr(
         "baldr_router.workflows.run_workflow_impl", fake_run_workflow_impl
@@ -578,7 +662,10 @@ def test_continuation_appends_private_turn_and_carries_only_structured_result(
     assert "Token rotation is implemented." in continued["extra_context"]
     assert "Active editor: tests/test_auth.py" in continued["extra_context"]
     assert len(continued["extra_context"]) == 64_000
-    assert "private provider transcript must not be copied" not in continued["extra_context"]
+    assert (
+        "private provider transcript must not be copied"
+        not in continued["extra_context"]
+    )
     assert continued["config"]["attachments"][0]["dirty"] is True
     assert continued["config"]["attachments"][0]["version"] == 7
 

@@ -158,6 +158,25 @@ class DurableStore:
             connection.close()
             self._local.connection = None
 
+    def count_attempts_for_run(self, run_id: str) -> int:
+        """Return durable participant attempts consumed by one workflow run."""
+
+        row = (
+            self.connect()
+            .execute(
+                """
+            SELECT COUNT(*) AS total
+            FROM step_attempts a
+            JOIN step_participants p ON p.id = a.participant_id
+            JOIN workflow_steps s ON s.id = p.step_id
+            WHERE s.run_id = ?
+            """,
+                (run_id,),
+            )
+            .fetchone()
+        )
+        return int(row["total"] if row is not None else 0)
+
     @contextlib.contextmanager
     def transaction(self, *, immediate: bool = False) -> Iterator[sqlite3.Connection]:
         connection = self.connect()
@@ -652,14 +671,18 @@ class DurableStore:
 
         if not artifact_id:
             return None
-        row = self.connect().execute(
-            """
+        row = (
+            self.connect()
+            .execute(
+                """
             SELECT sha256, size_bytes, media_type, storage_path,
                    substr(inline_text, 1, ?) AS inline_text
             FROM artifacts WHERE id = ?
             """,
-            (max_bytes + 1, artifact_id),
-        ).fetchone()
+                (max_bytes + 1, artifact_id),
+            )
+            .fetchone()
+        )
         if row is None or str(row["media_type"]) != media_type:
             return None
         recorded_size = int(row["size_bytes"] or 0)
@@ -923,14 +946,18 @@ class DurableStore:
         reference = str(agent_ref or "").strip()
         if not reference:
             return []
-        rows = self.connect().execute(
-            """
+        rows = (
+            self.connect()
+            .execute(
+                """
             SELECT id, config_snapshot_json
             FROM workflow_runs
             WHERE status NOT IN ('approved', 'needs_changes', 'blocked', 'failed', 'cancelled')
             ORDER BY created_at ASC
             """
-        ).fetchall()
+            )
+            .fetchall()
+        )
 
         def contains(value: Any) -> bool:
             if isinstance(value, dict):
@@ -946,8 +973,10 @@ class DurableStore:
             for row in rows
             if contains(_parse_json(row["config_snapshot_json"], {}))
         }
-        participant_rows = self.connect().execute(
-            """
+        participant_rows = (
+            self.connect()
+            .execute(
+                """
             SELECT DISTINCT r.id
             FROM workflow_runs r
             JOIN workflow_steps s ON s.run_id = r.id
@@ -955,8 +984,10 @@ class DurableStore:
             WHERE p.agent_ref = ?
               AND r.status NOT IN ('approved', 'needs_changes', 'blocked', 'failed', 'cancelled')
             """,
-            (reference,),
-        ).fetchall()
+                (reference,),
+            )
+            .fetchall()
+        )
         active.update(str(row["id"]) for row in participant_rows)
         return sorted(active)
 
@@ -969,8 +1000,10 @@ class DurableStore:
 
         def latest(*, succeeded: bool) -> dict[str, Any] | None:
             condition = "AND p.status = 'succeeded'" if succeeded else ""
-            row = self.connect().execute(
-                f"""
+            row = (
+                self.connect()
+                .execute(
+                    f"""
                 SELECT r.id AS run_id, r.status AS run_status,
                        p.status AS participant_status, p.error_code,
                        p.updated_at
@@ -981,8 +1014,10 @@ class DurableStore:
                 ORDER BY p.updated_at DESC
                 LIMIT 1
                 """,
-                (reference,),
-            ).fetchone()
+                    (reference,),
+                )
+                .fetchone()
+            )
             return dict(row) if row is not None else None
 
         return {

@@ -66,15 +66,15 @@ test('primary and secondary UI use plain Spanish wording', () => {
   }
 });
 
-test('permission-gated direct work is the visible default while legacy worktree stays isolated', () => {
+test('direct work is the visible default while permission-gated and legacy modes remain available', () => {
   assert.match(source, /type SafetyMode = 'automatic' \| 'worktree' \| 'current' \| 'non-git'/);
   assert.match(source, /normalized === 'automatic' \|\| normalized === 'auto'/);
   assert.match(source, /automatic:\s*'Pedir autorización'/);
   assert.match(source, /worktree:\s*'Copia aislada'/);
   assert.match(source, /current:\s*'Trabajar directamente'/);
   assert.match(source, /'non-git':\s*'Sin protección'/);
-  assert.match(source, /text\(preference\.safety_mode, 'automatic'\)/);
-  assert.match(source, /id: 'automatic', label: '\$\(shield\) Pedir autorización'/);
+  assert.match(source, /text\(preference\.safety_mode, 'current'\)/);
+  assert.match(source, /id: 'current', label: '\$\(shield\) Trabajar directamente'/);
 });
 
 test('attachments render inside the composer and can be removed', () => {
@@ -233,6 +233,16 @@ test('failed task retry is offered only with explicit durable retryability evide
   assert.match(primary, /attention\.retryable===true/);
   assert.match(actions, /!attention\|\|attention\.retryable===true/);
   assert.match(actions, /attention\?'Volver a intentar':'Empezar'/);
+});
+
+test('starting or retrying a saved task refreshes its frozen team from current preferences', () => {
+  const profiles = section(source, '  private currentRoleProfiles(', '  private async itemAction(');
+  const action = section(source, '  private async itemAction(', '  private async inspectDeliverable(');
+  const runtimeStart = section(runtimeSource, '  async startWorkItem(', '  async continueWorkItem(');
+  assert.match(profiles, /preferences\.role_profiles/);
+  assert.match(profiles, /for \(const role of BALDR_ROLES\)/);
+  assert.match(action, /roleProfiles: this\.currentRoleProfiles\(\)/);
+  assert.match(runtimeStart, /roleProfiles: options\.roleProfiles/);
 });
 
 test('stage disclosure is accessible and survives polling refreshes', () => {
@@ -417,6 +427,18 @@ test('catalog failure and selection cancellation leave the current team untouche
   assert.doesNotMatch(fallback, /upsertExecutionProfile|setWorkspacePreferences/);
 });
 
+test('team menu keeps automatic selection first and only two explicit alternatives', () => {
+  const mainMenu = section(source, '  private async chooseRoleProfiles(', '  private async chooseExternalAgent(');
+
+  assert.match(mainMenu, /id: 'automatic'/);
+  assert.match(mainMenu, /Automático \(recomendado\)/);
+  assert.match(mainMenu, /id: 'per-stage'/);
+  assert.match(mainMenu, /Codex o Kiro normal/);
+  assert.match(mainMenu, /teamMode: 'automatic'/);
+  assert.match(mainMenu, /agentOverrides: \{\}/);
+  assert.doesNotMatch(mainMenu, /codex-models|saved|external-agents|restore-provider|advanced|Administrar agentes|Configurar equipo/);
+});
+
 test('external agents are loaded explicitly and assigned by immutable reference', () => {
   const runtimeCatalog = section(runtimeSource, '  async agentCatalog(', '  qualificationProfile(');
   const chooser = section(source, '  private async chooseExternalAgent(', '  private async manageExternalAgents(');
@@ -426,11 +448,14 @@ test('external agents are loaded explicitly and assigned by immutable reference'
   assert.match(chooser, /capabilities\.includes\('workspace\.read'\)/);
   assert.match(chooser, /capabilities\.includes\('workspace\.write'\)/);
   assert.match(chooser, /text\(agent\.effect_mode\) === 'workspace-write'/);
-  assert.match(chooser, /agent_manifest_digest: digest/);
-  assert.match(chooser, /agent_ref: reference/);
-  assert.match(chooser, /this\.runtime\.upsertExecutionProfile\(root, \{/);
+  assert.match(chooser, /if \(agent\.enabled === false\) return false/);
+  assert.match(chooser, /`Kiro\$\{agentName/);
+  assert.match(chooser, /canWrite \? 'Lectura y escritura' : 'Solo lectura'/);
+  assert.match(chooser, /AgentRef: \$\{text\(agent\.ref\)\}/);
   assert.match(chooser, /this\.runtime\.setWorkspacePreferences\(root, \{/);
-  assert.match(chooser, /roleProfiles\[role\.id\] = \[profileName\]/);
+  assert.match(chooser, /teamMode: 'automatic'/);
+  assert.match(chooser, /agentOverrides\[role\.id\] = reference/);
+  assert.doesNotMatch(chooser, /upsertExecutionProfile|profileName/);
   assert.match(chooser, /No pudimos consultar los agentes registrados\. Tu equipo no cambió\./);
   assert.doesNotMatch(chooser, /target\.|authorization_env|endpoint/);
 });

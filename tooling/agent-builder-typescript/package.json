@@ -1,0 +1,52 @@
+{
+  "name": "@baldr/agent-builder-typescript",
+  "version": "0.19.0",
+  "description": "TypeScript process driver for Baldr Builder Protocol v1.",
+  "keywords": [
+    "agents",
+    "baldr",
+    "builder",
+    "typescript"
+  ],
+  "homepage": "https://github.com/BaldrVivaldelli/baldr-router#readme",
+  "bugs": {
+    "url": "https://github.com/BaldrVivaldelli/baldr-router/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/BaldrVivaldelli/baldr-router.git",
+    "directory": "tooling/agent-builder-typescript"
+  },
+  "type": "module",
+  "main": "./dist/driver.js",
+  "bin": {
+    "baldr-builder-driver-typescript": "./bin/baldr-builder-driver-typescript.mjs"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "src",
+    "baldr-builder-driver.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p .",
+    "check": "tsc -p . --noEmit",
+    "test": "npm run build && node --test --test-concurrency=1 ./tests/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@baldr/agent-sdk": "0.19.0",
+    "typescript": "^5.9.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "license": "MIT"
+}

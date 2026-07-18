@@ -27,6 +27,7 @@ from .durability.store import DurableStore
 from .execution_profiles import role_execution_plan
 from .provider_registry import provider_status, run_provider_role
 from .runtime_guard import reentry_block_reason
+from .team_resolution import TeamResolutionError
 from .workspace_policy import WorkspacePolicyError, require_workspace
 
 WORKFLOW_ARCHITECT_IMPLEMENT_REVIEW = "architect-implement-review"
@@ -130,6 +131,8 @@ def run_workflow_impl(
     role_profile_overrides: dict[str, list[str]] | None = None,
     execution_preset: str | None = None,
     work_item_id: str | None = None,
+    team_mode: str | None = None,
+    agent_overrides: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     cfg = load_config()
     if cfg.safety.prevent_router_reentry:
@@ -176,10 +179,20 @@ def run_workflow_impl(
             reviewer_provider=reviewer_provider,
             max_rounds=max_rounds,
             role_profile_overrides=role_profile_overrides,
-            workspace_mode=workspace_mode,
+            workspace_mode=selected_workspace_mode,
             context7_policy=context7_policy,
             execution_preset=execution_preset,
+            team_mode=team_mode,
+            agent_overrides=agent_overrides,
+            workspace_root=cwd,
         )
+    except TeamResolutionError as exc:
+        return {
+            "ok": False,
+            "status": "invalid_team_resolution",
+            "error": {"code": exc.code, "retryable": False, "role": exc.role},
+            "reason": str(exc),
+        }
     except AgentDigestMismatchError as exc:
         return {
             "ok": False,
@@ -219,7 +232,10 @@ def run_workflow_impl(
             "reason": str(exc),
         }
     except Exception as exc:
-        return {"ok": False, "reason": f"Invalid execution profile configuration: {exc}"}
+        return {
+            "ok": False,
+            "reason": f"Invalid execution profile configuration: {exc}",
+        }
 
     if dry_run:
         bundle = prepare_context7_bundle(

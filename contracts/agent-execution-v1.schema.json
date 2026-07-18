@@ -1,0 +1,279 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://baldr.dev/contracts/agent-execution-v1.schema.json",
+  "title": "Baldr external agent execution protocol v1",
+  "oneOf": [
+    { "$ref": "#/$defs/healthRequest" },
+    { "$ref": "#/$defs/healthResponse" },
+    { "$ref": "#/$defs/invoke" },
+    { "$ref": "#/$defs/accepted" },
+    { "$ref": "#/$defs/statusRequest" },
+    { "$ref": "#/$defs/status" },
+    { "$ref": "#/$defs/eventsRequest" },
+    { "$ref": "#/$defs/event" },
+    { "$ref": "#/$defs/cancel" },
+    { "$ref": "#/$defs/result" }
+  ],
+  "$defs": {
+    "requestId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$"
+    },
+    "jobId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$"
+    },
+    "agentRef": {
+      "type": "string",
+      "maxLength": 320,
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,95}://[a-z0-9][a-z0-9._-]{0,95}/[a-z0-9][a-z0-9._-]{0,95}@[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "agentIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref", "digest"],
+      "properties": {
+        "ref": { "$ref": "#/$defs/agentRef" },
+        "digest": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "base": {
+      "type": "object",
+      "required": ["contract", "version", "kind", "request_id"],
+      "properties": {
+        "contract": { "const": "baldr-agent-execution" },
+        "version": { "const": 1 },
+        "kind": { "type": "string" },
+        "request_id": { "$ref": "#/$defs/requestId" }
+      }
+    },
+    "workspace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root", "effect_mode"],
+      "properties": {
+        "root": {
+          "oneOf": [
+            { "type": "string", "minLength": 1, "maxLength": 4096 },
+            { "type": "null" }
+          ]
+        },
+        "effect_mode": { "enum": ["read-only", "workspace-write"] },
+        "scope_digest": {
+          "oneOf": [
+            { "$ref": "#/$defs/digest" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "invocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task",
+        "workflow",
+        "step_name",
+        "report_kind",
+        "profile_name",
+        "workspace",
+        "requested_capabilities",
+        "durable_run_id",
+        "durable_step_id",
+        "durable_attempt_id",
+        "timeout_seconds"
+      ],
+      "properties": {
+        "task": { "type": "string", "maxLength": 2000000 },
+        "workflow": { "type": "string", "maxLength": 160 },
+        "step_name": { "type": "string", "maxLength": 160 },
+        "report_kind": { "type": "string", "maxLength": 160 },
+        "profile_name": { "type": "string", "maxLength": 160 },
+        "workspace": { "$ref": "#/$defs/workspace" },
+        "requested_capabilities": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 160 }
+        },
+        "durable_run_id": { "type": "string", "maxLength": 160 },
+        "durable_step_id": { "type": "string", "maxLength": 160 },
+        "durable_attempt_id": { "type": "string", "maxLength": 160 },
+        "session_key": { "type": "string", "maxLength": 512 },
+        "resume_session_id": { "type": ["string", "null"], "maxLength": 512 },
+        "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 86400 }
+      }
+    },
+    "healthRequest": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["contract", "version", "kind", "request_id"],
+          "properties": {
+            "contract": { "const": "baldr-agent-execution" },
+            "version": { "const": 1 },
+            "kind": { "const": "health-request" },
+            "request_id": { "$ref": "#/$defs/requestId" }
+          }
+        }
+      ]
+    },
+    "healthResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "version", "kind", "request_id", "status", "runner_version", "protocols"],
+      "properties": {
+        "contract": { "const": "baldr-agent-execution" },
+        "version": { "const": 1 },
+        "kind": { "const": "health-response" },
+        "request_id": { "$ref": "#/$defs/requestId" },
+        "status": { "enum": ["ok", "degraded", "unavailable"] },
+        "runner_version": { "type": "string", "maxLength": 64 },
+        "protocols": {
+          "type": "array",
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": { "type": "integer", "minimum": 1 }
+        }
+      }
+    },
+    "invoke": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "version", "kind", "request_id", "job_id", "idempotency_key", "agent", "invocation"],
+      "properties": {
+        "contract": { "const": "baldr-agent-execution" },
+        "version": { "const": 1 },
+        "kind": { "const": "invoke" },
+        "request_id": { "$ref": "#/$defs/requestId" },
+        "job_id": { "$ref": "#/$defs/jobId" },
+        "idempotency_key": { "type": "string", "minLength": 1, "maxLength": 320 },
+        "agent": { "$ref": "#/$defs/agentIdentity" },
+        "invocation": { "$ref": "#/$defs/invocation" }
+      }
+    },
+    "accepted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "version", "kind", "request_id", "job_id", "state", "reused"],
+      "properties": {
+        "contract": { "const": "baldr-agent-execution" },
+        "version": { "const": 1 },
+        "kind": { "const": "accepted" },
+        "request_id": { "$ref": "#/$defs/requestId" },
+        "job_id": { "$ref": "#/$defs/jobId" },
+        "state": { "enum": ["accepted", "running"] },
+        "reused": { "type": "boolean" }
+      }
+    },
+    "statusRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "version", "kind", "request_id", "job_id"],
+      "properties": {
+        "contract": { "const": "baldr-agent-execution" },
+        "version": { "const": 1 },
+        "kind": { "const": "status-request" },
+        "request_id": { "$ref": "#/$defs/requestId" },
+        "job_id": { "$ref": "#/$defs/jobId" }
+      }
+    },
+    "status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "version", "kind", "request_id", "job_id", "state", "event_cursor"],
+      "properties": {
+        "contract": { "const": "baldr-agent-execution" },
+        "version": { "const": 1 },
+        "kind": { "const": "status" },
+        "request_id": { "$ref": "#/$defs/requestId" },
+        "job_id": { "$ref": "#/$defs/jobId" },
+        "state": { "enum": ["accepted", "running", "succeeded", "failed", "cancelled", "unknown"] },
+        "event_cursor": { "type": "integer", "minimum": 0 },
+        "error_code": { "type": ["string", "null"], "maxLength": 160 }
+      }
+    },
+    "eventsRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "version", "kind", "request_id", "job_id", "after", "limit"],
+      "properties": {
+        "contract": { "const": "baldr-agent-execution" },
+        "version": { "const": 1 },
+        "kind": { "const": "events-request" },
+        "request_id": { "$ref": "#/$defs/requestId" },
+        "job_id": { "$ref": "#/$defs/jobId" },
+        "after": { "type": "integer", "minimum": 0 },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 1000 }
+      }
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "version", "kind", "request_id", "job_id", "sequence", "category", "message"],
+      "properties": {
+        "contract": { "const": "baldr-agent-execution" },
+        "version": { "const": 1 },
+        "kind": { "const": "event" },
+        "request_id": { "$ref": "#/$defs/requestId" },
+        "job_id": { "$ref": "#/$defs/jobId" },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "category": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "message": { "type": "string", "maxLength": 4096 }
+      }
+    },
+    "cancel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "version", "kind", "request_id", "job_id", "reason"],
+      "properties": {
+        "contract": { "const": "baldr-agent-execution" },
+        "version": { "const": 1 },
+        "kind": { "const": "cancel" },
+        "request_id": { "$ref": "#/$defs/requestId" },
+        "job_id": { "$ref": "#/$defs/jobId" },
+        "reason": { "type": "string", "maxLength": 1024 }
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "version", "kind", "request_id", "job_id", "state", "agent", "result"],
+      "properties": {
+        "contract": { "const": "baldr-agent-execution" },
+        "version": { "const": 1 },
+        "kind": { "const": "result" },
+        "request_id": { "$ref": "#/$defs/requestId" },
+        "job_id": { "$ref": "#/$defs/jobId" },
+        "state": { "enum": ["succeeded", "failed", "cancelled", "unknown"] },
+        "agent": { "$ref": "#/$defs/agentIdentity" },
+        "result": { "type": "object" },
+        "error": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["code", "message", "retryable"],
+              "properties": {
+                "code": { "type": "string", "minLength": 1, "maxLength": 160 },
+                "message": { "type": "string", "maxLength": 4096 },
+                "retryable": { "type": "boolean" }
+              }
+            },
+            { "type": "null" }
+          ]
+        }
+      }
+    }
+  }
+}

@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
+from jsonschema import Draft202012Validator
+from referencing import Registry, Resource
 
+from baldr_router import cli
 from baldr_router.agent_api import (
     AgentDigestMismatchError,
     AgentContractError,
@@ -21,11 +25,16 @@ from baldr_router.agent_api import (
 from baldr_router.agent_gateway import AgentGateway
 from baldr_router.agent_http import HttpJsonAgentConnector, JsonHttpClient
 from baldr_router.agent_manager import (
+    AgentManagerPublisher,
     HttpAgentManagerAdmin,
     HttpAgentManagerResolver,
     agent_manager_status,
+    load_agent_publication,
+    write_agent_publication,
 )
+from baldr_router.agent_manager_policy import AgentManagerPolicy
 from baldr_router.agent_manager_service import (
+    AGENT_MANAGER_SCHEMA_VERSION,
     AgentManagerStore,
     build_agent_manager_server,
 )
@@ -327,3 +336,391 @@ def test_manager_service_requires_an_environment_credential(tmp_path: Path) -> N
     finally:
         if previous is not None:
             os.environ[missing] = previous
+
+
+def _manager_config(*, port: int, credential_env: str) -> AgentManagerConfig:
+    return AgentManagerConfig(
+        enabled=True,
+        registry="company",
+        base_url=f"http://127.0.0.1:{port}",
+        authorization_env=credential_env,
+        allow_insecure_loopback=True,
+    )
+
+
+def _managed_manifest(*, tenant: str, owner: str, name: str) -> AgentManifest:
+    return AgentManifest(
+        reference=AgentRef.parse(f"company://{tenant}/{name}@1.0.0"),
+        owner=owner,
+        transport="provider",
+        target={"provider": "codex", "runner": "exec-json"},
+        capabilities=("workspace.read",),
+        effect_mode="read-only",
+    )
+
+
+def test_manager_policy_enforces_rbac_tenancy_ownership_and_safe_audit(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    credentials = {
+        "BALDR_MANAGER_ADMIN": "admin-fixture-credential",
+        "BALDR_MANAGER_PRODUCT_PUBLISHER": "publisher-fixture-credential",
+        "BALDR_MANAGER_PRODUCT_OPERATOR": "operator-fixture-credential",
+        "BALDR_MANAGER_PRODUCT_AUDITOR": "auditor-fixture-credential",
+        "BALDR_MANAGER_CYBER_READER": "reader-fixture-credential",
+    }
+    for name, value in credentials.items():
+        monkeypatch.setenv(name, value)
+    policy_path = tmp_path / "manager-policy.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "contract": "baldr-agent-manager-policy",
+                "version": 1,
+                "registry": "company",
+                "principals": [
+                    {
+                        "id": "root-admin",
+                        "credential_env": "BALDR_MANAGER_ADMIN",
+                        "roles": ["admin"],
+                        "tenants": ["*"],
+                        "owners": ["*"],
+                    },
+                    {
+                        "id": "product-publisher",
+                        "credential_env": "BALDR_MANAGER_PRODUCT_PUBLISHER",
+                        "roles": ["publisher"],
+                        "tenants": ["product"],
+                        "owners": ["product-team"],
+                    },
+                    {
+                        "id": "product-operator",
+                        "credential_env": "BALDR_MANAGER_PRODUCT_OPERATOR",
+                        "roles": ["operator"],
+                        "tenants": ["product"],
+                        "owners": ["product-team"],
+                    },
+                    {
+                        "id": "product-auditor",
+                        "credential_env": "BALDR_MANAGER_PRODUCT_AUDITOR",
+                        "roles": ["auditor"],
+                        "tenants": ["product"],
+                        "owners": ["product-team"],
+                    },
+                    {
+                        "id": "cyber-reader",
+                        "credential_env": "BALDR_MANAGER_CYBER_READER",
+                        "roles": ["reader"],
+                        "tenants": ["cyber"],
+                        "owners": ["cyber-team"],
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    database = tmp_path / "manager.sqlite3"
+    server = build_agent_manager_server(
+        host="127.0.0.1",
+        port=0,
+        database=database,
+        registry="company",
+        authorization_env="",
+        policy_path=policy_path,
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    client = JsonHttpClient(allow_insecure_loopback=True)
+    admin = HttpAgentManagerAdmin(
+        _manager_config(port=server.server_port, credential_env="BALDR_MANAGER_ADMIN"),
+        client=client,
+    )
+    publisher = HttpAgentManagerAdmin(
+        _manager_config(
+            port=server.server_port,
+            credential_env="BALDR_MANAGER_PRODUCT_PUBLISHER",
+        ),
+        client=client,
+    )
+    operator = HttpAgentManagerAdmin(
+        _manager_config(
+            port=server.server_port,
+            credential_env="BALDR_MANAGER_PRODUCT_OPERATOR",
+        ),
+        client=client,
+    )
+    auditor = HttpAgentManagerAdmin(
+        _manager_config(
+            port=server.server_port,
+            credential_env="BALDR_MANAGER_PRODUCT_AUDITOR",
+        ),
+        client=client,
+    )
+    cyber = HttpAgentManagerResolver(
+        _manager_config(
+            port=server.server_port,
+            credential_env="BALDR_MANAGER_CYBER_READER",
+        ),
+        client=client,
+    )
+    product_manifest = _managed_manifest(
+        tenant="product", owner="product-team", name="reviewer"
+    )
+    cyber_manifest = _managed_manifest(
+        tenant="cyber", owner="cyber-team", name="reviewer"
+    )
+    wrong_owner = _managed_manifest(
+        tenant="product", owner="another-team", name="wrong-owner"
+    )
+    try:
+        published = publisher.publish(product_manifest)
+        assert published["actor"] == "product-publisher"
+        assert published["tenant"] == "product"
+        assert published["audit_sequence"] >= 1
+        assert admin.publish(cyber_manifest)["created"] is True
+
+        with pytest.raises(AgentTransportError) as tenant_denied:
+            publisher.publish(cyber_manifest)
+        assert tenant_denied.value.status_code == 403
+        with pytest.raises(AgentTransportError) as owner_denied:
+            publisher.publish(wrong_owner)
+        assert owner_denied.value.status_code == 403
+        with pytest.raises(AgentTransportError) as role_denied:
+            publisher.set_enabled(product_manifest.reference, enabled=False)
+        assert role_denied.value.status_code == 403
+
+        assert [item.reference.namespace for item in cyber.catalog()] == ["cyber"]
+        with pytest.raises(AgentTransportError) as invisible:
+            cyber.resolve(
+                product_manifest.reference,
+                context=AgentResolutionContext(),
+            )
+        assert invisible.value.status_code == 403
+
+        assert operator.set_enabled(product_manifest.reference, enabled=False)[
+            "enabled"
+        ] is False
+        metrics = operator.metrics()
+        assert metrics["total"] == 1
+        assert metrics["requests"] >= 1
+
+        audit = auditor.audit(limit=200)
+        assert audit["events"]
+        assert {event["tenant"] for event in audit["events"]} == {"product"}
+        assert any(
+            event["detail_code"] == "permission_denied"
+            and event["outcome"] == "denied"
+            for event in audit["events"]
+        )
+
+        base_url = f"http://127.0.0.1:{server.server_port}"
+        assert client.request_json(method="GET", url=f"{base_url}/livez")["status"] == "ok"
+        assert client.request_json(method="GET", url=f"{base_url}/readyz")["status"] == "ok"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    persisted = database.read_bytes()
+    for credential in credentials.values():
+        assert credential.encode() not in persisted
+    with AgentManagerStore(database, registry="company").connect() as connection:
+        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+            connection.execute(
+                "UPDATE agent_manager_audit_events SET outcome = 'allowed' WHERE sequence = 1"
+            )
+
+
+def test_manager_migrates_legacy_catalog_and_creates_consistent_backup(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "legacy.sqlite3"
+    manifest = _managed_manifest(
+        tenant="product", owner="product-team", name="legacy-reviewer"
+    )
+    document = {**manifest.canonical_payload(), "digest": manifest.digest}
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE agent_manifests (
+                reference TEXT PRIMARY KEY,
+                digest TEXT NOT NULL,
+                manifest_json TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                revoked INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO agent_manifests(reference, digest, manifest_json) VALUES (?, ?, ?)",
+            (str(manifest.reference), manifest.digest, json.dumps(document)),
+        )
+
+    store = AgentManagerStore(database, registry="company")
+    assert store.schema_version == AGENT_MANAGER_SCHEMA_VERSION
+    assert store.catalog(limit=10, tenants=("product",)) == [document]
+    assert store.catalog(limit=10, tenants=("cyber",)) == []
+    result = store.backup(tmp_path / "backup" / "manager.sqlite3")
+    backup = AgentManagerStore(Path(result["backup"]), registry="company")
+    assert backup.schema_version == AGENT_MANAGER_SCHEMA_VERSION
+    assert backup.resolve(manifest.reference) == document
+
+
+def test_publication_sdk_policy_and_public_contract_are_secret_free(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    manifest = _managed_manifest(
+        tenant="product", owner="product-team", name="published-reviewer"
+    )
+    publication = tmp_path / "agent-publication.json"
+    assert write_agent_publication(publication, manifest) == publication.resolve()
+    assert load_agent_publication(publication).digest == manifest.digest
+    assert AgentManagerPublisher.validate_file(publication) == {
+        "ok": True,
+        "reference": str(manifest.reference),
+        "digest": manifest.digest,
+        "owner": "product-team",
+        "effect_mode": "read-only",
+    }
+    assert publication.stat().st_mode & 0o077 == 0
+    with pytest.raises(AgentContractError, match="already exists"):
+        write_agent_publication(publication, manifest)
+
+    monkeypatch.setenv("BALDR_MANAGER_PRODUCT", "publication-policy-credential")
+    document = {
+        "contract": "baldr-agent-manager-policy",
+        "version": 1,
+        "registry": "company",
+        "principals": [
+            {
+                "id": "product-publisher",
+                "credential_env": "BALDR_MANAGER_PRODUCT",
+                "roles": ["publisher"],
+                "tenants": ["product"],
+                "owners": ["product-team"],
+            }
+        ],
+    }
+    policy = AgentManagerPolicy.from_document(document)
+    assert policy.safe_document() == document
+    assert "publication-policy-credential" not in json.dumps(policy.safe_document())
+    with pytest.raises(AgentContractError, match="Unexpected Agent Manager principal"):
+        AgentManagerPolicy.from_document(
+            {
+                **document,
+                "principals": [{**document["principals"][0], "token": "not-allowed"}],
+            }
+        )
+
+    root = Path(__file__).resolve().parents[2]
+    schema = json.loads(
+        (root / "contracts" / "agent-manager-v1.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    registry_schema = json.loads(
+        (root / "contracts" / "agent-registry-v1.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    Draft202012Validator.check_schema(schema)
+    resources = Registry().with_resource(
+        "https://baldr.dev/contracts/agent-registry-v1.schema.json",
+        Resource.from_contents(registry_schema),
+    )
+    validator = Draft202012Validator(schema, registry=resources)
+    validator.validate(document)
+    validator.validate(json.loads(publication.read_text(encoding="utf-8")))
+
+
+def test_manager_cli_bootstraps_publication_policy_backup_and_doctor(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    publication = tmp_path / "reviewer.agent.json"
+    assert cli.main(
+        [
+            "agent-manager",
+            "init-manifest",
+            str(publication),
+            "company://product/reviewer@3.0.0",
+            "--owner",
+            "product-team",
+            "--transport",
+            "http-json",
+            "--target",
+            "endpoint=https://agents.example.test/reviewer",
+            "--target",
+            "authorization_env=PRODUCT_AGENT_TOKEN",
+            "--capability",
+            "workspace.read",
+        ]
+    ) == 0
+    created = json.loads(capsys.readouterr().out)
+    assert created["reference"] == "company://product/reviewer@3.0.0"
+    assert cli.main(
+        ["agent-manager", "validate-manifest", str(publication)]
+    ) == 0
+    assert json.loads(capsys.readouterr().out)["ok"] is True
+
+    policy = tmp_path / "manager-policy.json"
+    assert cli.main(
+        [
+            "agent-manager",
+            "init-policy",
+            str(policy),
+            "--registry",
+            "company",
+            "--principal-id",
+            "product-publisher",
+            "--credential-env",
+            "PRODUCT_MANAGER_TOKEN",
+            "--role",
+            "publisher",
+            "--tenant",
+            "product",
+            "--owner-scope",
+            "product-team",
+        ]
+    ) == 0
+    policy_result = json.loads(capsys.readouterr().out)
+    assert policy_result["policy"]["principals"][0]["credential_env"] == (
+        "PRODUCT_MANAGER_TOKEN"
+    )
+    policy_text = policy.read_text(encoding="utf-8")
+    assert "PRODUCT_MANAGER_TOKEN" in policy_text
+    assert '"token"' not in policy_text
+
+    database = tmp_path / "manager.sqlite3"
+    assert cli.main(
+        [
+            "agent-manager",
+            "doctor",
+            "--database",
+            str(database),
+            "--registry",
+            "company",
+        ]
+    ) == 0
+    doctor = json.loads(capsys.readouterr().out)
+    assert doctor["schema_version"] == AGENT_MANAGER_SCHEMA_VERSION
+    backup = tmp_path / "manager-backup.sqlite3"
+    assert cli.main(
+        [
+            "agent-manager",
+            "backup",
+            "--database",
+            str(database),
+            "--registry",
+            "company",
+            "--output",
+            str(backup),
+        ]
+    ) == 0
+    assert json.loads(capsys.readouterr().out)["backup"] == str(backup.resolve())

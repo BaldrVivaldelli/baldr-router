@@ -54,12 +54,24 @@ def test_one_shared_profile_or_n_m_l_profiles_per_phase(tmp_path: Path, monkeypa
 
     cfg.execution_profiles.update(
         {
-            "arch-a": ExecutionProfileConfig(provider="codex", model="architecture-a", reasoning_effort="high"),
-            "arch-b": ExecutionProfileConfig(provider="kiro-cli", agent="architecture-b", effort="medium"),
-            "impl-a": ExecutionProfileConfig(provider="codex", model="implementation-a", reasoning_effort="medium"),
-            "review-a": ExecutionProfileConfig(provider="codex", model="review-a", reasoning_effort="high"),
-            "review-b": ExecutionProfileConfig(provider="codex", model="review-b", reasoning_effort="low"),
-            "review-c": ExecutionProfileConfig(provider="kiro-cli", agent="review-c", effort="high"),
+            "arch-a": ExecutionProfileConfig(
+                provider="codex", model="architecture-a", reasoning_effort="high"
+            ),
+            "arch-b": ExecutionProfileConfig(
+                provider="kiro-cli", agent="architecture-b", effort="medium"
+            ),
+            "impl-a": ExecutionProfileConfig(
+                provider="codex", model="implementation-a", reasoning_effort="medium"
+            ),
+            "review-a": ExecutionProfileConfig(
+                provider="codex", model="review-a", reasoning_effort="high"
+            ),
+            "review-b": ExecutionProfileConfig(
+                provider="codex", model="review-b", reasoning_effort="low"
+            ),
+            "review-c": ExecutionProfileConfig(
+                provider="kiro-cli", agent="review-c", effort="high"
+            ),
         }
     )
     cfg.roles["architect"].profiles = ["arch-a", "arch-b"]
@@ -68,12 +80,35 @@ def test_one_shared_profile_or_n_m_l_profiles_per_phase(tmp_path: Path, monkeypa
     save_config(cfg)
 
     loaded = load_config()
-    assert len(role_execution_plan(loaded, "architect", loaded.roles["architect"])["profiles"]) == 2
-    assert len(role_execution_plan(loaded, "implementer", loaded.roles["implementer"])["profiles"]) == 1
-    assert len(role_execution_plan(loaded, "reviewer", loaded.roles["reviewer"])["profiles"]) == 3
+    assert (
+        len(
+            role_execution_plan(loaded, "architect", loaded.roles["architect"])[
+                "profiles"
+            ]
+        )
+        == 2
+    )
+    assert (
+        len(
+            role_execution_plan(loaded, "implementer", loaded.roles["implementer"])[
+                "profiles"
+            ]
+        )
+        == 1
+    )
+    assert (
+        len(
+            role_execution_plan(loaded, "reviewer", loaded.roles["reviewer"])[
+                "profiles"
+            ]
+        )
+        == 3
+    )
 
 
-def test_role_model_effort_and_sessions_are_dispatched_from_profiles(tmp_path: Path, monkeypatch):
+def test_role_model_effort_and_sessions_are_dispatched_from_profiles(
+    tmp_path: Path, monkeypatch
+):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
@@ -84,13 +119,22 @@ def test_role_model_effort_and_sessions_are_dispatched_from_profiles(tmp_path: P
     cfg = load_config()
     cfg.execution_profiles = {
         "architecture": ExecutionProfileConfig(
-            provider="codex", model="architecture-model", reasoning_effort="high", session_scope="workspace"
+            provider="codex",
+            model="architecture-model",
+            reasoning_effort="high",
+            session_scope="workspace",
         ),
         "implementation": ExecutionProfileConfig(
-            provider="codex", model="implementation-model", reasoning_effort="medium", session_scope="workspace"
+            provider="codex",
+            model="implementation-model",
+            reasoning_effort="medium",
+            session_scope="workspace",
         ),
         "review": ExecutionProfileConfig(
-            provider="codex", model="review-model", reasoning_effort="high", session_scope="workspace"
+            provider="codex",
+            model="review-model",
+            reasoning_effort="high",
+            session_scope="workspace",
         ),
     }
     cfg.roles["architect"].profiles = ["architecture"]
@@ -105,7 +149,11 @@ def test_role_model_effort_and_sessions_are_dispatched_from_profiles(tmp_path: P
         role = kwargs["role_name"]
         if role == "implementer":
             (kwargs["cwd"] / "implemented.txt").write_text("ok\n", encoding="utf-8")
-        status = {"architect": "planned", "implementer": "implemented", "reviewer": "approved"}[role]
+        status = {
+            "architect": "planned",
+            "implementer": "implemented",
+            "reviewer": "approved",
+        }[role]
         return {
             "ok": True,
             "run_id": f"provider-{len(captured)}",
@@ -114,7 +162,9 @@ def test_role_model_effort_and_sessions_are_dispatched_from_profiles(tmp_path: P
         }
 
     monkeypatch.setattr(workflows, "run_provider_role", fake_provider)
-    result = workflows.run_workflow_impl(workspace_root=str(repo), task="Implement fixture")
+    result = workflows.run_workflow_impl(
+        workspace_root=str(repo), task="Implement fixture"
+    )
 
     assert result["ok"] is True
     by_role = {item["role_name"]: item for item in captured}
@@ -141,7 +191,9 @@ def test_phase_strategies_support_fallback_and_multi_participant_review(
     cfg.execution_profiles = {
         "arch-failing": ExecutionProfileConfig(provider="codex", model="arch-failing"),
         "arch-good": ExecutionProfileConfig(provider="codex", model="arch-good"),
-        "implementation": ExecutionProfileConfig(provider="codex", model="implementation"),
+        "implementation": ExecutionProfileConfig(
+            provider="codex", model="implementation"
+        ),
         "review-a": ExecutionProfileConfig(provider="codex", model="review-a"),
         "review-b": ExecutionProfileConfig(provider="codex", model="review-b"),
     }
@@ -161,7 +213,11 @@ def test_phase_strategies_support_fallback_and_multi_participant_review(
         if kwargs["profile_name"] == "arch-failing":
             return {"ok": False, "reason": "synthetic fallback"}
         role = kwargs["role_name"]
-        status = {"architect": "planned", "implementer": "implemented", "reviewer": "approved"}[role]
+        status = {
+            "architect": "planned",
+            "implementer": "implemented",
+            "reviewer": "approved",
+        }[role]
         return {
             "ok": True,
             "run_id": f"provider-{len(calls)}",
@@ -175,19 +231,23 @@ def test_phase_strategies_support_fallback_and_multi_participant_review(
         max_rounds=0,
     )
     assert result["ok"] is True
-    assert calls == [
+    assert calls[:3] == [
         ("architect", "arch-failing"),
         ("architect", "arch-good"),
         ("implementer", "implementation"),
+    ]
+    assert set(calls[3:]) == {
         ("reviewer", "review-a"),
         ("reviewer", "review-b"),
-    ]
+    }
     review_step = next(step for step in result["steps"] if step["phase"] == "reviewer")
     assert len(review_step["profiles"]) == 2
     assert all(profile["status"] == "succeeded" for profile in review_step["profiles"])
 
 
-def test_multiple_write_profiles_cannot_use_all_strategy(tmp_path: Path, monkeypatch) -> None:
+def test_write_phase_must_resolve_to_exactly_one_profile(
+    tmp_path: Path, monkeypatch
+) -> None:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     cfg = load_config()
     cfg.execution_profiles = {
@@ -200,6 +260,14 @@ def test_multiple_write_profiles_cannot_use_all_strategy(tmp_path: Path, monkeyp
     try:
         role_execution_plan(cfg, "implementer", role)
     except ValueError as exc:
-        assert "cannot use strategy='all'" in str(exc)
+        assert "exactly one profile" in str(exc)
     else:
-        raise AssertionError("write-enabled multi-profile 'all' strategy must be rejected")
+        raise AssertionError("write-enabled multi-profile phases must be rejected")
+
+    role.strategy = "first-success"
+    try:
+        role_execution_plan(cfg, "implementer", role)
+    except ValueError as exc:
+        assert "exactly one profile" in str(exc)
+    else:
+        raise AssertionError("sequential fallback cannot introduce a second writer")

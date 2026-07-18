@@ -281,6 +281,27 @@ def provider_isolation_status(
 
     normalized_agent_transport = str(agent_transport or "").strip().lower()
     if agent_ref and normalized_agent_transport != "provider":
+        if normalized_agent_transport == "local-process":
+            normalized_sandbox = str(sandbox or "").strip().lower()
+            expected_sandbox = "workspace-write" if can_write else "read-only"
+            reasons = (
+                []
+                if normalized_sandbox == expected_sandbox
+                else ["runner-sandbox-mismatch"]
+            )
+            return {
+                "ok": not reasons,
+                "provider": provider,
+                "agent_ref": agent_ref,
+                "agent_transport": normalized_agent_transport,
+                "sandbox": normalized_sandbox,
+                "enforcement": (
+                    "local-runner-explicit-workspace"
+                    if can_write
+                    else "local-runner-read-only-snapshot"
+                ),
+                "reasons": reasons,
+            }
         if normalized_agent_transport == "http-json" and not can_write:
             return {
                 "ok": True,

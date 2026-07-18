@@ -1,5 +1,8 @@
 [tool.uv.workspace]
 members = [
   "router",
-  "facades/kiro/adapter"
+  "facades/kiro/adapter",
+  "sdks/python",
+  "tooling/agent-builder",
+  "runtimes/agent-runner"
 ]

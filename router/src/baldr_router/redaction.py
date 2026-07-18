@@ -26,15 +26,22 @@ _PATTERNS = (
         r"([^\"'\s,;\]\}]{6,})"
     ),
 )
-_SENSITIVE_KEYS = re.compile(r"(?i)(api[_-]?key|authorization|token|password|secret|credential)")
-_SAFE_SENSITIVE_KEYS = re.compile(r"(?i)(^|_)(input_tokens|output_tokens|cached_input_tokens|reasoning_output_tokens|token_count|tokens_used)$")
+_SENSITIVE_KEYS = re.compile(
+    r"(?i)(api[_-]?key|authorization|token|password|secret|credential)"
+)
+_SAFE_SENSITIVE_KEYS = re.compile(
+    r"(?i)(^|_)(input_tokens|output_tokens|cached_input_tokens|"
+    r"reasoning_output_tokens|token_count|tokens_used|write_authorization)$"
+)
 
 
 def known_secret_values(extra: Iterable[str] | None = None) -> tuple[str, ...]:
     values = {os.environ.get(name, "").strip() for name in _SECRET_ENV_NAMES}
     if extra:
         values.update(str(value).strip() for value in extra)
-    return tuple(sorted((value for value in values if len(value) >= 6), key=len, reverse=True))
+    return tuple(
+        sorted((value for value in values if len(value) >= 6), key=len, reverse=True)
+    )
 
 
 def redact_text(value: str, *, secrets: Iterable[str] | None = None) -> str:
@@ -43,7 +50,9 @@ def redact_text(value: str, *, secrets: Iterable[str] | None = None) -> str:
         text = text.replace(secret, REDACTED)
     for pattern in _PATTERNS:
         if pattern.groups >= 3:
-            text = pattern.sub(lambda match: f"{match.group(1)}{match.group(2)}{REDACTED}", text)
+            text = pattern.sub(
+                lambda match: f"{match.group(1)}{match.group(2)}{REDACTED}", text
+            )
         else:
             text = pattern.sub(REDACTED, text)
     return text

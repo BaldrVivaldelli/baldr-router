@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 from collections.abc import Mapping
 from pathlib import Path
@@ -20,6 +21,7 @@ from .agent_api import (
     ResolvedAgent,
 )
 from .agent_http import HttpJsonAgentConnector
+from .agent_execution import LocalProcessAgentConnector
 from .agent_manager import HttpAgentManagerResolver, agent_manager_status
 from .agent_registry import (
     CompositeAgentResolver,
@@ -27,6 +29,7 @@ from .agent_registry import (
     agent_registry_status,
 )
 from .config import RoleConfig, load_config
+from .run import run_command
 from .provider_api import ProviderRunRequest
 
 
@@ -40,6 +43,106 @@ def verify_kiro_agent_definition(
     """Verify and describe an optional file-backed Kiro definition attestation."""
 
     expected = str(target.get("definition_digest") or "").strip()
+    scope = str(target.get("definition_scope") or "").strip().lower()
+    if scope == "builtin":
+        if expected:
+            raise AgentContractError(
+                "Built-in Kiro agents cannot declare a file definition digest."
+            )
+        agent = str(target.get("agent") or "").strip()
+        expected_version = str(target.get("provider_version") or "").strip()
+        expected_fingerprint = str(target.get("source_fingerprint") or "").strip()
+        mapping_version = str(target.get("source_mapping_version") or "").strip()
+        if (
+            not agent
+            or agent in {".", ".."}
+            or "/" in agent
+            or "\\" in agent
+            or "\x00" in agent
+            or not expected_version
+            or len(expected_version) > 128
+            or mapping_version != "1"
+        ):
+            raise AgentContractError(
+                "Built-in Kiro agents require a safe name and pinned provider_version."
+            )
+        if (
+            len(expected_fingerprint) != 71
+            or not expected_fingerprint.startswith("sha256:")
+            or any(
+                character not in "0123456789abcdef"
+                for character in expected_fingerprint[7:]
+            )
+        ):
+            raise AgentContractError(
+                "Built-in Kiro agents require source_fingerprint=sha256:<64 lowercase hex>."
+            )
+        cfg = load_config()
+        version_result = run_command(
+            [cfg.kiro_cli.command, "--version"],
+            cwd=cwd,
+            env=os.environ.copy(),
+            timeout=10,
+            stdout_limit=4096,
+            stderr_limit=4096,
+        )
+        raw_version = str(
+            version_result.get("stdout") or version_result.get("stderr") or ""
+        ).strip()
+        actual_version = raw_version.splitlines()[0][:128] if raw_version else ""
+        if version_result.get("ok") is not True or actual_version != expected_version:
+            raise AgentDigestMismatchError(
+                f"Pinned Kiro provider version is unavailable for built-in agent {agent!r}."
+            )
+        identity = json.dumps(
+            {
+                "mapping_version": 1,
+                "provider": "kiro-cli",
+                "provider_version": actual_version,
+                "agent": agent,
+                "kind": "builtin",
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        actual_fingerprint = f"sha256:{hashlib.sha256(identity).hexdigest()}"
+        if actual_fingerprint != expected_fingerprint:
+            raise AgentDigestMismatchError(
+                f"Pinned Kiro built-in identity changed for agent {agent!r}."
+            )
+        list_result = run_command(
+            [cfg.kiro_cli.command, "agent", "list"],
+            cwd=cwd,
+            env=os.environ.copy(),
+            timeout=15,
+            stdout_limit=256 * 1024,
+            stderr_limit=64 * 1024,
+        )
+        if list_result.get("ok") is not True:
+            raise AgentDigestMismatchError(
+                f"Kiro could not verify built-in agent {agent!r}."
+            )
+        from .agent_sources import parse_kiro_agent_list
+
+        list_output = "\n".join(
+            part
+            for part in (
+                str(list_result.get("stdout") or "").strip(),
+                str(list_result.get("stderr") or "").strip(),
+            )
+            if part
+        )
+        builtins = {name for name, _ in parse_kiro_agent_list(list_output)}
+        if agent not in builtins:
+            raise AgentDigestMismatchError(
+                f"Pinned Kiro built-in agent is unavailable: {agent!r}."
+            )
+        return {
+            "definition_scope": "builtin",
+            "provider_version": actual_version,
+            "source_fingerprint": actual_fingerprint,
+        }
     if not expected:
         return {}
     if (
@@ -61,7 +164,6 @@ def verify_kiro_agent_definition(
         raise AgentContractError(
             "Attested Kiro agents require a safe target.agent name."
         )
-    scope = str(target.get("definition_scope") or "").strip().lower()
     if scope not in {"global", "workspace"}:
         raise AgentContractError(
             "Attested Kiro agents require definition_scope=global or workspace."
@@ -190,7 +292,9 @@ class AgentGateway:
         context: AgentResolutionContext | None = None,
         expected_digest: str = "",
     ) -> ResolvedAgent:
-        parsed = reference if isinstance(reference, AgentRef) else AgentRef.parse(reference)
+        parsed = (
+            reference if isinstance(reference, AgentRef) else AgentRef.parse(reference)
+        )
         return self.resolver.resolve(
             parsed,
             context=context or AgentResolutionContext(),
@@ -312,6 +416,7 @@ def get_agent_gateway() -> AgentGateway:
             resolver=CompositeAgentResolver(resolvers),
             connectors=[
                 ProviderAgentConnector(get_provider_registry),
+                LocalProcessAgentConnector(),
                 HttpJsonAgentConnector(),
             ],
         )
@@ -423,9 +528,7 @@ def configured_agent_bindings_status(
                             step_name=str(role_name),
                             requested_capabilities=requested_capabilities,
                         ),
-                        expected_digest=str(
-                            profile.get("agent_manifest_digest") or ""
-                        ),
+                        expected_digest=str(profile.get("agent_manifest_digest") or ""),
                     )
                 )
                 item["ok"] = True

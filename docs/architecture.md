@@ -119,17 +119,17 @@ The workflow snapshot freezes the resolved execution profiles, provider/model se
 
 Each phase references one or many named execution profiles. A single shared profile can back all phases, or architecture/implementation/review can independently use n/m/l profiles. Provider sessions are keyed by scope, workspace/run, role, provider, model/agent, and profile.
 
-El code plane usa **Pedir autorización** por defecto sin cambiar el alcance elegido por el usuario:
+El code plane usa **Trabajar directamente** por defecto sin cambiar el alcance elegido por el usuario:
 
 ```text
 arquitectura
   -> sandbox de solo lectura sobre el workspace elegido
 
-autorización concedida
+implementación
   -> sandbox workspace-write sobre ese mismo workspace + journal durable
 ```
 
-Todos los providers reciben sólo la ruta seleccionada. La arquitectura no puede escribir; cuando el plan requiere archivos, el run se pausa y persiste una decisión explícita. Después de autorizar, la implementación escribe directamente y el reviewer comprueba el estado visible en la misma carpeta. Los attempts, leases, checkpoints y eventos permanecen durables; una escritura interrumpida con efectos desconocidos exige reconciliación y nunca se repite automáticamente.
+Todos los providers reciben sólo la ruta seleccionada. La arquitectura no puede escribir; la implementación escribe directamente y el reviewer comprueba el estado visible en la misma carpeta. `automatic` conserva la pausa opcional para quien la elija explícitamente. Los attempts, leases, checkpoints y eventos permanecen durables; una escritura interrumpida con efectos desconocidos exige reconciliación y nunca se repite automáticamente.
 
 Los worktrees y shadows siguen disponibles para runs aislados existentes o configuraciones avanzadas. En esos modos, los manifests, blobs y journals conservan sus garantías de publicación y recuperación, pero no forman parte del camino predeterminado autorizado.
 

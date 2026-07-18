@@ -1,0 +1,13 @@
+{
+  "name": "baldr-polyglot-workspace",
+  "private": true,
+  "workspaces": [
+    "sdks/typescript",
+    "tooling/agent-builder-typescript"
+  ],
+  "scripts": {
+    "build:agents": "npm run build --workspace @baldr/agent-sdk && npm run build --workspace @baldr/agent-builder-typescript",
+    "check:agents": "npm run check --workspace @baldr/agent-sdk && npm run check --workspace @baldr/agent-builder-typescript",
+    "test:agents": "npm test --workspace @baldr/agent-sdk && npm test --workspace @baldr/agent-builder-typescript"
+  }
+}

@@ -185,7 +185,7 @@ function safetyModeLabel(value: string): string {
     worktree: 'Copia aislada',
     current: 'Trabajar directamente',
     'non-git': 'Sin protección',
-  } as Record<string, string>)[value] ?? 'Pedir autorización';
+  } as Record<string, string>)[value] ?? 'Trabajar directamente';
 }
 
 function presetModeLabel(value: string): string {
@@ -812,6 +812,19 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
     return asItems(workbench.items).find((item) => String(item.id) === this.selectedItemId);
   }
 
+  private currentRoleProfiles(): Record<string, string[]> {
+    const preferences = record(record(this.lastStatus.workbench).preferences);
+    const selectedByRole = record(preferences.role_profiles);
+    const roleProfiles: Record<string, string[]> = {};
+    for (const role of BALDR_ROLES) {
+      const selected = selectedByRole[role];
+      if (Array.isArray(selected) && selected.length) {
+        roleProfiles[role] = selected.map(String);
+      }
+    }
+    return roleProfiles;
+  }
+
   private async itemAction(action: string, itemId = this.selectedItemId): Promise<void> {
     if (!itemId) {
       void vscode.window.showInformationMessage('Elegí una sesión primero.');
@@ -819,7 +832,11 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
     }
     const root = this.requireWorkspace();
     if (action === 'start') {
-      this.launchOperation('Iniciando la sesión…', () => this.runtime.startWorkItem(root, itemId));
+      this.launchOperation('Iniciando la sesión…', () => this.runtime.startWorkItem(
+        root,
+        itemId,
+        { roleProfiles: this.currentRoleProfiles() },
+      ));
       return;
     }
     if (action === 'cancel') {
@@ -1072,10 +1089,10 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
 
   private async chooseSafetyMode(): Promise<void> {
     const preference = record(record(this.lastStatus.workbench).preferences);
-    const current = text(preference.safety_mode, 'automatic');
+    const current = text(preference.safety_mode, 'current');
     const selected = await vscode.window.showQuickPick([
-      { id: 'automatic', label: '$(shield) Pedir autorización', description: 'Recomendada: planifica en solo lectura y pregunta antes de modificar esta carpeta' },
-      { id: 'current', label: 'Trabajar directamente', description: 'Permite cambios directos sin una pausa de autorización por tarea' },
+      { id: 'current', label: '$(shield) Trabajar directamente', description: 'Recomendada: permite cambios directos sin una pausa de autorización por tarea' },
+      { id: 'automatic', label: 'Pedir autorización', description: 'Planifica en solo lectura y pregunta antes de modificar esta carpeta' },
       { id: 'non-git', label: 'Sin protección', description: 'Trabaja directamente, sin exigir Git y sin recuperación automática' },
     ], { title: 'Protección de cambios', placeHolder: `Actual: ${safetyModeLabel(current)}`, ignoreFocusOut: true });
     if (selected) await this.setSafetyMode(selected.id as SafetyMode);
@@ -1163,46 +1180,39 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
   private async chooseRoleProfiles(): Promise<void> {
     const choice = await vscode.window.showQuickPick([
       {
-        id: 'codex-models',
-        label: '$(sparkle) Elegir modelos y variantes de Codex',
-        description: 'Sol, Terra, Luna y los niveles disponibles para cada uno',
+        id: 'automatic',
+        label: '$(sparkle) Automático (recomendado)',
+        description: 'Baldr elige agentes compatibles y usa un respaldo si hace falta',
       },
       {
-        id: 'saved',
-        label: '$(bookmark) Usar una configuración guardada',
-        description: 'Elegir entre las opciones que ya tenés preparadas',
+        id: 'per-stage',
+        label: '$(remote-explorer) Elegir por etapa',
+        description: 'Fijar un agente registrado sólo donde lo necesites',
       },
       {
-        id: 'external-agents',
-        label: '$(remote-explorer) Usar un agente externo registrado',
-        description: 'Consultar el catálogo y asignarlo sin editar archivos de configuración',
-      },
-      {
-        id: 'manage-agents',
-        label: '$(server-process) Administrar agentes externos',
-        description: 'Registrar versiones, inspeccionar, habilitar, deshabilitar o eliminar',
-      },
-      {
-        id: 'restore-provider',
-        label: '$(discard) Volver a Codex o Kiro normal',
-        description: 'Quitar el agente externo de una etapa sin afectar las demás',
-      },
-      {
-        id: 'advanced',
-        label: '$(settings-gear) Crear una configuración avanzada',
-        description: 'Elegir otro proveedor o escribir los datos manualmente',
+        id: 'normal',
+        label: '$(organization) Codex o Kiro normal',
+        description: 'Elegir el proveedor habitual de una etapa',
       },
     ], {
       title: 'Equipo de Baldr',
-      placeHolder: 'Elegí cómo querés configurar el equipo',
+      placeHolder: 'Elegí qué querés hacer',
       ignoreFocusOut: true,
     });
-    if (choice?.id === 'codex-models') await this.chooseCodexTeamModels();
-    else if (choice?.id === 'saved') await this.chooseSavedRoleProfiles();
-    else if (choice?.id === 'external-agents') await this.chooseExternalAgent();
-    else if (choice?.id === 'manage-agents') await this.manageExternalAgents();
-    else if (choice?.id === 'restore-provider') await this.restoreStandardProvider();
-    else if (choice?.id === 'advanced') await this.createExecutionProfile();
+    if (choice?.id === 'automatic') {
+      const root = this.requireWorkspace();
+      const updated = await this.withProgress(
+        'Activando el equipo automático…',
+        () => this.runtime.setWorkspacePreferences(root, {
+          teamMode: 'automatic',
+          agentOverrides: {},
+        }),
+      );
+      if (updated.ok === false) throw new Error(this.resultReason(updated));
+      await this.refresh();
+      void vscode.window.showInformationMessage('Baldr elegirá automáticamente el mejor agente compatible para cada etapa.');
+    } else if (choice?.id === 'per-stage') await this.chooseExternalAgent();
+    else if (choice?.id === 'normal') await this.restoreStandardProvider();
   }
 
   private async chooseExternalAgent(): Promise<void> {
@@ -1241,8 +1251,12 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
       .map(record)
       .filter((agent) => {
         const capabilities = Array.isArray(agent.capabilities) ? agent.capabilities.map(String) : [];
-        return capabilities.includes('workspace.read')
-          && (!needsWrite || (capabilities.includes('workspace.write') && text(agent.effect_mode) === 'workspace-write'));
+        if (agent.enabled === false) return false;
+        if (!capabilities.includes('workspace.read')) return false;
+        if (needsWrite) {
+          return capabilities.includes('workspace.write') && text(agent.effect_mode) === 'workspace-write';
+        }
+        return true;
       });
     if (!agents.length) {
       void vscode.window.showInformationMessage(
@@ -1255,19 +1269,27 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
     const selected = await vscode.window.showQuickPick(agents.map((agent) => {
       const ready = agent.ready !== false && agent.enabled !== false;
       const lastSuccess = record(agent.last_success);
+      const namespace = text(agent.namespace);
+      const agentName = text(agent.name);
+      const displayName = namespace === 'codex'
+        ? `Codex${agentName ? ` · ${agentName}` : ''}`
+        : namespace === 'kiro'
+          ? `Kiro${agentName ? ` · ${agentName}` : ''}`
+          : text(agent.name, text(agent.ref));
+      const canWrite = text(agent.effect_mode) === 'workspace-write';
+      const accessLabel = canWrite ? 'Lectura y escritura' : 'Solo lectura';
       const stateLabel = agent.enabled === false
         ? 'Deshabilitado'
         : ready ? 'Listo' : 'No disponible';
       return {
       agent,
-      label: `${ready ? '$(check)' : '$(warning)'} ${text(agent.ref)}`,
+      label: `${ready ? '$(check)' : '$(warning)'} ${displayName} — ${accessLabel}`,
       description: [
         `v${text(agent.version)}`,
         stateLabel,
-        text(agent.owner),
-        text(agent.transport),
       ].filter(Boolean).join(' · '),
       detail: [
+        `AgentRef: ${text(agent.ref)}`,
         `Digest: ${text(agent.digest)}`,
         lastSuccess.run_id ? `Último éxito: ${text(lastSuccess.updated_at)} · ${text(lastSuccess.run_id)}` : '',
         ready ? '' : `Motivo: ${text(agent.reason, 'agente no disponible')}`,
@@ -1287,43 +1309,21 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
     }
 
     const reference = text(selected.agent.ref);
-    const digest = text(selected.agent.digest);
-    const transport = text(selected.agent.transport);
-    const suggestedName = `agent-${reference.replace('://', '-').replace('@', '-').replace(/[^A-Za-z0-9._-]/g, '-')}`.slice(0, 64);
-    const profileName = await vscode.window.showInputBox({
-      title: 'Nombre de la configuración',
-      value: suggestedName,
-      validateInput: (value) => /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(value)
-        ? undefined
-        : 'Usá entre 1 y 64 letras, números, puntos, guiones bajos o guiones.',
-      ignoreFocusOut: true,
-    });
-    if (!profileName) return;
-
     const root = this.requireWorkspace();
     const preferences = record(record(this.lastStatus.workbench).preferences);
-    const selectedByRole = record(preferences.role_profiles);
-    const roleProfiles: Record<string, string[]> = {};
-    for (const currentRole of BALDR_ROLES) {
-      const current = selectedByRole[currentRole];
-      if (Array.isArray(current) && current.length) roleProfiles[currentRole] = current.map(String);
-    }
-    roleProfiles[role.id] = [profileName];
-    await this.withProgress('Guardando el agente externo…', async () => {
-      const saved = await this.runtime.upsertExecutionProfile(root, {
-        name: profileName,
-        provider: `external-${transport}`,
-        agent_ref: reference,
-        agent_manifest_digest: digest,
-        description: `Agente externo ${reference}.`,
-      });
-      if (saved.ok === false) throw new Error(this.resultReason(saved));
-      const updated = await this.runtime.setWorkspacePreferences(root, {
-        preset: 'custom',
-        roleProfiles,
-      });
-      if (updated.ok === false) throw new Error(this.resultReason(updated));
-    });
+    const agentOverrides = Object.fromEntries(
+      Object.entries(record(preferences.agent_overrides))
+        .filter(([key, value]) => BALDR_ROLES.includes(key as BaldrRole) && text(value))
+        .map(([key, value]) => [key, text(value)]),
+    );
+    agentOverrides[role.id] = reference;
+    const updated = await this.withProgress('Guardando el agente para esta etapa…', () => (
+      this.runtime.setWorkspacePreferences(root, {
+        teamMode: 'automatic',
+        agentOverrides,
+      })
+    ));
+    if (updated.ok === false) throw new Error(this.resultReason(updated));
     await this.refresh();
     void vscode.window.showInformationMessage(`${reference} quedó asignado a ${role.label.toLowerCase()}.`);
   }
@@ -1499,7 +1499,12 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
         description: `Proveedor ${provider.label} sin AgentRef externo.`,
       });
       if (saved.ok === false) throw new Error(this.resultReason(saved));
-      const updated = await this.runtime.setWorkspacePreferences(root, { preset: 'custom', roleProfiles });
+      const updated = await this.runtime.setWorkspacePreferences(root, {
+        preset: 'custom',
+        roleProfiles,
+        teamMode: 'configured',
+        agentOverrides: {},
+      });
       if (updated.ok === false) throw new Error(this.resultReason(updated));
     });
     await this.refresh();
@@ -2256,7 +2261,7 @@ textarea::placeholder { color: var(--vscode-input-placeholderForeground); opacit
       <div class="composer-row">
         <button type="button" class="plus" id="plus" title="Agregar archivos u opciones" aria-label="Agregar archivos u opciones" aria-expanded="false" aria-controls="plusMenu"><svg class="button-icon" viewBox="0 0 16 16" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" d="M8 3v10M3 8h10"/></svg></button>
         <div class="chips" aria-label="Opciones de la sesión">
-          <button type="button" class="chip" data-chip="git" id="gitChip"><svg class="chip-icon" viewBox="0 0 16 16" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.15" stroke-linejoin="round" d="M8 1.8 12.8 3.4v3.45c0 3.15-1.9 5.65-4.8 7.35-2.9-1.7-4.8-4.2-4.8-7.35V3.4L8 1.8Z"/></svg><span id="gitChipLabel">Pedir autorización</span></button>
+          <button type="button" class="chip" data-chip="git" id="gitChip"><svg class="chip-icon" viewBox="0 0 16 16" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.15" stroke-linejoin="round" d="M8 1.8 12.8 3.4v3.45c0 3.15-1.9 5.65-4.8 7.35-2.9-1.7-4.8-4.2-4.8-7.35V3.4L8 1.8Z"/></svg><span id="gitChipLabel">Trabajar directamente</span></button>
           <button type="button" class="chip" data-chip="preset" id="presetChip"><svg class="chip-icon" viewBox="0 0 16 16" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.15" stroke-linecap="round" d="M3 4h10M3 8h10M3 12h10M6 2.8v2.4M10 6.8v2.4M7 10.8v2.4"/></svg><span id="presetChipLabel">Estándar</span></button>
           <button type="button" class="chip" data-chip="roles" id="rolesChip"><svg class="chip-icon" viewBox="0 0 16 16" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.15" stroke-linecap="round" stroke-linejoin="round" d="M6.2 7a2.2 2.2 0 1 0 0-4.4A2.2 2.2 0 0 0 6.2 7ZM2.5 13.2c.25-2.55 1.5-3.8 3.7-3.8s3.45 1.25 3.7 3.8M10.2 3.2a2 2 0 0 1 0 3.8M10.9 9.5c1.55.25 2.4 1.45 2.6 3.4"/></svg><span id="rolesChipLabel">Equipo estándar</span></button>
           <button type="button" class="chip" data-chip="context" id="contextChip"><svg class="chip-icon" viewBox="0 0 16 16" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.15" stroke-linecap="round" stroke-linejoin="round" d="M8 1.8c.35 2.65 1.55 3.85 4.2 4.2C9.55 6.35 8.35 7.55 8 10.2 7.65 7.55 6.45 6.35 3.8 6 6.45 5.65 7.65 4.45 8 1.8ZM12.2 10.2c.18 1.35.85 2.02 2.2 2.2-1.35.18-2.02.85-2.2 2.2-.18-1.35-.85-2.02-2.2-2.2 1.35-.18 2.02-.85 2.2-2.2Z"/></svg><span id="contextChipLabel">Ayuda automática</span></button>
@@ -2300,7 +2305,7 @@ const commands = () => ((workbench().options || {}).slash_commands || [
 function statusClass(status){ return String(status || 'draft').replace(/[^a-z_]/g,'_'); }
 function statusLabel(status){ const labels={draft:'Pendiente',queued:'En espera',running:'En curso',cancelling:'Cancelando',completed:'Lista',archived:'Archivada',failed:'Necesita atención',cancelled:'Cancelada',needs_attention:'Necesita atención'}; return labels[String(status || 'draft')] || String(status || 'Pendiente'); }
 function presetLabel(value){ return ({fast:'Rápido',balanced:'Estándar',deep:'Detallado',custom:'A medida'}[value]||'Estándar'); }
-function safetyLabel(value){ return ({automatic:'Pedir autorización',worktree:'Copia aislada',current:'Trabajar directamente','non-git':'Sin protección'}[value]||'Pedir autorización'); }
+function safetyLabel(value){ return ({automatic:'Pedir autorización',worktree:'Copia aislada',current:'Trabajar directamente','non-git':'Sin protección'}[value]||'Trabajar directamente'); }
 function contextLabel(value){ return ({auto:'Ayuda automática',on:'Ayuda activa',off:'Ayuda desactivada'}[value]||'Ayuda automática'); }
 function itemErrorMessage(item){ if(item.error_code==='workspace_reconciliation_required'&&item.safety_mode==='non-git')return 'La sesión se detuvo al intentar crear un respaldo Git que esta carpeta no usa. Tus archivos siguen en la carpeta: revisá las opciones para continuar con ellos.'; return item.error_reason||item.error_code||''; }
 function phaseLabel(value){ return ({architecture:'Planificación',architect:'Planificación',implementation:'Ejecución',implementer:'Ejecución',review:'Revisión',reviewer:'Revisión'}[String(value||'').toLowerCase()]||String(value||'Etapa')); }
@@ -2429,7 +2434,7 @@ function sessionProgressHtml(stages,presentation,expanded){if(!stages.length)ret
 function shortModelLabel(value){ const raw=String(value||'').trim(); const named=raw.match(/^gpt-[0-9]+(?:[.][0-9]+)*-(sol|terra|luna|spark)$/i); if(named)return named[1].charAt(0).toUpperCase()+named[1].slice(1).toLowerCase(); const version=raw.match(/^gpt-([0-9]+(?:[.][0-9]+)*)(?:-(mini))?$/i); if(version)return 'GPT-'+version[1]+(version[2]?' Mini':''); return raw||''; }
 function effortChipLabel(value){ return ({minimal:'Mínimo',low:'Bajo',medium:'Medio',high:'Alto',xhigh:'Muy alto',max:'Máximo',ultra:'Ultra'}[String(value||'').toLowerCase()]||String(value||'')); }
 function configuredRole(role){ const wb=workbench(); const pref=wb.preferences||{}; const profiles=wb.profiles||{}; const selected=(((pref.role_profiles||{})[role]||[])[0]); if(selected&&profiles.execution_profiles&&profiles.execution_profiles[selected])return profiles.execution_profiles[selected]; return (((profiles.resolved_roles||{})[role]||[])[0])||{}; }
-function renderChips(){ const pref=workbench().preferences||{}; const safety=safetyLabel(pref.safety_mode); const preset=presetLabel(pref.preset); const context=contextLabel(pref.context_mode); const roleNames={architect:'Planificación',implementer:'Ejecución',reviewer:'Revisión'}; const roleConfigurations=['architect','implementer','reviewer'].map(role=>{const config=configuredRole(role);const raw=config.agent_ref||config.model||config.agent||config.provider||'';return {role,label:shortModelLabel(raw),effort:effortChipLabel(config.reasoning_effort||config.effort)};}); const modelNames=[...new Set(roleConfigurations.map(item=>item.label).filter(Boolean))]; const team=modelNames.length?modelNames.join(' · '):'Equipo estándar'; const teamDetail=roleConfigurations.filter(item=>item.label).map(item=>roleNames[item.role]+': '+item.label+(item.effort?' ('+item.effort+')':'')).join(' · '); els.gitChipLabel.textContent=safety; els.gitChip.title='Uso de Git y protección: '+safety; els.gitChip.setAttribute('aria-label',els.gitChip.title); els.presetChipLabel.textContent=preset; els.presetChip.title='Nivel de detalle: '+preset; els.presetChip.setAttribute('aria-label',els.presetChip.title); els.rolesChipLabel.textContent=team; els.rolesChip.title='Equipo de Baldr: '+(teamDetail||team); els.rolesChip.setAttribute('aria-label',els.rolesChip.title); els.contextChipLabel.textContent=context; els.contextChip.title='Ayuda adicional: '+context; els.contextChip.setAttribute('aria-label',els.contextChip.title); }
+function renderChips(){ const pref=workbench().preferences||{}; const safety=safetyLabel(pref.safety_mode); const preset=presetLabel(pref.preset); const context=contextLabel(pref.context_mode); const roleNames={architect:'Planificación',implementer:'Ejecución',reviewer:'Revisión'}; const roleConfigurations=['architect','implementer','reviewer'].map(role=>{const config=configuredRole(role);const raw=config.agent_ref||config.model||config.agent||config.provider||'';return {role,label:shortModelLabel(raw),effort:effortChipLabel(config.reasoning_effort||config.effort)};}); const modelNames=[...new Set(roleConfigurations.map(item=>item.label).filter(Boolean))]; const configuredTeam=modelNames.length?modelNames.join(' · '):'Equipo estándar'; const automatic=String(pref.team_mode||'')==='automatic'; const fixedCount=Object.keys(pref.agent_overrides||{}).length; const team=automatic?(fixedCount?'Automático · '+fixedCount+' fijo'+(fixedCount===1?'':'s'):'Automático'):configuredTeam; const configuredDetail=roleConfigurations.filter(item=>item.label).map(item=>roleNames[item.role]+': '+item.label+(item.effort?' ('+item.effort+')':'')).join(' · '); const teamDetail=automatic?(fixedCount?'Selección automática con '+fixedCount+' etapa'+(fixedCount===1?' fija':'s fijas'):'Selección automática por compatibilidad y disponibilidad'):configuredDetail; els.gitChipLabel.textContent=safety; els.gitChip.title='Uso de Git y protección: '+safety; els.gitChip.setAttribute('aria-label',els.gitChip.title); els.presetChipLabel.textContent=preset; els.presetChip.title='Nivel de detalle: '+preset; els.presetChip.setAttribute('aria-label',els.presetChip.title); els.rolesChipLabel.textContent=team; els.rolesChip.title='Equipo de Baldr: '+(teamDetail||team); els.rolesChip.setAttribute('aria-label',els.rolesChip.title); els.contextChipLabel.textContent=context; els.contextChip.title='Ayuda adicional: '+context; els.contextChip.setAttribute('aria-label',els.contextChip.title); }
 function renderPending(){ const items=(state.pending||{}).attachments||[];const key=items.map(item=>[item.kind,item.label].join(':')).join('|');if(key===lastPendingKey)return;lastPendingKey=key;const focusedIndex=els.attachments.contains(document.activeElement)?String(document.activeElement?.dataset?.removePending||''):''; const kindLabels={file:'Archivo',folder:'Carpeta',selection:'Selección'}; els.attachments.innerHTML=items.map((item,index)=>'<div class="attachment"><div class="attachment-icon" aria-hidden="true">'+({file:'▤',folder:'◇',selection:'≡'}[item.kind]||'▤')+'</div><div><div class="attachment-label" title="'+escapeHtml(item.label||'Archivo')+'">'+escapeHtml(item.label||'Archivo')+'</div><div class="attachment-kind">'+escapeHtml(kindLabels[item.kind]||'Archivo')+'</div></div><button type="button" class="remove-attachment" data-remove-pending="'+index+'" title="Quitar" aria-label="Quitar '+escapeHtml(item.label||'archivo')+'">×</button></div>').join(''); els.attachments.querySelectorAll('[data-remove-pending]').forEach(node=>node.addEventListener('click',()=>post({type:'removePending',index:Number(node.dataset.removePending)})));if(focusedIndex){const focusTarget=[...els.attachments.querySelectorAll('[data-remove-pending]')].find(node=>node.dataset.removePending===focusedIndex);focusTarget?.focus({preventScroll:true});} }
 function renderComposerContext(){const item=selected();const continuing=Boolean(item&&(item.allowed_actions||[]).includes('continue'));els.input.placeholder=continuing?'Continuar esta conversación…':'Escribí qué necesitás…';els.input.setAttribute('aria-label',continuing?'Continuar conversación con Baldr':'Nuevo pedido para Baldr');const active=String(state.activeContext||'');els.activeContext.textContent=active?'Contexto actual: '+active:'';els.activeContext.title=active?'Baldr incluirá este archivo o selección al enviar':'';}
 function updateDurations(){ const stages=selected()?.presentation?.stages||[];stages.forEach(stage=>{const node=els.content.querySelector('[data-stage-duration="'+stage.id+'"]');if(node)node.textContent=stage.durationLabel||'';}); }

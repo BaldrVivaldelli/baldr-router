@@ -305,12 +305,16 @@ def _safe_file_changes(value: Any) -> list[dict[str, Any]]:
                 "kind": kind,
                 "additions": (
                     min(additions, 1_000_000_000)
-                    if isinstance(additions, int) and not isinstance(additions, bool) and additions >= 0
+                    if isinstance(additions, int)
+                    and not isinstance(additions, bool)
+                    and additions >= 0
                     else None
                 ),
                 "deletions": (
                     min(deletions, 1_000_000_000)
-                    if isinstance(deletions, int) and not isinstance(deletions, bool) and deletions >= 0
+                    if isinstance(deletions, int)
+                    and not isinstance(deletions, bool)
+                    and deletions >= 0
                     else None
                 ),
                 "evidence": evidence
@@ -383,9 +387,7 @@ def _deliverable_descriptors(value: Any) -> list[dict[str, Any]]:
                 "redacted": True,
                 "created_at": _timestamp(descriptor.get("created_at")),
                 "preview": preview,
-                "entry_count": _integer(
-                    descriptor.get("entry_count"), maximum=100_000
-                ),
+                "entry_count": _integer(descriptor.get("entry_count"), maximum=100_000),
                 "action": "inspect-item-phase",
             }
         )
@@ -479,9 +481,7 @@ def normalize_public_report(value: Any) -> tuple[dict[str, Any] | None, dict[str
         "work_next": _safe_string_list(report.get("work_next")),
         "findings": _safe_string_list(report.get("findings")),
         "corrections": _safe_string_list(report.get("corrections")),
-        "verification_evidence": _safe_string_list(
-            report.get("verification_evidence")
-        ),
+        "verification_evidence": _safe_string_list(report.get("verification_evidence")),
         "changes_added": _safe_string_list(report.get("changes_added")),
         "changes_modified": _safe_string_list(report.get("changes_modified")),
         "changes_removed": _safe_string_list(report.get("changes_removed")),
@@ -602,7 +602,11 @@ def _retryability(
     current_step_id = run.get("current_step_id")
     if isinstance(current_step_id, str):
         current = next(
-            (step for step in reversed(ordered_steps) if step.get("id") == current_step_id),
+            (
+                step
+                for step in reversed(ordered_steps)
+                if step.get("id") == current_step_id
+            ),
             None,
         )
         if current is not None:
@@ -722,12 +726,17 @@ def _stage_projection(stage_id: str, steps: list[dict[str, Any]]) -> dict[str, A
     latest_report = current.get("report")
     latest_technical = _record(current.get("technical"))
     started_at = _first_timestamp([step.get("started_at") for step in ordered])
-    completed_at = current.get("completed_at") if state in {
-        "complete",
-        "attention",
-        "cancelled",
-        "skipped",
-    } else None
+    completed_at = (
+        current.get("completed_at")
+        if state
+        in {
+            "complete",
+            "attention",
+            "cancelled",
+            "skipped",
+        }
+        else None
+    )
     participants_by_identity: dict[tuple[Any, ...], dict[str, Any]] = {}
     for entry in full_history:
         for raw_participant in _items(entry["technical"].get("participants")):
@@ -1177,25 +1186,32 @@ def _attention(
             "Tus archivos cambiaron mientras Baldr trabajaba; no los sobrescribimos."
         )
         title = "Tus archivos cambiaron durante el trabajo"
-    elif error_code in {
-        "workflow_phase_failed",
-        "phase_report_blocked",
-        "architecture_conflict",
-    } and stage_name:
+    elif (
+        error_code
+        in {
+            "workflow_phase_failed",
+            "phase_report_blocked",
+            "architecture_conflict",
+        }
+        and stage_name
+    ):
         title = f"{stage_name} se detuvo"
-        summary = (
-            f"{stage_name} se detuvo por el motivo que aparece abajo. "
-            + (
-                "No se llegó a modificar ningún archivo."
-                if active_stage == "planning"
-                else "Las etapas siguientes no se realizaron."
-            )
+        summary = f"{stage_name} se detuvo por el motivo que aparece abajo. " + (
+            "No se llegó a modificar ningún archivo."
+            if active_stage == "planning"
+            else "Las etapas siguientes no se realizaron."
         )
     elif error_code == "phase_min_successes_not_met" and stage_name:
         title = f"No se pudo completar {stage_name.lower()}"
         summary = (
             f"Ninguna de las configuraciones elegidas pudo completar "
             f"{stage_name.lower()}. Revisá el equipo configurado o volvé a intentarlo."
+        )
+    elif error_code == "agent_not_found":
+        title = "El agente elegido ya no está disponible"
+        summary = (
+            "La sesión no llegó a empezar y no modificó ningún archivo. "
+            "Volvé a intentarlo para usar el equipo configurado actualmente."
         )
     elif kind == "blocked" and (
         error_code.startswith("provider_")
@@ -1216,7 +1232,9 @@ def _attention(
             blockers.extend(_safe_string_list(report.get("blockers"), limit=12))
             if blockers:
                 break
-    raw_allowed_actions = [_token(action) for action in _items(item.get("allowed_actions"))]
+    raw_allowed_actions = [
+        _token(action) for action in _items(item.get("allowed_actions"))
+    ]
     legacy_write_authorization = (
         error_code in {"workflow_phase_failed", "phase_report_blocked"}
         and "authorize_changes" in raw_allowed_actions
@@ -1256,6 +1274,8 @@ def _attention(
         action_label = "Cerrar esta sesión"
     elif kind == "reconciliation":
         action_label = "Revisar opciones"
+    elif retryable is True and any(action["id"] == "start" for action in actions):
+        action_label = "Volver a intentar"
     return {
         "required": True,
         "kind": kind,
@@ -1418,7 +1438,9 @@ def _final_report(
                 if report
                 for entry in _items(report.get(field))
             ],
-            limit=100 if field in {"files_added", "files_modified", "files_deleted"} else 40,
+            limit=100
+            if field in {"files_added", "files_modified", "files_deleted"}
+            else 40,
         )
     file_changes = _execution_file_changes(snapshot)
     if not file_changes:
@@ -1531,18 +1553,14 @@ def project_work_item_progress(
     elif (
         overall == "attention"
         and run_status not in {"awaiting_reconciliation", "unknown", "interrupted"}
-        and not any(
-            stage["state"] == "attention" for stage in stage_map.values()
-        )
+        and not any(stage["state"] == "attention" for stage in stage_map.values())
     ):
         # Only attribute attention to a recorded current phase. Workflow-level
         # failures before/after phases remain global instead of blaming planning.
         if current_stage is not None:
             stage_map[current_stage]["state"] = "attention"
             stage_map[current_stage]["outcome"] = run_status or "failed"
-            stage_map[current_stage]["completed_at"] = _timestamp(
-                run.get("updated_at")
-            )
+            stage_map[current_stage]["completed_at"] = _timestamp(run.get("updated_at"))
 
     active_stage = _active_stage(overall, run, ordered_steps, stage_map)
     steps_by_id = {
@@ -1573,6 +1591,22 @@ def project_work_item_progress(
         [_record(event).get("created_at") for event in _items(snapshot.get("events"))]
     ) or _last_timestamp([run.get("updated_at"), item.get("updated_at")])
     retryable = _retryability(run, ordered_steps)
+    raw_allowed_actions = {
+        _token(action) for action in _items(item.get("allowed_actions"))
+    }
+    if (
+        retryable is None
+        and _token(item.get("status")) == "failed"
+        and "start" in raw_allowed_actions
+        and not item.get("current_run_id")
+        and not run.get("id")
+        and not ordered_steps
+    ):
+        # The provider/configuration preflight failed before Baldr created a
+        # durable run or entered a phase. There is no filesystem effect to
+        # repeat, so starting a new revision is safely retryable even though
+        # the short-lived facade result could not persist error.retryable.
+        retryable = True
     attention = _attention(item, run, stage_map, active_stage, retryable)
     final_report = _final_report(snapshot, stage_map)
     error_codes = sorted(
@@ -1663,7 +1697,14 @@ def compact_list_item(item_value: Mapping[str, Any] | None) -> dict[str, Any]:
     item = _record(item_value)
     return {
         key: item.get(key)
-        for key in ("id", "title", "status", "updated_at", "allowed_actions", "progress_summary")
+        for key in (
+            "id",
+            "title",
+            "status",
+            "updated_at",
+            "allowed_actions",
+            "progress_summary",
+        )
     }
 
 
@@ -1721,6 +1762,8 @@ def compact_preferences(value: Mapping[str, Any] | None) -> dict[str, Any] | Non
             "context_mode",
             "context7_policy",
             "role_profiles",
+            "team_mode",
+            "agent_overrides",
             "persisted",
             "non_git_confirmed",
         )
@@ -1732,9 +1775,9 @@ def compact_execution_profiles(value: Mapping[str, Any] | None) -> dict[str, Any
 
     profiles = _record(value)
     execution_profiles: dict[str, dict[str, Any]] = {}
-    for raw_name, raw_profile in list(_record(profiles.get("execution_profiles")).items())[
-        :100
-    ]:
+    for raw_name, raw_profile in list(
+        _record(profiles.get("execution_profiles")).items()
+    )[:100]:
         name = _identifier(raw_name, limit=64)
         profile = _record(raw_profile)
         if not name or not profile:
@@ -1742,9 +1785,7 @@ def compact_execution_profiles(value: Mapping[str, Any] | None) -> dict[str, Any
         execution_profiles[name] = {
             "provider": _safe_text(profile.get("provider"), limit=64),
             "model": _safe_text(profile.get("model"), limit=128),
-            "reasoning_effort": _safe_text(
-                profile.get("reasoning_effort"), limit=64
-            ),
+            "reasoning_effort": _safe_text(profile.get("reasoning_effort"), limit=64),
             "agent": _safe_text(profile.get("agent"), limit=128),
             "effort": _safe_text(profile.get("effort"), limit=64),
             "enabled": bool(profile.get("enabled", True)),
@@ -1787,9 +1828,7 @@ def compact_execution_profiles(value: Mapping[str, Any] | None) -> dict[str, Any
                     ),
                     "agent": _safe_text(profile.get("agent"), limit=128),
                     "effort": _safe_text(profile.get("effort"), limit=64),
-                    "description": _safe_text(
-                        profile.get("description"), limit=400
-                    ),
+                    "description": _safe_text(profile.get("description"), limit=400),
                 }
             )
         resolved_roles[role] = resolved

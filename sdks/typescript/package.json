@@ -1,0 +1,50 @@
+{
+  "name": "@baldr/agent-sdk",
+  "version": "0.19.0",
+  "description": "TypeScript authoring SDK for externally owned Baldr agents.",
+  "keywords": [
+    "agents",
+    "baldr",
+    "sdk"
+  ],
+  "homepage": "https://github.com/BaldrVivaldelli/baldr-router#readme",
+  "bugs": {
+    "url": "https://github.com/BaldrVivaldelli/baldr-router/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/BaldrVivaldelli/baldr-router.git",
+    "directory": "sdks/typescript"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p .",
+    "check": "tsc -p . --noEmit",
+    "test": "npm run build && node --test --test-concurrency=1 ./tests/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "typescript": "^5.9.3"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "license": "MIT"
+}

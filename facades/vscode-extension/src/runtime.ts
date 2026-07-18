@@ -240,6 +240,8 @@ export class BaldrRuntime {
       executionPreset?: 'fast' | 'balanced' | 'deep' | 'custom';
       contextMode?: 'auto' | 'on' | 'off';
       roleProfiles?: Record<string, string[]>;
+      teamMode?: 'automatic' | 'configured';
+      agentOverrides?: Record<string, string>;
       rememberWorkspace?: boolean;
       allowNonGit?: boolean;
       includeArchived?: boolean;
@@ -269,6 +271,7 @@ export class BaldrRuntime {
       if (options.executionPreset) args.push('--execution-preset', options.executionPreset);
       if (options.contextMode) args.push('--context-mode', options.contextMode);
       this.appendRoleProfiles(args, options.roleProfiles);
+      this.appendTeamSelection(args, options.teamMode, options.agentOverrides);
       if (options.allowNonGit) args.push('--allow-non-git');
       if (options.profileDefinition) {
         args.push('--profile-definition-json', JSON.stringify(options.profileDefinition));
@@ -290,6 +293,7 @@ export class BaldrRuntime {
       if (options.executionPreset) args.push('--execution-preset', options.executionPreset);
       if (options.contextMode) args.push('--context-mode', options.contextMode);
       this.appendRoleProfiles(args, options.roleProfiles);
+      this.appendTeamSelection(args, options.teamMode, options.agentOverrides);
       if (options.rememberWorkspace) args.push('--remember-workspace');
       if (options.allowNonGit) args.push('--allow-non-git');
       if (options.attachments) args.push('--attachments-json', JSON.stringify(options.attachments));
@@ -329,6 +333,24 @@ export class BaldrRuntime {
     }
   }
 
+  private appendTeamSelection(
+    args: string[],
+    mode: 'automatic' | 'configured' | undefined,
+    overrides: Record<string, string> | undefined,
+  ): void {
+    if (mode) args.push('--team-mode', mode);
+    if (!overrides) return;
+    let appended = false;
+    for (const role of ['architect', 'implementer', 'reviewer']) {
+      const reference = overrides[role]?.trim();
+      if (reference) {
+        args.push('--agent-override', `${role}=${reference}`);
+        appended = true;
+      }
+    }
+    if (!appended) args.push('--clear-agent-overrides');
+  }
+
   async workbenchStatus(
     workspaceRoot: string,
     workItemId?: string,
@@ -352,6 +374,8 @@ export class BaldrRuntime {
       executionPreset?: 'fast' | 'balanced' | 'deep' | 'custom';
       contextMode?: 'auto' | 'on' | 'off';
       roleProfiles?: Record<string, string[]>;
+      teamMode?: 'automatic' | 'configured';
+      agentOverrides?: Record<string, string>;
       allowNonGit?: boolean;
       profileDefinition?: JsonRecord;
     },
@@ -369,6 +393,8 @@ export class BaldrRuntime {
       executionPreset?: 'fast' | 'balanced' | 'deep' | 'custom';
       contextMode?: 'auto' | 'on' | 'off';
       roleProfiles?: Record<string, string[]>;
+      teamMode?: 'automatic' | 'configured';
+      agentOverrides?: Record<string, string>;
       allowNonGit?: boolean;
       rememberWorkspace?: boolean;
       attachments?: JsonRecord[];
@@ -387,12 +413,14 @@ export class BaldrRuntime {
   async startWorkItem(
     workspaceRoot: string,
     workItemId: string,
+    options: { roleProfiles?: Record<string, string[]> } = {},
     token?: vscode.CancellationToken,
   ): Promise<JsonRecord> {
     return this.runFacade('run', {
       workspaceRoot,
       workItemId,
       workItemAction: 'start-item',
+      roleProfiles: options.roleProfiles,
     }, token, true);
   }
 
@@ -528,6 +556,8 @@ export class BaldrRuntime {
       preset?: 'fast' | 'balanced' | 'deep' | 'custom';
       contextMode?: 'auto' | 'on' | 'off';
       roleProfiles?: Record<string, string[]>;
+      teamMode?: 'automatic' | 'configured';
+      agentOverrides?: Record<string, string>;
       allowNonGit?: boolean;
     },
     token?: vscode.CancellationToken,
@@ -537,6 +567,8 @@ export class BaldrRuntime {
       executionPreset: options.preset,
       contextMode: options.contextMode,
       roleProfiles: options.roleProfiles,
+      teamMode: options.teamMode,
+      agentOverrides: options.agentOverrides,
       allowNonGit: options.allowNonGit,
     }, token);
   }

@@ -86,17 +86,32 @@ sandbox = "workspace-write"
 profiles = ["review-a", "review-b"]
 strategy = "all"
 min_successes = 2
+min_approvals = 2
+max_concurrency = 2
 can_write = false
 sandbox = "read-only"
+
+[workflows.architect-implement-review]
+max_parallel_participants = 4
+max_participants_per_phase = 8
+max_total_participant_attempts = 24
 ```
 
 Reglas:
 
 - `first-success` prueba perfiles en orden hasta obtener un resultado válido;
-- `all` ejecuta todos los perfiles y consolida sus resultados;
-- una fase con escritura no puede usar `all` con múltiples participantes, evitando escritores concurrentes;
+- `all` ejecuta en paralelo los perfiles de sólo lectura, con concurrencia acotada, y consolida sus resultados en el orden configurado;
+- una fase con escritura debe resolver a exactamente un participante, independientemente de la estrategia;
+- `max_participants_per_phase` acota el fan-out y `max_total_participant_attempts` incluye fallbacks, rondas y reintentos durables;
+- si un participante de lectura falla, los demás pueden satisfacer `min_successes`/`min_approvals`; el fallo queda persistido como evidencia;
+- la cancelación se comprueba mientras Baldr espera participantes paralelos, termina procesos hijos y finaliza el run con fencing durable;
 - la precedencia es override de la ejecución, perfil del rol y finalmente default del provider;
 - el snapshot resuelto se congela al crear el workflow, por lo que un upgrade de configuración no cambia una ejecución ya iniciada.
+
+La política congelada implementa
+[`orchestration-policy-v1.schema.json`](../contracts/orchestration-policy-v1.schema.json)
+y declara los límites, la cardinalidad por rol y la regla
+`exactly-one-per-write-phase`.
 
 ## Tres planos de durabilidad
 
@@ -217,18 +232,17 @@ review report
 
 ## Escritura autorizada y aislamiento compatible
 
-`Pedir autorización` (`automatic`) es el modo recomendado y predeterminado. Baldr conserva exactamente el alcance que eligió la persona:
+`Trabajar directamente` (`current`) es el modo recomendado y predeterminado. Baldr conserva exactamente el alcance que eligió la persona:
 
 ```text
 arquitectura en solo lectura sobre la carpeta seleccionada
-  -> si el plan necesita escribir, persiste una decisión del operador
-  -> autorizar: implementación directa con workspace-write
-  -> no autorizar: cierre durable sin modificar archivos
+  -> implementación directa con workspace-write
+  -> revisión del diff y de las verificaciones
 ```
 
-No hay una publicación posterior desde una copia completa. Una vez concedido el permiso, cada cambio aparece directamente en el workspace activo, como en Codex/Kiro. Los cambios independientes de la persona pueden convivir con la ejecución; Git, los checkpoints y el journal registran los efectos observados. Si un intento de escritura se interrumpe antes de confirmar su resultado, Baldr lo deja `unknown` y exige reconciliación en vez de repetirlo.
+No hay una publicación posterior desde una copia completa. Cada cambio aparece directamente en el workspace activo, como en Codex/Kiro, sin una pausa de autorización por tarea. Los cambios independientes de la persona pueden convivir con la ejecución; Git, los checkpoints y el journal registran los efectos observados. Si un intento de escritura se interrumpe antes de confirmar su resultado, Baldr lo deja `unknown` y exige reconciliación en vez de repetirlo.
 
-`current` ofrece el mismo camino directo con consentimiento persistente, sin una pausa por tarea. `non-git` permite escritura directa en una carpeta confiable sin exigir Git y conserva su confirmación explícita. Arquitectura continúa con sandbox `read-only`; implementación y fixes reciben `workspace-write` únicamente cuando el modo ya lo autoriza.
+`automatic` conserva el flujo opcional que pide permiso antes de la primera escritura. `non-git` permite escritura directa en una carpeta confiable sin exigir Git y conserva su confirmación explícita. Arquitectura continúa con sandbox `read-only`; implementación y fixes reciben `workspace-write` únicamente cuando el modo ya lo autoriza.
 
 ### Worktrees y workspaces sombra compatibles
 

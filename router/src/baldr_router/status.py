@@ -35,7 +35,7 @@ def _workspace_status(workspace_root: str, store: DurableStore) -> dict[str, Any
         "SELECT safety_mode FROM workspace_preferences WHERE workspace_id = ?",
         (identity["workspace_id"],),
     ).fetchone()
-    safety_mode = str(row["safety_mode"] if row is not None else "automatic").lower()
+    safety_mode = str(row["safety_mode"] if row is not None else "current").lower()
     return inspect_workspace(
         workspace_root,
         access="read",

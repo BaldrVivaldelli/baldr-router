@@ -30,6 +30,11 @@ packages = ["src/baldr_router"]
 "src/baldr_router/contracts/agent-registry-v1.schema.json" = "baldr_router/contracts/agent-registry-v1.schema.json"
 "src/baldr_router/contracts/agent-transport-http-v1.schema.json" = "baldr_router/contracts/agent-transport-http-v1.schema.json"
 "src/baldr_router/contracts/agent-manager-v1.schema.json" = "baldr_router/contracts/agent-manager-v1.schema.json"
+"src/baldr_router/contracts/agent-source-v1.schema.json" = "baldr_router/contracts/agent-source-v1.schema.json"
+"src/baldr_router/contracts/agent-catalog-sync-v1.schema.json" = "baldr_router/contracts/agent-catalog-sync-v1.schema.json"
+"src/baldr_router/contracts/agent-team-resolution-v1.schema.json" = "baldr_router/contracts/agent-team-resolution-v1.schema.json"
+"src/baldr_router/contracts/orchestration-policy-v1.schema.json" = "baldr_router/contracts/orchestration-policy-v1.schema.json"
+"src/baldr_router/contracts/agent-execution-v1.schema.json" = "baldr_router/contracts/agent-execution-v1.schema.json"
 "src/baldr_router/qualification/profiles-v1.json" = "baldr_router/qualification/profiles-v1.json"
 "src/baldr_router/qualification/canaries-v1.json" = "baldr_router/qualification/canaries-v1.json"
 
@@ -39,4 +44,13 @@ pythonpath = ["src"]
 
 [project.optional-dependencies]
 codex-sdk = ["openai-codex"]
-dev = ["pytest>=8.0", "ruff>=0.9"]
+dev = [
+  "baldr-agent-runner>=0.19.0,<0.20.0",
+  "baldr-agent-sdk>=0.19.0,<0.20.0",
+  "pytest>=8.0",
+  "ruff>=0.9",
+]
+
+[tool.uv.sources]
+baldr-agent-runner = { workspace = true }
+baldr-agent-sdk = { workspace = true }

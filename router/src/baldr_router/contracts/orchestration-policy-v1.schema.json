@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://baldr.dev/contracts/orchestration-policy-v1.schema.json",
+  "title": "Baldr durable orchestration policy v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "version",
+    "writer_policy",
+    "budgets",
+    "roles"
+  ],
+  "properties": {
+    "contract": {
+      "const": "baldr-orchestration-policy"
+    },
+    "version": {
+      "const": 1
+    },
+    "writer_policy": {
+      "const": "exactly-one-per-write-phase"
+    },
+    "budgets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_parallel_participants",
+        "max_participants_per_phase",
+        "max_total_participant_attempts",
+        "max_rounds"
+      ],
+      "properties": {
+        "max_parallel_participants": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32
+        },
+        "max_participants_per_phase": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64
+        },
+        "max_total_participant_attempts": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "max_rounds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        }
+      }
+    },
+    "roles": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "architect",
+        "implementer",
+        "reviewer"
+      ],
+      "properties": {
+        "architect": {
+          "$ref": "#/$defs/role"
+        },
+        "implementer": {
+          "$ref": "#/$defs/role"
+        },
+        "reviewer": {
+          "$ref": "#/$defs/role"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "role": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "strategy",
+        "participant_count",
+        "max_concurrency",
+        "can_write"
+      ],
+      "properties": {
+        "strategy": {
+          "enum": [
+            "first-success",
+            "all"
+          ]
+        },
+        "participant_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64
+        },
+        "max_concurrency": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32
+        },
+        "can_write": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

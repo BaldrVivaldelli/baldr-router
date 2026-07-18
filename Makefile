@@ -9,6 +9,9 @@ export UV_DEFAULT_INDEX
 
 ROUTER_DIR := router
 ADAPTER_DIR := facades/kiro/adapter
+AGENT_SDK_DIR := sdks/python
+AGENT_BUILDER_DIR := tooling/agent-builder
+AGENT_RUNNER_DIR := runtimes/agent-runner
 LAUNCHER_DIR := launcher
 EXTENSION_DIR := facades/vscode-extension
 
@@ -23,9 +26,9 @@ QUALIFICATION_CLIENT ?=
 
 .PHONY: \
 	all help deps test lint check build build-no-tests release verify-release \
-	facades facades-check router-test router-lint adapter-test adapter-lint \
+	facades facades-check router-test router-lint adapter-test adapter-lint agent-sdk-test agent-sdk-typescript-test agent-builder-test agent-builder-typescript-test agent-runner-test \
 	launcher-test extension-install extension-check extension-test extension-package extension-clean \
-	install-kiro install-launcher cli mcp qualification-definitions qualification-template qualification-ci
+	install-kiro install-agent-runtime install-launcher cli mcp qualification-definitions qualification-template qualification-ci
 
 all: check
 
@@ -38,9 +41,11 @@ help:
 		'  make facades | facades-check       Genera o valida fachadas desde el contrato' \
 		'  make build | build-no-tests        Construye la release completa' \
 		'  make verify-release | release      Verifica artefactos o construye la release' \
-		'  make router-test | adapter-test | launcher-test | extension-test' \
+		'  make router-test | adapter-test | agent-sdk-test | agent-sdk-typescript-test' \
+		'  make agent-builder-test | agent-builder-typescript-test | agent-runner-test' \
+		'  make launcher-test | extension-test' \
 		'  make extension-install | extension-check | extension-package' \
-		'  make install-kiro | install-launcher' \
+		'  make install-kiro | install-agent-runtime | install-launcher' \
 		'  make cli CLI_ARGS="<comando>"      Ejecuta la CLI desde el checkout' \
 		'  make qualification-template QUALIFICATION_PROFILE=... QUALIFICATION_TEMPLATE_DIR=...' \
 		'  make qualification-ci QUALIFICATION_PROFILE=... QUALIFICATION_WORKSPACE_ROOT=... QUALIFICATION_EVIDENCE_DIRECTORY=...'
@@ -48,6 +53,10 @@ help:
 deps:
 	$(UV) sync --project $(ROUTER_DIR) --extra dev
 	$(UV) sync --project $(ADAPTER_DIR) --extra dev
+	$(UV) sync --project $(AGENT_SDK_DIR) --extra dev
+	$(UV) sync --project $(AGENT_BUILDER_DIR) --extra dev
+	$(UV) sync --project $(AGENT_RUNNER_DIR) --extra dev
+	$(NPM) ci --ignore-scripts --no-audit --no-fund
 	$(NPM) --prefix $(EXTENSION_DIR) ci --ignore-scripts --no-audit --no-fund
 
 test:
@@ -76,6 +85,22 @@ adapter-test:
 
 adapter-lint:
 	cd $(ADAPTER_DIR) && $(UV) run --extra dev ruff check src tests
+
+agent-sdk-test:
+	cd $(AGENT_SDK_DIR) && $(UV) run --extra dev pytest -q
+
+agent-sdk-typescript-test:
+	$(NPM) test --workspace @baldr/agent-sdk
+
+agent-builder-test:
+	cd $(AGENT_BUILDER_DIR) && $(UV) run --extra dev pytest -q
+
+agent-builder-typescript-test:
+	$(NPM) run build --workspace @baldr/agent-sdk
+	$(NPM) test --workspace @baldr/agent-builder-typescript
+
+agent-runner-test:
+	cd $(AGENT_RUNNER_DIR) && $(UV) run --extra dev pytest -q
 
 launcher-test:
 	$(NPM) --prefix $(LAUNCHER_DIR) test
@@ -108,6 +133,9 @@ release: build
 
 install-kiro:
 	$(UV) tool install --force --editable ./$(ROUTER_DIR) --with-editable ./$(ADAPTER_DIR) --with-executables-from baldr-kiro-adapter
+
+install-agent-runtime:
+	$(UV) tool install --force --editable ./$(AGENT_RUNNER_DIR) --with-editable ./$(AGENT_SDK_DIR) --with-editable ./$(AGENT_BUILDER_DIR) --with-executables-from baldr-agent-builder
 
 install-launcher:
 	cd $(LAUNCHER_DIR) && $(NPM) install -g .

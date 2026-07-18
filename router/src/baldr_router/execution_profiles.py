@@ -95,7 +95,12 @@ def resolve_role_profiles(
 
     resolved: list[ResolvedExecutionProfile] = []
     for name, profile in raw_profiles:
-        provider = provider_override or profile.provider or role.provider or cfg.router.default_provider
+        provider = (
+            provider_override
+            or profile.provider
+            or role.provider
+            or cfg.router.default_provider
+        )
         (
             fallback_model,
             fallback_reasoning,
@@ -139,25 +144,31 @@ def role_execution_plan(
     *,
     provider_override: str | None = None,
 ) -> dict[str, Any]:
-    strategy = role.strategy if role.strategy in VALID_ROLE_STRATEGIES else "first-success"
+    strategy = (
+        role.strategy if role.strategy in VALID_ROLE_STRATEGIES else "first-success"
+    )
     profiles = resolve_role_profiles(
         cfg, role_name, role, provider_override=provider_override
     )
-    if strategy == "all" and role.can_write and len(profiles) > 1:
+    if role.can_write and len(profiles) > 1:
         raise ValueError(
-            f"Role {role_name!r} is write-enabled and cannot use strategy='all' "
-            "with multiple profiles. Use first-success to avoid concurrent writers."
+            f"Role {role_name!r} is write-enabled and must resolve to exactly one "
+            "profile per execution phase."
         )
     return {
         "role": role_name,
         "strategy": strategy,
         "min_successes": max(1, min(int(role.min_successes), len(profiles))),
-        "resolution": role.resolution or (
-            "primary-with-advisors" if role_name == "architect" else
-            "any-blocker" if role_name == "reviewer" else
-            "first-success"
+        "resolution": role.resolution
+        or (
+            "primary-with-advisors"
+            if role_name == "architect"
+            else "any-blocker"
+            if role_name == "reviewer"
+            else "first-success"
         ),
         "min_approvals": max(1, min(int(role.min_approvals), len(profiles))),
+        "max_concurrency": max(1, int(role.max_concurrency)),
         "profiles": [profile.to_dict() for profile in profiles],
         "can_write": role.can_write,
         "sandbox": role.sandbox,

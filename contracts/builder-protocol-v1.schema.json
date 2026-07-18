@@ -1,0 +1,389 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://baldr.dev/contracts/builder-protocol-v1.schema.json",
+  "title": "Baldr Builder service protocol v1",
+  "oneOf": [
+    { "$ref": "#/$defs/describeRequest" },
+    { "$ref": "#/$defs/describeResponse" },
+    { "$ref": "#/$defs/testRequest" },
+    { "$ref": "#/$defs/testResult" },
+    { "$ref": "#/$defs/buildRequest" },
+    { "$ref": "#/$defs/accepted" },
+    { "$ref": "#/$defs/statusRequest" },
+    { "$ref": "#/$defs/status" },
+    { "$ref": "#/$defs/eventsRequest" },
+    { "$ref": "#/$defs/event" },
+    { "$ref": "#/$defs/cancel" },
+    { "$ref": "#/$defs/result" }
+  ],
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "base": {
+      "type": "object",
+      "required": ["contract", "version", "kind", "request_id"],
+      "properties": {
+        "contract": { "const": "baldr-builder" },
+        "version": { "const": 1 },
+        "kind": { "type": "string" },
+        "request_id": { "$ref": "#/$defs/identifier" }
+      }
+    },
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "language", "entrypoint"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 96 },
+        "version": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "language": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "entrypoint": { "type": "string", "minLength": 1, "maxLength": 320 }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "digest", "media_type", "locator"],
+      "properties": {
+        "kind": { "enum": ["workspace", "cas"] },
+        "digest": { "$ref": "#/$defs/digest" },
+        "media_type": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "locator": { "type": ["string", "null"], "maxLength": 4096 }
+      }
+    },
+    "driver": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "digest"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "version": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "digest": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "driverDescriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "digest", "language", "operations", "targets"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "version": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "digest": { "$ref": "#/$defs/digest" },
+        "language": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "operations": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": { "enum": ["test", "build"] }
+        },
+        "targets": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 160 }
+        }
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol", "platform", "architecture"],
+      "properties": {
+        "protocol": { "const": "agent-execution-v1" },
+        "platform": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "architecture": { "type": "string", "minLength": 1, "maxLength": 64 }
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["network", "reproducible", "run_tests"],
+      "properties": {
+        "network": { "enum": ["inherit", "disabled", "enabled"] },
+        "reproducible": { "type": "boolean" },
+        "run_tests": { "type": "boolean" }
+      }
+    },
+    "executionPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["network", "reproducible"],
+      "properties": {
+        "network": { "enum": ["inherit", "disabled", "enabled"] },
+        "reproducible": { "type": "boolean" }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["digest", "media_type", "size", "launcher"],
+      "properties": {
+        "digest": { "$ref": "#/$defs/digest" },
+        "media_type": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "size": { "type": "integer", "minimum": 0 },
+        "launcher": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "path": { "type": ["string", "null"], "maxLength": 4096 },
+        "uri": { "type": ["string", "null"], "maxLength": 4096 }
+      }
+    },
+    "tests": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["status", "exit_code"],
+      "properties": {
+        "status": { "enum": ["passed", "failed", "skipped"] },
+        "exit_code": { "type": ["integer", "null"] },
+        "command": {
+          "type": "array",
+          "items": { "type": "string", "maxLength": 4096 },
+          "maxItems": 128
+        }
+      }
+    },
+    "describeRequest": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["contract", "version", "kind", "request_id"],
+          "properties": {
+            "contract": { "const": "baldr-builder" },
+            "version": { "const": 1 },
+            "kind": { "const": "describe-request" },
+            "request_id": { "$ref": "#/$defs/identifier" }
+          }
+        }
+      ]
+    },
+    "describeResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "version", "kind", "request_id", "backend", "operations", "drivers"],
+      "properties": {
+        "contract": { "const": "baldr-builder" },
+        "version": { "const": 1 },
+        "kind": { "const": "describe-response" },
+        "request_id": { "$ref": "#/$defs/identifier" },
+        "backend": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "version", "transport"],
+          "properties": {
+            "id": { "type": "string", "minLength": 1, "maxLength": 160 },
+            "version": { "type": "string", "minLength": 1, "maxLength": 64 },
+            "transport": { "enum": ["local", "grpc"] }
+          }
+        },
+        "operations": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "enum": ["test", "build", "status", "events", "cancel"] }
+        },
+        "drivers": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/driverDescriptor" }
+        }
+      }
+    },
+    "testRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "version", "kind", "request_id", "idempotency_key", "project", "source", "driver", "target", "policy"],
+      "properties": {
+        "contract": { "const": "baldr-builder" },
+        "version": { "const": 1 },
+        "kind": { "const": "test-request" },
+        "request_id": { "$ref": "#/$defs/identifier" },
+        "idempotency_key": { "$ref": "#/$defs/digest" },
+        "project": { "$ref": "#/$defs/project" },
+        "source": { "$ref": "#/$defs/source" },
+        "driver": { "$ref": "#/$defs/driver" },
+        "target": { "$ref": "#/$defs/target" },
+        "policy": { "$ref": "#/$defs/executionPolicy" }
+      }
+    },
+    "testResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "version", "kind", "request_id", "job_id", "state", "source_digest", "driver", "tests", "metadata", "error"],
+      "properties": {
+        "contract": { "const": "baldr-builder" },
+        "version": { "const": 1 },
+        "kind": { "const": "test-result" },
+        "request_id": { "$ref": "#/$defs/identifier" },
+        "job_id": { "$ref": "#/$defs/identifier" },
+        "state": { "enum": ["succeeded", "failed", "cancelled", "unknown"] },
+        "source_digest": { "$ref": "#/$defs/digest" },
+        "driver": { "$ref": "#/$defs/driver" },
+        "tests": { "$ref": "#/$defs/tests" },
+        "metadata": { "type": "object" },
+        "error": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["code", "message", "retryable"],
+              "properties": {
+                "code": { "type": "string", "minLength": 1, "maxLength": 160 },
+                "message": { "type": "string", "maxLength": 4096 },
+                "retryable": { "type": "boolean" }
+              }
+            },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "buildRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "version", "kind", "request_id", "idempotency_key", "project", "source", "driver", "target", "policy"],
+      "properties": {
+        "contract": { "const": "baldr-builder" },
+        "version": { "const": 1 },
+        "kind": { "const": "build-request" },
+        "request_id": { "$ref": "#/$defs/identifier" },
+        "idempotency_key": { "$ref": "#/$defs/digest" },
+        "project": { "$ref": "#/$defs/project" },
+        "source": { "$ref": "#/$defs/source" },
+        "driver": { "$ref": "#/$defs/driver" },
+        "target": { "$ref": "#/$defs/target" },
+        "policy": { "$ref": "#/$defs/policy" },
+        "output_locator": { "type": ["string", "null"], "maxLength": 4096 }
+      }
+    },
+    "accepted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "version", "kind", "request_id", "job_id", "state", "reused"],
+      "properties": {
+        "contract": { "const": "baldr-builder" },
+        "version": { "const": 1 },
+        "kind": { "const": "build-accepted" },
+        "request_id": { "$ref": "#/$defs/identifier" },
+        "job_id": { "$ref": "#/$defs/identifier" },
+        "state": { "enum": ["accepted", "running"] },
+        "reused": { "type": "boolean" }
+      }
+    },
+    "statusRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "version", "kind", "request_id", "job_id"],
+      "properties": {
+        "contract": { "const": "baldr-builder" },
+        "version": { "const": 1 },
+        "kind": { "const": "status-request" },
+        "request_id": { "$ref": "#/$defs/identifier" },
+        "job_id": { "$ref": "#/$defs/identifier" }
+      }
+    },
+    "status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "version", "kind", "request_id", "job_id", "state", "event_cursor"],
+      "properties": {
+        "contract": { "const": "baldr-builder" },
+        "version": { "const": 1 },
+        "kind": { "const": "status" },
+        "request_id": { "$ref": "#/$defs/identifier" },
+        "job_id": { "$ref": "#/$defs/identifier" },
+        "state": { "enum": ["accepted", "running", "succeeded", "failed", "cancelled", "unknown"] },
+        "event_cursor": { "type": "integer", "minimum": 0 },
+        "error_code": { "type": ["string", "null"], "maxLength": 160 }
+      }
+    },
+    "eventsRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "version", "kind", "request_id", "job_id", "after", "limit"],
+      "properties": {
+        "contract": { "const": "baldr-builder" },
+        "version": { "const": 1 },
+        "kind": { "const": "events-request" },
+        "request_id": { "$ref": "#/$defs/identifier" },
+        "job_id": { "$ref": "#/$defs/identifier" },
+        "after": { "type": "integer", "minimum": 0 },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 1000 }
+      }
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "version", "kind", "request_id", "job_id", "sequence", "category", "message"],
+      "properties": {
+        "contract": { "const": "baldr-builder" },
+        "version": { "const": 1 },
+        "kind": { "const": "event" },
+        "request_id": { "$ref": "#/$defs/identifier" },
+        "job_id": { "$ref": "#/$defs/identifier" },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "category": { "enum": ["validating", "testing", "building", "packaging", "completed"] },
+        "message": { "type": "string", "maxLength": 4096 }
+      }
+    },
+    "cancel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "version", "kind", "request_id", "job_id", "reason"],
+      "properties": {
+        "contract": { "const": "baldr-builder" },
+        "version": { "const": 1 },
+        "kind": { "const": "cancel" },
+        "request_id": { "$ref": "#/$defs/identifier" },
+        "job_id": { "$ref": "#/$defs/identifier" },
+        "reason": { "type": "string", "maxLength": 1024 }
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "version", "kind", "request_id", "job_id", "state", "source_digest", "driver", "tests", "artifact", "metadata", "error"],
+      "properties": {
+        "contract": { "const": "baldr-builder" },
+        "version": { "const": 1 },
+        "kind": { "const": "build-result" },
+        "request_id": { "$ref": "#/$defs/identifier" },
+        "job_id": { "$ref": "#/$defs/identifier" },
+        "state": { "enum": ["succeeded", "failed", "cancelled", "unknown"] },
+        "source_digest": { "$ref": "#/$defs/digest" },
+        "driver": { "$ref": "#/$defs/driver" },
+        "tests": { "$ref": "#/$defs/tests" },
+        "artifact": {
+          "oneOf": [
+            { "$ref": "#/$defs/artifact" },
+            { "type": "null" }
+          ]
+        },
+        "metadata": { "type": "object" },
+        "error": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["code", "message", "retryable"],
+              "properties": {
+                "code": { "type": "string", "minLength": 1, "maxLength": 160 },
+                "message": { "type": "string", "maxLength": 4096 },
+                "retryable": { "type": "boolean" }
+              }
+            },
+            { "type": "null" }
+          ]
+        }
+      }
+    }
+  }
+}

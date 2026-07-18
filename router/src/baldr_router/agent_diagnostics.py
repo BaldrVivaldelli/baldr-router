@@ -10,6 +10,7 @@ from .agent_api import (
     AgentManifest,
 )
 from .agent_gateway import verify_kiro_agent_definition
+from .agent_execution import local_process_health
 from .durability.store import DurableStore
 from .provider_registry import get_provider_registry
 
@@ -70,6 +71,30 @@ def _definition_health(
     provider = str(manifest.target.get("provider") or "").strip()
     if provider.lower().replace("_", "-") not in {"kiro", "kiro-cli"}:
         return {"ok": True, "attested": False}
+    if manifest.target.get("definition_scope") == "builtin":
+        try:
+            verified = verify_kiro_agent_definition(
+                target=manifest.target,
+                cwd=workspace_root,
+            )
+        except AgentDigestMismatchError:
+            return {
+                "ok": False,
+                "attested": True,
+                "reason": "agent-definition-digest-mismatch",
+            }
+        except AgentContractError:
+            return {
+                "ok": False,
+                "attested": True,
+                "reason": "agent-definition-invalid",
+            }
+        return {
+            "ok": True,
+            "attested": True,
+            "scope": "builtin",
+            "digest": verified.get("source_fingerprint"),
+        }
     if not manifest.target.get("definition_digest"):
         agent = str(manifest.target.get("agent") or "").strip()
         if (
@@ -142,21 +167,36 @@ def diagnose_agent_manifest(
 
     if not enabled:
         provider = {"ok": True, "provider": str(manifest.target.get("provider") or "")}
-        definition = {"ok": True, "attested": bool(manifest.target.get("definition_digest"))}
+        definition = {
+            "ok": True,
+            "attested": bool(manifest.target.get("definition_digest")),
+        }
         state = "disabled"
         ready = False
         reason = "agent-disabled"
     else:
-        provider = (
-            _provider_health(str(manifest.target.get("provider") or ""))
-            if manifest.transport == "provider"
-            else {"ok": True, "provider": f"external-{manifest.transport}"}
-        )
-        definition = _definition_health(manifest, workspace_root=workspace_root)
+        if manifest.transport == "provider":
+            provider = _provider_health(str(manifest.target.get("provider") or ""))
+            definition = _definition_health(manifest, workspace_root=workspace_root)
+        elif manifest.transport == "local-process":
+            provider = {
+                **local_process_health(manifest),
+                "provider": "external-local-process",
+            }
+            definition = {"ok": True, "attested": True}
+        else:
+            provider = {"ok": True, "provider": f"external-{manifest.transport}"}
+            definition = {"ok": True, "attested": False}
         ready = bool(provider.get("ok") and definition.get("ok"))
         state = "ready" if ready else "unavailable"
-        reason = "" if ready else str(
-            definition.get("reason") or provider.get("reason") or "agent-unavailable"
+        reason = (
+            ""
+            if ready
+            else str(
+                definition.get("reason")
+                or provider.get("reason")
+                or "agent-unavailable"
+            )
         )
 
     lifecycle = {"last_execution": None, "last_success": None}

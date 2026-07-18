@@ -7,6 +7,7 @@ import time
 from collections.abc import Iterable, Mapping
 from contextlib import contextmanager
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 from .agent_api import (
@@ -82,7 +83,14 @@ class LocalAgentRegistry:
     def __init__(self, path: Path | None = None) -> None:
         self.path = path or local_agent_registry_path()
 
-    def _document(self) -> tuple[tuple[AgentManifest, ...], frozenset[str]]:
+    def _document(
+        self,
+    ) -> tuple[
+        tuple[AgentManifest, ...],
+        frozenset[str],
+        frozenset[str],
+        Mapping[str, str],
+    ]:
         try:
             size = self.path.stat().st_size
         except FileNotFoundError as exc:
@@ -96,10 +104,15 @@ class LocalAgentRegistry:
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-            raise AgentContractError("Local agent registry is not valid UTF-8 JSON.") from exc
+            raise AgentContractError(
+                "Local agent registry is not valid UTF-8 JSON."
+            ) from exc
         if not isinstance(raw, Mapping):
             raise AgentContractError("Local agent registry must be an object.")
-        if raw.get("contract") != REGISTRY_CONTRACT or raw.get("version") != REGISTRY_VERSION:
+        if (
+            raw.get("contract") != REGISTRY_CONTRACT
+            or raw.get("version") != REGISTRY_VERSION
+        ):
             raise AgentContractError(
                 f"Local registry must use {REGISTRY_CONTRACT!r} version {REGISTRY_VERSION}."
             )
@@ -131,12 +144,78 @@ class LocalAgentRegistry:
             )
         for reference in disabled:
             AgentRef.parse(reference)
-        return manifests, frozenset(disabled)
+        revoked_value = raw.get("revoked", [])
+        if not isinstance(revoked_value, list):
+            raise AgentContractError("Local agent registry revoked must be an array.")
+        revoked = tuple(str(value or "").strip() for value in revoked_value)
+        if (
+            len(revoked) > MAX_REGISTRY_AGENTS
+            or any(not value for value in revoked)
+            or len(set(revoked)) != len(revoked)
+        ):
+            raise AgentContractError(
+                "Local agent registry revoked must contain unique exact references."
+            )
+        unknown_revoked = sorted(set(revoked) - references)
+        if unknown_revoked:
+            raise AgentContractError(
+                "Local agent registry revokes unknown agents: "
+                + ", ".join(unknown_revoked)
+                + "."
+            )
+        if not set(revoked).issubset(disabled):
+            raise AgentContractError("Revoked local agents must also be disabled.")
+        tombstones_value = raw.get("tombstones", {})
+        if not isinstance(tombstones_value, Mapping):
+            raise AgentContractError(
+                "Local agent registry tombstones must be an object."
+            )
+        if len(tombstones_value) > MAX_REGISTRY_AGENTS:
+            raise AgentContractError("Local agent registry has too many tombstones.")
+        tombstones: dict[str, str] = {}
+        for raw_reference, raw_digest in tombstones_value.items():
+            reference = str(AgentRef.parse(str(raw_reference or "").strip()))
+            digest = str(raw_digest or "").strip()
+            if (
+                len(digest) != 71
+                or not digest.startswith("sha256:")
+                or any(character not in "0123456789abcdef" for character in digest[7:])
+            ):
+                raise AgentContractError(
+                    f"Invalid local agent tombstone digest for {reference}."
+                )
+            tombstones[reference] = digest
+        for manifest in manifests:
+            tombstone = tombstones.get(str(manifest.reference))
+            if tombstone and tombstone != manifest.digest:
+                raise AgentDigestMismatchError(
+                    f"Local agent tombstone for {manifest.reference} conflicts with its manifest."
+                )
+        for reference in revoked:
+            if tombstones.get(reference) != next(
+                manifest.digest
+                for manifest in manifests
+                if str(manifest.reference) == reference
+            ):
+                raise AgentContractError(
+                    f"Revoked local agent {reference} requires an immutable tombstone."
+                )
+        return (
+            manifests,
+            frozenset(disabled),
+            frozenset(revoked),
+            MappingProxyType(tombstones),
+        )
 
     def _load(self) -> StaticAgentResolver:
-        manifests, disabled = self._document()
+        manifests, disabled, revoked, _ = self._document()
         return StaticAgentResolver(
-            (manifest for manifest in manifests if str(manifest.reference) not in disabled),
+            (
+                manifest
+                for manifest in manifests
+                if str(manifest.reference) not in disabled
+                and str(manifest.reference) not in revoked
+            ),
             source=f"local:{self.path.name}",
         )
 
@@ -152,17 +231,24 @@ class LocalAgentRegistry:
         )
 
     def manifests(self, *, include_disabled: bool = True) -> tuple[AgentManifest, ...]:
-        manifests, disabled = self._document()
+        manifests, disabled, revoked, _ = self._document()
         if include_disabled:
             return manifests
         return tuple(
             manifest
             for manifest in manifests
             if str(manifest.reference) not in disabled
+            and str(manifest.reference) not in revoked
         )
 
     def disabled_references(self) -> frozenset[str]:
         return self._document()[1]
+
+    def revoked_references(self) -> frozenset[str]:
+        return self._document()[2]
+
+    def tombstones(self) -> Mapping[str, str]:
+        return self._document()[3]
 
 
 class CompositeAgentResolver:
@@ -193,7 +279,11 @@ class CompositeAgentResolver:
 
 
 def registry_document(
-    manifests: Iterable[AgentManifest], *, disabled: Iterable[str] = ()
+    manifests: Iterable[AgentManifest],
+    *,
+    disabled: Iterable[str] = (),
+    revoked: Iterable[str] = (),
+    tombstones: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     document: dict[str, Any] = {
         "contract": REGISTRY_CONTRACT,
@@ -206,6 +296,12 @@ def registry_document(
     disabled_refs = sorted({str(value or "").strip() for value in disabled if value})
     if disabled_refs:
         document["disabled"] = disabled_refs
+    revoked_refs = sorted({str(value or "").strip() for value in revoked if value})
+    if revoked_refs:
+        document["revoked"] = revoked_refs
+    tombstone_values = dict(sorted((tombstones or {}).items()))
+    if tombstone_values:
+        document["tombstones"] = tombstone_values
     return document
 
 
@@ -271,11 +367,20 @@ def _registry_lock(path: Path):
 
 
 def _atomic_write_registry(
-    path: Path, manifests: Iterable[AgentManifest], disabled: Iterable[str]
+    path: Path,
+    manifests: Iterable[AgentManifest],
+    disabled: Iterable[str],
+    revoked: Iterable[str] = (),
+    tombstones: Mapping[str, str] | None = None,
 ) -> None:
     if path.is_symlink():
         raise AgentContractError("Local agent registry cannot be a symbolic link.")
-    document = registry_document(manifests, disabled=disabled)
+    document = registry_document(
+        manifests,
+        disabled=disabled,
+        revoked=revoked,
+        tombstones=tombstones,
+    )
     payload = (
         json.dumps(document, ensure_ascii=False, indent=2, sort_keys=False) + "\n"
     ).encode("utf-8")
@@ -320,21 +425,34 @@ class LocalAgentRegistryAdmin:
     def __init__(self, path: Path | None = None) -> None:
         self.path = path or local_agent_registry_path()
 
-    def _state(self) -> tuple[dict[str, AgentManifest], set[str]]:
+    def _state(
+        self,
+    ) -> tuple[dict[str, AgentManifest], set[str], set[str], dict[str, str]]:
         if not self.path.exists():
-            return {}, set()
+            return {}, set(), set(), {}
         registry = LocalAgentRegistry(self.path)
         manifests = {str(item.reference): item for item in registry.manifests()}
-        return manifests, set(registry.disabled_references())
+        return (
+            manifests,
+            set(registry.disabled_references()),
+            set(registry.revoked_references()),
+            dict(registry.tombstones()),
+        )
 
     def publish(self, manifest: AgentManifest) -> dict[str, Any]:
         with _registry_lock(self.path):
-            manifests, disabled = self._state()
+            manifests, disabled, revoked, tombstones = self._state()
             reference = str(manifest.reference)
             existing = manifests.get(reference)
             if existing is not None and existing.digest != manifest.digest:
                 raise AgentContractError(
                     f"Agent {reference} is immutable; publish a new exact version."
+                )
+            tombstone = tombstones.get(reference)
+            if tombstone and tombstone != manifest.digest:
+                raise AgentContractError(
+                    f"Agent {reference} is tombstoned with a different immutable digest; "
+                    "publish a new exact version."
                 )
             created = existing is None
             manifests[reference] = existing or manifest
@@ -342,6 +460,8 @@ class LocalAgentRegistryAdmin:
                 self.path,
                 (manifests[key] for key in sorted(manifests)),
                 disabled,
+                revoked,
+                tombstones,
             )
         return {
             "ok": True,
@@ -351,32 +471,42 @@ class LocalAgentRegistryAdmin:
         }
 
     def inspect(self, reference: str | AgentRef) -> dict[str, Any]:
-        parsed = reference if isinstance(reference, AgentRef) else AgentRef.parse(reference)
-        manifests, disabled = self._state()
+        parsed = (
+            reference if isinstance(reference, AgentRef) else AgentRef.parse(reference)
+        )
+        manifests, disabled, revoked, _ = self._state()
         manifest = manifests.get(str(parsed))
         if manifest is None:
             raise AgentNotFoundError(str(parsed))
+        agent = _safe_manifest(
+            manifest,
+            enabled=str(parsed) not in disabled and str(parsed) not in revoked,
+            include_target=True,
+        )
+        agent["revoked"] = str(parsed) in revoked
         return {
             "ok": True,
-            "agent": _safe_manifest(
-                manifest,
-                enabled=str(parsed) not in disabled,
-                include_target=True,
-            ),
+            "agent": agent,
             "path": str(self.path),
         }
 
     def set_enabled(
         self, reference: str | AgentRef, *, enabled: bool
     ) -> dict[str, Any]:
-        parsed = reference if isinstance(reference, AgentRef) else AgentRef.parse(reference)
+        parsed = (
+            reference if isinstance(reference, AgentRef) else AgentRef.parse(reference)
+        )
         with _registry_lock(self.path):
-            manifests, disabled = self._state()
+            manifests, disabled, revoked, tombstones = self._state()
             key = str(parsed)
             manifest = manifests.get(key)
             if manifest is None:
                 raise AgentNotFoundError(key)
             if enabled:
+                if key in revoked:
+                    raise AgentContractError(
+                        f"Revoked agent {key} cannot be enabled again."
+                    )
                 disabled.discard(key)
             else:
                 disabled.add(key)
@@ -384,10 +514,128 @@ class LocalAgentRegistryAdmin:
                 self.path,
                 (manifests[name] for name in sorted(manifests)),
                 disabled,
+                revoked,
+                tombstones,
             )
         return {
             "ok": True,
             "agent": _safe_manifest(manifest, enabled=enabled),
+            "path": str(self.path),
+        }
+
+    def revoke(self, reference: str | AgentRef) -> dict[str, Any]:
+        parsed = (
+            reference if isinstance(reference, AgentRef) else AgentRef.parse(reference)
+        )
+        with _registry_lock(self.path):
+            manifests, disabled, revoked, tombstones = self._state()
+            key = str(parsed)
+            manifest = manifests.get(key)
+            if manifest is None:
+                raise AgentNotFoundError(key)
+            changed = key not in revoked
+            disabled.add(key)
+            revoked.add(key)
+            tombstones[key] = manifest.digest
+            _atomic_write_registry(
+                self.path,
+                (manifests[name] for name in sorted(manifests)),
+                disabled,
+                revoked,
+                tombstones,
+            )
+        return {
+            "ok": True,
+            "changed": changed,
+            "agent": {
+                **_safe_manifest(manifest, enabled=False),
+                "revoked": True,
+            },
+            "path": str(self.path),
+        }
+
+    def reconcile(
+        self,
+        *,
+        publish: Iterable[AgentManifest] = (),
+        enable: Iterable[str] = (),
+        disable: Iterable[str] = (),
+        revoke: Iterable[str] = (),
+    ) -> dict[str, Any]:
+        """Validate a catalog change set and atomically write it once."""
+
+        publish_values = tuple(publish)
+        enable_values = {str(AgentRef.parse(value)) for value in enable}
+        disable_values = {str(AgentRef.parse(value)) for value in disable}
+        revoke_values = {str(AgentRef.parse(value)) for value in revoke}
+        overlap = sorted(
+            (enable_values & disable_values)
+            | (enable_values & revoke_values)
+            | (disable_values & revoke_values)
+        )
+        if overlap:
+            raise AgentContractError(
+                "Agent reconcile actions conflict for: " + ", ".join(overlap) + "."
+            )
+        with _registry_lock(self.path):
+            manifests, disabled, revoked, tombstones = self._state()
+            created: list[str] = []
+            for manifest in publish_values:
+                reference = str(manifest.reference)
+                existing = manifests.get(reference)
+                if existing is not None and existing.digest != manifest.digest:
+                    raise AgentContractError(
+                        f"Agent {reference} is immutable; publish a new exact version."
+                    )
+                tombstone = tombstones.get(reference)
+                if tombstone and tombstone != manifest.digest:
+                    raise AgentContractError(
+                        f"Agent {reference} is tombstoned with a different immutable digest; "
+                        "publish a new exact version."
+                    )
+                if existing is None:
+                    created.append(reference)
+                    manifests[reference] = manifest
+            requested = enable_values | disable_values | revoke_values
+            missing = sorted(requested - set(manifests))
+            if missing:
+                raise AgentNotFoundError(
+                    "Cannot reconcile unknown agents: " + ", ".join(missing) + "."
+                )
+            reenabling_revoked = sorted(enable_values & revoked)
+            if reenabling_revoked:
+                raise AgentContractError(
+                    "Revoked agents cannot be enabled again: "
+                    + ", ".join(reenabling_revoked)
+                    + "."
+                )
+            actually_enabled = sorted(enable_values & disabled)
+            actually_disabled = sorted(disable_values - disabled)
+            actually_revoked = sorted(revoke_values - revoked)
+            disabled.difference_update(enable_values)
+            disabled.update(disable_values)
+            disabled.update(revoke_values)
+            revoked.update(revoke_values)
+            for reference in revoke_values:
+                tombstones[reference] = manifests[reference].digest
+            changed = bool(
+                created or actually_enabled or actually_disabled or actually_revoked
+            )
+            if changed or not self.path.exists():
+                _atomic_write_registry(
+                    self.path,
+                    (manifests[name] for name in sorted(manifests)),
+                    disabled,
+                    revoked,
+                    tombstones,
+                )
+        return {
+            "ok": True,
+            "changed": changed,
+            "created": sorted(created),
+            "enabled": actually_enabled,
+            "disabled": actually_disabled,
+            "revoked": actually_revoked,
             "path": str(self.path),
         }
 
@@ -397,14 +645,16 @@ class LocalAgentRegistryAdmin:
         *,
         active_run_ids: Iterable[str] = (),
     ) -> dict[str, Any]:
-        parsed = reference if isinstance(reference, AgentRef) else AgentRef.parse(reference)
+        parsed = (
+            reference if isinstance(reference, AgentRef) else AgentRef.parse(reference)
+        )
         active = sorted({str(value) for value in active_run_ids if value})
         if active:
             raise AgentContractError(
                 f"Agent {parsed} is used by active durable runs: {', '.join(active[:5])}."
             )
         with _registry_lock(self.path):
-            manifests, disabled = self._state()
+            manifests, disabled, revoked, tombstones = self._state()
             key = str(parsed)
             if key not in manifests:
                 raise AgentNotFoundError(key)
@@ -412,12 +662,21 @@ class LocalAgentRegistryAdmin:
                 raise AgentContractError(
                     f"Disable agent {key} before removing it from the local registry."
                 )
+            if key in revoked:
+                raise AgentContractError(
+                    f"Revoked agent {key} is an irreversible tombstone and cannot be removed."
+                )
+            removed_manifest = manifests[key]
             del manifests[key]
             disabled.discard(key)
+            revoked.discard(key)
+            tombstones[key] = removed_manifest.digest
             _atomic_write_registry(
                 self.path,
                 (manifests[name] for name in sorted(manifests)),
                 disabled,
+                revoked,
+                tombstones,
             )
         return {"ok": True, "removed": key, "path": str(self.path)}
 
@@ -436,6 +695,7 @@ def agent_registry_status(path: Path | None = None) -> dict[str, Any]:
     try:
         manifests = registry.manifests()
         disabled = registry.disabled_references()
+        revoked = registry.revoked_references()
     except (AgentContractError, AgentNotFoundError) as exc:
         return {
             "ok": False,
@@ -464,7 +724,11 @@ def agent_registry_status(path: Path | None = None) -> dict[str, Any]:
                 "transport": manifest.transport,
                 "capabilities": list(manifest.capabilities),
                 "effect_mode": manifest.effect_mode,
-                "enabled": str(manifest.reference) not in disabled,
+                "enabled": (
+                    str(manifest.reference) not in disabled
+                    and str(manifest.reference) not in revoked
+                ),
+                "revoked": str(manifest.reference) in revoked,
             }
             for manifest in manifests[:100]
         ],

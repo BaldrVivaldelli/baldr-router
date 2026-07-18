@@ -9,14 +9,37 @@ import subprocess
 import sys
 import tempfile
 import zipfile
+from collections.abc import Mapping
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 ROUTER = ROOT / "router"
 ADAPTER = ROOT / "facades" / "kiro" / "adapter"
+AGENT_SDK = ROOT / "sdks" / "python"
+AGENT_BUILDER = ROOT / "tooling" / "agent-builder"
+AGENT_RUNNER = ROOT / "runtimes" / "agent-runner"
 LAUNCHER = ROOT / "launcher"
 EXTENSION = ROOT / "facades" / "vscode-extension"
 DIST = ROOT / "dist"
+
+
+def _clean_test_environment(
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Keep host tooling available without inheriting an active Baldr run.
+
+    Tests that exercise a BALDR_* switch set it explicitly in their own
+    process.  Carrying orchestration identity, re-entry guards, agent bindings,
+    or trusted roots from the parent makes the official runner depend on
+    whether it was launched from a shell, Codex, Kiro, or Baldr itself.
+    """
+
+    source = os.environ if environ is None else environ
+    return {
+        key: value
+        for key, value in source.items()
+        if not key.upper().startswith("BALDR_")
+    }
 
 
 def _tool(name: str) -> str:
@@ -34,6 +57,16 @@ def _run(*args: str, cwd: Path = ROOT, env: dict[str, str] | None = None) -> Non
 def test_all() -> None:
     uv = _tool("uv")
     npm = _tool("npm")
+    if not (ROOT / "node_modules").exists():
+        _run(
+            npm,
+            "ci",
+            "--ignore-scripts",
+            "--no-audit",
+            "--no-fund",
+            cwd=ROOT,
+        )
+    _run(npm, "run", "test:agents", cwd=ROOT)
     # Durable tests must never reuse a developer's real Baldr state. Running
     # both Python suites under one disposable XDG root also makes local and CI
     # behavior reproducible.
@@ -45,7 +78,7 @@ def test_all() -> None:
             encoding="utf-8",
         )
         test_env = {
-            **os.environ,
+            **_clean_test_environment(),
             "XDG_CONFIG_HOME": str(root / "config"),
             "XDG_CACHE_HOME": str(root / "cache"),
             "XDG_STATE_HOME": str(root / "state"),
@@ -56,6 +89,26 @@ def test_all() -> None:
         }
         _run(uv, "run", "--extra", "dev", "pytest", "-q", cwd=ROUTER, env=test_env)
         _run(uv, "run", "--extra", "dev", "pytest", "-q", cwd=ADAPTER, env=test_env)
+        _run(uv, "run", "--extra", "dev", "pytest", "-q", cwd=AGENT_SDK, env=test_env)
+        _run(
+            uv,
+            "run",
+            "--extra",
+            "dev",
+            "pytest",
+            "-q",
+            cwd=AGENT_BUILDER,
+            env=test_env,
+        )
+        _run(uv, "run", "--extra", "dev", "pytest", "-q", cwd=AGENT_RUNNER, env=test_env)
+        _run(
+            uv,
+            "run",
+            "python",
+            "scripts/test_typescript_agent_vertical.py",
+            cwd=ROOT,
+            env=test_env,
+        )
     _run(npm, "test", cwd=LAUNCHER)
     if not (EXTENSION / "node_modules").exists():
         _run(npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund", cwd=EXTENSION)
@@ -65,10 +118,84 @@ def test_all() -> None:
 def lint_all() -> None:
     uv = _tool("uv")
     npm = _tool("npm")
+    lint_env = {
+        **_clean_test_environment(),
+        "UV_CACHE_DIR": os.environ.get("UV_CACHE_DIR")
+        or str(Path(tempfile.gettempdir()) / "baldr-router-uv-cache"),
+    }
+    _run(npm, "run", "check:agents", cwd=ROOT)
     _run(sys.executable, "scripts/check_release_consistency.py")
-    _run(uv, "run", "--extra", "dev", "ruff", "check", "src", "tests", cwd=ROUTER)
-    _run(uv, "run", "--extra", "dev", "ruff", "check", "src", "tests", cwd=ADAPTER)
-    _run(sys.executable, "-m", "compileall", "-q", "router/src", "facades/kiro/adapter/src")
+    _run(
+        uv,
+        "run",
+        "--extra",
+        "dev",
+        "ruff",
+        "check",
+        "src",
+        "tests",
+        cwd=ROUTER,
+        env=lint_env,
+    )
+    _run(
+        uv,
+        "run",
+        "--extra",
+        "dev",
+        "ruff",
+        "check",
+        "src",
+        "tests",
+        cwd=ADAPTER,
+        env=lint_env,
+    )
+    _run(
+        uv,
+        "run",
+        "--extra",
+        "dev",
+        "ruff",
+        "check",
+        "src",
+        "tests",
+        cwd=AGENT_SDK,
+        env=lint_env,
+    )
+    _run(
+        uv,
+        "run",
+        "--extra",
+        "dev",
+        "ruff",
+        "check",
+        "src",
+        "tests",
+        cwd=AGENT_BUILDER,
+        env=lint_env,
+    )
+    _run(
+        uv,
+        "run",
+        "--extra",
+        "dev",
+        "ruff",
+        "check",
+        "src",
+        "tests",
+        cwd=AGENT_RUNNER,
+        env=lint_env,
+    )
+    _run(
+        sys.executable,
+        "-m",
+        "compileall",
+        "-q",
+        "router/src",
+        "facades/kiro/adapter/src",
+        "sdks/python/src",
+        "tooling/agent-builder/src",
+        "runtimes/agent-runner/src",
+    )
     _run(sys.executable, "scripts/generate_facades.py", "--check")
     if not (EXTENSION / "node_modules").exists():
         _run(npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund", cwd=EXTENSION)

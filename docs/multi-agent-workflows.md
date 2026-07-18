@@ -62,9 +62,23 @@ strategy = "first-success"
 profiles = ["review-a", "review-b"]
 strategy = "all"
 min_successes = 2
+min_approvals = 2
+max_concurrency = 2
+
+[workflows.architect-implement-review]
+max_parallel_participants = 4
+max_participants_per_phase = 8
+max_total_participant_attempts = 24
 ```
 
-A write-enabled role cannot use `strategy = "all"` with multiple profiles. See [`durable-orchestration.md`](durable-orchestration.md) for the full contract, session isolation and recovery semantics.
+`all` runs read-only planners/advisors or reviewers concurrently, capped by the
+smaller of the role and workflow concurrency limits. Reduction remains
+deterministic in configured profile order, not completion order. A
+write-enabled phase must resolve to exactly one profile, including fallback
+configurations, so a phase never has two possible writers. The durable attempt
+budget includes retries and stops a phase before dispatch if its required
+fan-out cannot fit. See [`durable-orchestration.md`](durable-orchestration.md)
+for the full contract, cancellation and recovery semantics.
 
 The simple CLI role command still creates one inline profile:
 

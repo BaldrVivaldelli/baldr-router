@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://baldr.dev/contracts/builder-driver-registration-v1.schema.json",
+  "title": "Baldr Builder driver registration v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract", "version", "command"],
+  "properties": {
+    "contract": { "const": "baldr-builder-driver-registration" },
+    "version": { "const": 1 },
+    "command": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": { "type": "string", "minLength": 1, "maxLength": 4096 }
+    }
+  }
+}

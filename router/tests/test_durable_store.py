@@ -90,7 +90,7 @@ def test_conversation_migration_preserves_published_schema_history(
             "SELECT version FROM schema_migrations ORDER BY version"
         )
     ]
-    assert versions == list(range(1, 14))
+    assert versions == list(range(1, 15))
     assert connection.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='work_item_turns'"
     ).fetchone()

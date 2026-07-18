@@ -108,6 +108,85 @@ def test_local_registry_admin_reenables_an_exact_version(tmp_path: Path) -> None
     assert resolved.manifest.digest == manifest.digest
 
 
+def test_local_registry_revoke_is_irreversible_and_tombstones_removed_refs(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "agents.json"
+    admin = LocalAgentRegistryAdmin(path)
+    manifest = _manifest()
+    reference = str(manifest.reference)
+    admin.publish(manifest)
+
+    first = admin.revoke(reference)
+    repeated = admin.revoke(reference)
+
+    assert first["changed"] is True
+    assert repeated["changed"] is False
+    assert LocalAgentRegistry(path).revoked_references() == frozenset({reference})
+    with pytest.raises(AgentContractError, match="cannot be enabled"):
+        admin.set_enabled(reference, enabled=True)
+    with pytest.raises(AgentNotFoundError):
+        LocalAgentRegistry(path).resolve(
+            manifest.reference,
+            context=AgentResolutionContext(),
+        )
+
+    with pytest.raises(AgentContractError, match="irreversible tombstone"):
+        admin.remove(reference)
+
+    removable = _manifest("2.0.0", agent="removable")
+    removable_reference = str(removable.reference)
+    admin.publish(removable)
+    admin.set_enabled(removable_reference, enabled=False)
+    admin.remove(removable_reference)
+    assert LocalAgentRegistry(path).tombstones()[removable_reference] == removable.digest
+    changed = _manifest(agent="different-content")
+    changed_removable = AgentManifest(
+        reference=removable.reference,
+        owner=changed.owner,
+        transport=changed.transport,
+        target=changed.target,
+        capabilities=changed.capabilities,
+        input_schema=changed.input_schema,
+        output_schema=changed.output_schema,
+        effect_mode=changed.effect_mode,
+    )
+    with pytest.raises(AgentContractError, match="tombstoned"):
+        admin.publish(changed_removable)
+    restored = admin.publish(removable)
+    assert restored["created"] is True
+    assert LocalAgentRegistry(path).resolve(
+        removable.reference,
+        context=AgentResolutionContext(),
+        expected_digest=removable.digest,
+    ).manifest.digest == removable.digest
+
+
+def test_local_registry_reconcile_validates_then_writes_once(tmp_path: Path) -> None:
+    path = tmp_path / "agents.json"
+    admin = LocalAgentRegistryAdmin(path)
+    first = _manifest()
+    second = _manifest("2.0.0", agent="worker-v2")
+
+    applied = admin.reconcile(publish=[first, second], disable=[str(first.reference)])
+    repeated = admin.reconcile(publish=[first, second], disable=[str(first.reference)])
+
+    assert applied["changed"] is True
+    assert applied["created"] == [str(first.reference), str(second.reference)]
+    assert applied["disabled"] == [str(first.reference)]
+    assert repeated["changed"] is False
+    assert LocalAgentRegistry(path).disabled_references() == frozenset(
+        {str(first.reference)}
+    )
+
+    conflicting = _manifest(agent="changed-in-place")
+    with pytest.raises(AgentContractError, match="immutable"):
+        admin.reconcile(publish=[conflicting], enable=[str(first.reference)])
+    assert LocalAgentRegistry(path).disabled_references() == frozenset(
+        {str(first.reference)}
+    )
+
+
 def test_agent_cli_manages_the_registry_without_manual_json(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -145,6 +224,31 @@ def test_agent_cli_manages_the_registry_without_manual_json(
     assert cli.main(["agent", "remove", reference]) == 0
     removed = json.loads(capsys.readouterr().out)
     assert removed["removed"] == reference
+
+
+def test_agent_cli_requires_exact_confirmation_before_revocation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("BALDR_AGENT_REGISTRY_PATH", str(tmp_path / "agents.json"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    manifest = _manifest()
+    reference = str(manifest.reference)
+    LocalAgentRegistryAdmin().publish(manifest)
+
+    assert cli.main(
+        ["agent", "revoke", reference, "--confirm-reference", "local://pilot/worker@2"]
+    ) == 2
+    error = json.loads(capsys.readouterr().out)
+    assert "--confirm-reference" in error["error"]["message"]
+    assert LocalAgentRegistryAdmin().inspect(reference)["agent"]["revoked"] is False
+
+    assert cli.main(
+        ["agent", "revoke", reference, "--confirm-reference", reference]
+    ) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["agent"]["revoked"] is True
+    assert LocalAgentRegistryAdmin().inspect(reference)["agent"]["revoked"] is True
 
 
 def test_durable_store_blocks_removal_for_frozen_nonterminal_agent_refs(

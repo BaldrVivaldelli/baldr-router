@@ -5,6 +5,12 @@ on:
     tags:
       - 'v0.19.*'
   workflow_dispatch:
+    inputs:
+      publish_npm:
+        description: Publish the validated TypeScript SDK and driver to npm
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -27,11 +33,19 @@ jobs:
         with:
           node-version: '22'
           cache: npm
-          cache-dependency-path: facades/vscode-extension/package-lock.json
+          cache-dependency-path: |
+            package-lock.json
+            facades/vscode-extension/package-lock.json
+      - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm ci --ignore-scripts --no-audit --no-fund
         working-directory: facades/vscode-extension
       - run: python scripts/dev.py build
       - run: python scripts/dev.py verify-release
+      - name: Publish TypeScript agent packages to npm
+        if: github.event_name == 'workflow_dispatch' && inputs.publish_npm
+        run: |
+          npm publish --workspace @baldr/agent-sdk --access public --provenance
+          npm publish --workspace @baldr/agent-builder-typescript --access public --provenance
       - name: Attest release artifacts
         uses: actions/attest@v4
         with:
