@@ -150,23 +150,27 @@ def main() -> int:
                 "reviewer": "local://polyglot/typescript-agent-reviewer@1.0.0",
             }
 
-            result = DurableWorkflowEngine(
-                store=DurableStore(path=temp / "workflow.sqlite3"),
-                provider_runner=run_provider_role,
-            ).run(
-                workspace_root=workspace,
-                task="Create the generated TypeScript agent result and review it",
-                extra_context="",
-                config_snapshot=snapshot,
-                context7_libraries=None,
-                client_name="typescript-agent-builder-e2e",
-            )
-            assert result["ok"] is True
-            assert result["status"] == "approved"
-            output = workspace / "typescript-agent_result.md"
-            assert output.read_text(encoding="utf-8") == (
-                "# TypeScript external agent result\n"
-            )
+            store = DurableStore(path=temp / "workflow.sqlite3")
+            try:
+                result = DurableWorkflowEngine(
+                    store=store,
+                    provider_runner=run_provider_role,
+                ).run(
+                    workspace_root=workspace,
+                    task="Create the generated TypeScript agent result and review it",
+                    extra_context="",
+                    config_snapshot=snapshot,
+                    context7_libraries=None,
+                    client_name="typescript-agent-builder-e2e",
+                )
+                assert result["ok"] is True
+                assert result["status"] == "approved"
+                output = workspace / "typescript-agent_result.md"
+                assert output.read_text(encoding="utf-8") == (
+                    "# TypeScript external agent result\n"
+                )
+            finally:
+                store.close()
         finally:
             reset_agent_gateway()
 

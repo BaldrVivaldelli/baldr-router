@@ -102,6 +102,7 @@ def run_pilot(project_root: Path) -> dict[str, object]:
         config.workflows["architect-implement-review"].max_rounds = 0
         save_config(config)
         reset_agent_gateway()
+        store: DurableStore | None = None
         try:
             client = BuilderClient()
             tests = client.test(project)
@@ -203,6 +204,8 @@ def run_pilot(project_root: Path) -> dict[str, object]:
                 "output": OUTPUT_NAME,
             }
         finally:
+            if store is not None:
+                store.close()
             reset_agent_gateway()
             server.shutdown()
             server.server_close()
