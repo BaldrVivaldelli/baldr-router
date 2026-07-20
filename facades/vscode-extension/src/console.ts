@@ -14,6 +14,7 @@ import {
   buildPhaseDeliverablePresentations,
   buildWorkItemPresentation,
 } from './workItemPresentation.js';
+import { renderQualification } from './render.js';
 import {
   captureWorkspaceContext,
   contextualWorkspaceRoot,
@@ -1051,6 +1052,7 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
       { id: 'agents', label: '$(remote-explorer) Agentes externos', description: 'Consultar y asignar agentes registrados de forma segura' },
       { id: 'profile-create', label: '$(tools) Crear una configuración avanzada', description: 'Elegir proveedor y modelo paso a paso' },
       { id: 'context', label: '$(sparkle) Ayuda adicional', description: 'Buscar información útil cuando haga falta' },
+      { id: 'qualification', label: '$(verified-filled) Calificar VS Code + Codex', description: 'Ejecutar los gates reales y abrir la evidencia pendiente' },
       { id: 'status', label: '$(refresh) Actualizar', description: 'Volver a cargar las sesiones y su estado' },
       { id: 'logs', label: '$(output) Ver detalles técnicos', description: 'Abrir el registro de Baldr' },
     ], {
@@ -1074,10 +1076,56 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
       case 'agents': await this.chooseExternalAgent(); break;
       case 'profile-create': await this.createExecutionProfile(); break;
       case 'context': await this.chooseContextMode(); break;
+      case 'qualification': await this.runQualification(); break;
       case 'status': await this.refresh(); break;
       case 'logs': this.output.show(true); break;
       default: break;
     }
+  }
+
+  private async runQualification(): Promise<void> {
+    const root = this.requireWorkspace();
+    let result: JsonRecord;
+    try {
+      result = await vscode.window.withProgress({
+        location: vscode.ProgressLocation.Notification,
+        title: 'Calificando VS Code + Codex…',
+        cancellable: true,
+      }, (_progress, token) => this.runtime.runQualification(
+        root,
+        { includeProviderSmoke: true },
+        token,
+      ));
+    } catch (error) {
+      if (error instanceof vscode.CancellationError) return;
+      this.output.error(error instanceof Error ? error : new Error(String(error)));
+      void vscode.window.showErrorMessage('No pudimos completar la qualification. Abrí los detalles técnicos para revisar el motivo.');
+      return;
+    }
+
+    const report = await vscode.workspace.openTextDocument({
+      language: 'markdown',
+      content: renderQualification(result),
+    });
+    await vscode.window.showTextDocument(report, { preview: true, preserveFocus: false });
+
+    if (result.status === 'qualified') {
+      void vscode.window.showInformationMessage('VS Code + Codex quedó qualified para este entorno.');
+      return;
+    }
+    const choice = await vscode.window.showWarningMessage(
+      'La qualification sigue provisional. Completá únicamente evidencia observada en este entorno y volvé a ejecutar esta acción.',
+      'Abrir assertions',
+      'Abrir canarios',
+    );
+    const target = choice === 'Abrir assertions'
+      ? text(result.client_assertions_path)
+      : choice === 'Abrir canarios'
+        ? text(result.canary_results_path)
+        : '';
+    if (!target || !fs.existsSync(target)) return;
+    const document = await vscode.workspace.openTextDocument(vscode.Uri.file(target));
+    await vscode.window.showTextDocument(document, { preview: false, preserveFocus: false });
   }
 
   private async openChip(chip: string): Promise<void> {
@@ -1180,19 +1228,19 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
   private async chooseRoleProfiles(): Promise<void> {
     const choice = await vscode.window.showQuickPick([
       {
+        id: 'normal',
+        label: '$(organization) Codex o Kiro normal (recomendado)',
+        description: 'Conservar el proveedor habitual configurado para cada etapa',
+      },
+      {
         id: 'automatic',
-        label: '$(sparkle) Automático (recomendado)',
+        label: '$(sparkle) Automático',
         description: 'Baldr elige agentes compatibles y usa un respaldo si hace falta',
       },
       {
         id: 'per-stage',
         label: '$(remote-explorer) Elegir por etapa',
         description: 'Fijar un agente registrado sólo donde lo necesites',
-      },
-      {
-        id: 'normal',
-        label: '$(organization) Codex o Kiro normal',
-        description: 'Elegir el proveedor habitual de una etapa',
       },
     ], {
       title: 'Equipo de Baldr',
@@ -2282,6 +2330,7 @@ textarea::placeholder { color: var(--vscode-input-placeholderForeground); opacit
       <button type="button" class="plus-option" data-plus-action="preset" data-plus-group="preferences"><span class="plus-option-icon">◈</span><span><span class="plus-option-label">Nivel de detalle</span><span class="plus-option-detail">Rápido, estándar o detallado</span></span></button>
       <button type="button" class="plus-option" data-plus-action="roles" data-plus-group="preferences"><span class="plus-option-icon">◌</span><span><span class="plus-option-label">Equipo de Baldr</span><span class="plus-option-detail">Elegí modelos y cómo se reparte el trabajo</span></span></button>
       <button type="button" class="plus-option" data-plus-action="context" data-plus-group="preferences"><span class="plus-option-icon">?</span><span><span class="plus-option-label">Ayuda adicional</span><span class="plus-option-detail">Buscá información útil cuando haga falta</span></span></button>
+      <button type="button" class="plus-option" data-plus-action="qualification" data-plus-group="preferences"><span class="plus-option-icon">✓</span><span><span class="plus-option-label">Calificar VS Code + Codex</span><span class="plus-option-detail">Ejecutá los gates reales y abrí la evidencia pendiente</span></span></button>
       <div class="plus-empty" id="plusEmpty" hidden>No encontramos una opción con ese nombre.</div>
       <input class="plus-filter" id="plusFilter" type="search" placeholder="Buscar opciones" aria-label="Buscar opciones de Baldr">
     </div>
@@ -2368,7 +2417,7 @@ function nowCardHtml(presentation){ const latest=(presentation.milestones||[]).s
 function outcomeHtml(outcome,isFinal=false){if(!outcome)return '';const sections=outcome.sections||[];const technical=outcome.technicalSections||[];const fallback=outcome.tone==='positive'?'Baldr completó y revisó el trabajo.':'Este es el resultado disponible hasta el momento.';const eyebrow=isFinal?'Resultado final':'Resultado hasta ahora';const id='result-technical';const technicalDetails=technical.length?'<details class="disclosure"'+disclosureAttributes(id)+'><summary data-focus-key="disclosure-'+id+'">Detalles técnicos del resultado</summary>'+sectionsHtml(technical)+'</details>':'';return '<section class="result-card '+escapeHtml(outcome.tone||'neutral')+'" aria-labelledby="result-title"><div class="card-eyebrow">'+eyebrow+'</div><h3 class="card-title" id="result-title">'+escapeHtml(outcome.title||'Resultado hasta ahora')+'</h3><p class="card-copy">'+escapeHtml(outcome.summary||fallback)+'</p>'+factsHtml(outcome.facts)+fileChangesHtml(outcome.fileChanges)+sectionsHtml(sections)+technicalDetails+'</section>';}
 function hasReconciliation(item){ return (item.allowed_actions||[]).some(action=>['authorize_changes','decline_changes','inspect_shadow','continue_from_shadow','apply_shadow_changes','discard_shadow','resume_from_checkpoint','accept_existing_changes','discard_worktree','mark_failed'].includes(action)); }
 function authorizationActions(item,attention){if(attention?.kind!=='authorization')return null;const actions=item.allowed_actions||[];if(!actions.includes('authorize_changes')||!actions.includes('decline_changes'))return null;return {approve:'authorize_changes',decline:'decline_changes'};}
-function attentionPrimaryAction(item,attention){ if(!attention||authorizationActions(item,attention))return null;if(hasReconciliation(item))return {id:'reconcile',label:attention.actionLabel||'Elegir cómo continuar'};if(attention.retryable===true&&(item.allowed_actions||[]).includes('start'))return {id:'start',label:attention.actionLabel||'Volver a intentar'};return null; }
+function attentionPrimaryAction(item,attention){ if(!attention||authorizationActions(item,attention))return null;if(hasReconciliation(item))return {id:'reconcile',label:attention.actionLabel||'Elegir cómo continuar'};if(attention.kind==='changes_requested'&&(item.allowed_actions||[]).includes('continue'))return {id:'continue',label:attention.actionLabel||'Indicar correcciones'};if(attention.retryable===true&&(item.allowed_actions||[]).includes('start'))return {id:'start',label:attention.actionLabel||'Volver a intentar'};return null; }
 function attentionHtml(item,attention){ if(!attention)return '';const authorization=authorizationActions(item,attention);const primary=attentionPrimaryAction(item,attention);const blockers=attention.blockers||[];const disabled=state.busy?' disabled':'';const authorizationHtml=authorization?'<div class="attention-action"><button class="action primary" data-action="'+authorization.approve+'" data-focus-key="action-'+authorization.approve+'"'+disabled+'>Autorizar cambios y reintentar</button><button class="action" data-action="'+authorization.decline+'" data-focus-key="action-'+authorization.decline+'"'+disabled+'>No autorizar</button></div>':'';return '<section class="attention-card" role="alert" aria-labelledby="attention-title"><div class="card-eyebrow">Necesita tu atención</div><h3 class="card-title" id="attention-title">'+escapeHtml(attention.title)+'</h3><p class="card-copy">'+escapeHtml(attention.message)+'</p>'+(blockers.length?'<section class="report-section danger"><h4 class="report-section-title">Qué necesita resolverse</h4><ul>'+blockers.map(blocker=>'<li>'+escapeHtml(blocker)+'</li>').join('')+'</ul></section>':'')+authorizationHtml+(primary?'<div class="attention-action"><button class="action primary" data-action="'+escapeHtml(primary.id)+'" data-focus-key="action-'+escapeHtml(primary.id)+'"'+disabled+'>'+escapeHtml(primary.label)+'</button></div>':'')+'</section>'; }
 function refreshErrorHtml(hasItemAttention){ if(!state.error||hasItemAttention)return '';return '<section class="refresh-error" role="alert"><div class="refresh-error-title">No pudimos actualizar esta vista</div><p class="refresh-error-copy">Tu sesión sigue guardada. Probá nuevamente.</p><button type="button" class="action" data-refresh-action data-focus-key="refresh-error">Reintentar</button></section>'; }
 function globalTechnicalHtml(presentation){ const rows=presentation.technicalRows||[];const id='technical-session';return '<details class="disclosure"'+disclosureAttributes(id)+'><summary data-focus-key="disclosure-'+id+'">Detalles técnicos de la sesión</summary>'+(rows.length?'<div class="technical-grid">'+technicalRowsHtml(rows)+'</div>':'')+'<p><button class="action" data-action="logs" data-focus-key="action-logs">Abrir registro técnico</button></p></details>'; }
@@ -2427,7 +2476,7 @@ function sessionProgressHtml(stages,presentation,expanded){if(!stages.length)ret
 		 els.content.querySelector('[data-deliverable-technical]')?.addEventListener('toggle',event=>{deliverableTechnicalOpen=Boolean(event.currentTarget?.open);});
 	 const deliverablePanel=els.content.querySelector('.deliverable-panel');if(deliverablePanel)deliverablePanel.addEventListener('keydown',event=>trapDeliverableFocus(event,deliverablePanel));
  els.content.querySelectorAll('[data-disclosure]').forEach(node=>node.addEventListener('toggle',()=>{const itemId=String(item.id||'selected');const values=new Set(Array.isArray(openDisclosuresByItem[itemId])?openDisclosuresByItem[itemId]:[]);if(node.open)values.add(node.dataset.disclosure);else values.delete(node.dataset.disclosure);openDisclosuresByItem[itemId]=[...values];saveViewState();}));
- els.content.querySelectorAll('[data-action]').forEach(node => node.addEventListener('click',()=>{ const action=node.dataset.action; if(action==='logs')post({type:'openLogs'}); else post({type:'itemAction',action,itemId:item.id}); }));
+ els.content.querySelectorAll('[data-action]').forEach(node => node.addEventListener('click',()=>{ const action=node.dataset.action; if(action==='logs')post({type:'openLogs'}); else if(action==='continue')els.input.focus(); else post({type:'itemAction',action,itemId:item.id}); }));
  els.content.querySelector('[data-refresh-action]')?.addEventListener('click',()=>post({type:'refresh'}));
 		 els.content.scrollTop=previousScroll;const nextDeliverableBody=els.content.querySelector('.deliverable-body');if(nextDeliverableBody)nextDeliverableBody.scrollTop=deliverableScrollTop;const requestedFocus=pendingFocusKey||focusKey;pendingFocusKey='';if(requestedFocus){const focusTarget=[...els.content.querySelectorAll('[data-focus-key]')].find(node=>node.dataset.focusKey===requestedFocus);focusTarget?.focus({preventScroll:true});}
 }

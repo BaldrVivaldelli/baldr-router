@@ -44,6 +44,7 @@ def codex_preflight(*, force: bool = False) -> dict[str, Any]:
         return provider_error(
             "codex_not_found",
             "Codex CLI was not found. Install Codex CLI and run `codex login`.",
+            retryable=True,
             provider="codex",
         )
     if os.environ.get("BALDR_SKIP_CODEX_LOGIN_CHECK") == "1":
@@ -58,6 +59,7 @@ def codex_preflight(*, force: bool = False) -> dict[str, Any]:
         result = provider_error(
             "codex_not_authenticated",
             "Codex is not authenticated. Run `codex login` and choose ChatGPT sign-in.",
+            retryable=True,
             provider="codex",
             details={
                 "exit_code": status.get("exit_code"),
@@ -169,6 +171,7 @@ def codex_model_catalog(*, force: bool = False) -> dict[str, Any]:
         return provider_error(
             "codex_not_found",
             "Codex CLI was not found. Install Codex CLI before listing models.",
+            retryable=True,
             provider="codex",
         )
 

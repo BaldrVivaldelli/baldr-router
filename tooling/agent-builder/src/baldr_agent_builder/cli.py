@@ -8,7 +8,7 @@ from baldr_agent_sdk.contract import ContractError
 
 from .client import BuilderClient
 from .conformance import driver_conformance
-from .config import load_project
+from .config import load_project, set_project_version
 from .diagnostics import project_doctor
 from .drivers import driver_status, register_driver
 from .execution import run_agent
@@ -113,6 +113,11 @@ def _cmd_rollback(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_version(args: argparse.Namespace) -> int:
+    _print(set_project_version(args.project, args.version))
+    return 0
+
+
 def _cmd_driver_list(args: argparse.Namespace) -> int:
     del args
     _print(driver_status())
@@ -211,6 +216,13 @@ def build_parser() -> argparse.ArgumentParser:
     command.add_argument("version")
     command.add_argument("--project", default=".")
     command.set_defaults(func=_cmd_rollback)
+
+    command = sub.add_parser(
+        "version", help="Set the next exact immutable project version"
+    )
+    command.add_argument("version")
+    command.add_argument("--project", default=".")
+    command.set_defaults(func=_cmd_version)
 
     command = sub.add_parser("driver", help="Discover and manage Builder drivers")
     driver_sub = command.add_subparsers(dest="driver_command", required=True)

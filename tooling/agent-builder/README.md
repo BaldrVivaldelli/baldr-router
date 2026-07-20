@@ -22,7 +22,8 @@ baldr-agent run --role implementer --workspace ../demo --request "Create the res
 The Builder reads `baldr-agent.toml`, runs declared tests, creates a
 deterministic self-contained artifact, installs immutable release metadata,
 publishes through the local catalog or Agent Manager, executes an ephemeral
-development release through Runner and can reactivate a previous version with
+development release through Runner, sets the next exact release with
+`baldr-agent version VERSION` and can reactivate a previous version with
 `baldr-agent rollback VERSION`.
 
 `test`, `build` and `publish` use the versioned

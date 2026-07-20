@@ -2,6 +2,96 @@
 
 ## 0.20.0 — Polyglot External Agents
 
+- Unified shutdown, cancellation and restart recovery across Router and VS
+  Code. Startup now settles only deterministic durable states automatically,
+  while uncertain writes remain operator-controlled and are never retried
+  blindly.
+- Made runtime shutdown own every spawned process tree and added post-settlement
+  cleanup validation. Remaining live processes keep the operation failed and
+  surface bounded orphan evidence instead of producing a false successful
+  result.
+- Standardized provider failures as redacted technical diagnostics plus a
+  bounded actionable `summary` and `action`. VS Code presents the safe guidance
+  while preserving the detailed code and message in its technical log.
+- Documented one authoritative cancellation and recovery contract shared by
+  the Router, CLI, MCP facade, launcher and VS Code extension.
+- Made persisted direct-workspace consent authoritative over architecture
+  narration: planners no longer ask for per-task file-write authorization, and
+  stale authorization requests are removed before they reach durable progress.
+- Recorded pre-existing in-place workspace changes as a durable baseline and
+  instructed implementation/review participants to preserve that user-owned
+  state, preventing later tasks in the same session from cleaning or deleting
+  files merely to obtain a clean Git status.
+- Serialized private-runtime installation across concurrent extension,
+  qualification, facade and MCP startup paths, with stale-lock recovery and a
+  shared in-process initialization request.
+- Narrowed the v0.20 promotion gate to the VS Code Remote WSL + Codex golden
+  path. Kiro remains packaged, tested, documented and independently
+  qualifiable, but its real-client qualification is deferred and cannot block
+  or satisfy this release gate.
+- Added digest-checked `qualification promotion-status` verification and made
+  the release workflow consume the qualified real-environment receipt before
+  publishing artifacts.
+- Connected the existing VS Code qualification runtime to the Baldr `+` menu.
+  It now runs the real Codex smoke, opens the qualification report and offers
+  the exact assertion and canary files that still need observed evidence,
+  without adding another Command Palette command or facade intent.
+- Fixed the VS Code qualification flow to treat the CLI's exit code 2 as an
+  honest provisional receipt instead of a runtime failure. Successful lab and
+  Codex smoke evidence is now shown together with the assertions and canaries
+  that remain pending.
+- Replaced the dead-end review attention state with a safe **Indicar
+  correcciones** action. It focuses the existing continuation composer without
+  retrying a failed write or weakening reconciliation requirements.
+- Qualification now auto-attests only assertions proven by the current real
+  lab, client receipt, environment match or bounded workspace profile. Visual
+  observations and repository canaries remain explicitly pending instead of
+  asking operators to duplicate machine evidence by hand.
+- Made changed-file navigation an explicit real-client qualification
+  assertion. A receipt cannot promote the VS Code golden path merely because
+  the file card renders or a unit test clicks it; an added or modified path
+  must open inside the exact trusted workspace under qualification.
+- Existing assertion files now migrate forward by appending newly required
+  pending entries while preserving every prior status, note and evidence
+  reference, so tightening a profile never leaves the operator with an
+  impossible-to-complete receipt.
+- Extended the real three-pass Lab with a disposable local SQLite durability
+  contract covering restart recovery, read/write interruption semantics,
+  session isolation, lease fencing, idempotency conflicts, maintenance and
+  configured-role resolution. Receipts link those assertions to exact Lab run
+  IDs while leaving UI, uninstall/reinstall and repository evidence pending.
+- Added a fail-closed reconciliation contract that exercises every allowed
+  action against its own disposable repository, SQLite database and durable
+  run. Qualification now attests `reconciliation.all_actions` only when all ten
+  actions were offered by their state and produced the expected event and
+  terminal outcome in each of three consecutive Lab passes.
+- Aligned the frozen canary template and operator runbook on one real Python
+  repository plus one distinct real Node repository, with the exact change,
+  cancellation, recovery, conflict, upgrade, session, fencing and redaction
+  observations required by the promotion gate.
+- Made canary evidence fail closed: every referenced workflow bundle must
+  exist locally, match the declared run and Baldr version, pass artifact hash
+  and state-fingerprint verification, and satisfy the privacy projection.
+  Durable UI cancellation now emits workflow evidence for its terminal state.
+- Activated the VS Code facade after trusted-workspace startup so runtime
+  bootstrap, the client receipt, and first-use guidance no longer depend on
+  discovering and opening the Baldr view first.
+- Unified the direct trusted-workspace default across durable work items, CLI,
+  MCP, VS Code and Kiro; per-task write authorization remains an explicit
+  `automatic` opt-in.
+- Added one product golden path and a readiness evidence matrix covering clean
+  installation, first task, recovery, external-agent lifecycle and rollback.
+- Added installed-package Python lifecycle evidence matching the existing
+  TypeScript gate: local run, reproducibility, immutable publication, update
+  and rollback.
+- Added the versioned Kiro launcher tarball to the executable release bundle
+  and a clean-install gate proving the packaged Power, launcher, Router and
+  adapter work together without an npm registry or source checkout.
+- Clarified the supported Kiro Power install flow, its generated
+  `powers.mcpServers` registration, and the actionable failure produced when
+  an enterprise MCP Registry policy excludes local Powers.
+- Added `baldr-agent version VERSION` so the normal immutable update and
+  rollback journey does not require hand-editing project TOML.
 - Promoted the external-agent platform into a coordinated release of Router, Agent Manager, Runner, Agent Builder, the Python SDK, the TypeScript SDK and the TypeScript Builder driver.
 - Added `baldr-agent run` for an exact, ephemeral development execution through Agent Runner with an explicit workspace and the role's declared effect boundary.
 - Added `baldr-agent driver conformance` to verify stable driver identity, fail-closed protocol negotiation, tests, artifact attestation, reproducible builds and checkout-independent output against a real agent project.

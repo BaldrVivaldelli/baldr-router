@@ -6,6 +6,11 @@ Native VS Code facade for the client-agnostic **Baldr Router** MCP runtime.
 
 The extension contributes its own **Baldr** section to the Activity Bar. Copilot Chat remains optional.
 
+After VS Code finishes starting a trusted workspace, the extension prepares its
+private runtime and records the client receipt in the background. The Activity
+Bar remains the primary place to start work; opening it is no longer required
+just to initialize Baldr or surface the first-use prompt.
+
 ```text
 Baldr
   -> durable task list
@@ -41,21 +46,34 @@ The commands are aliases over the existing `setup`, `status`, and `run` facade c
 
 ### `+` menu
 
-Use `+` to create an item, attach the active file or selection, choose a file/folder or active workspace root, switch preset or Git mode, configure Context7, choose role profiles, or open logs.
+Use `+` to create an item, attach the active file or selection, choose a
+file/folder or active workspace root, switch preset or Git mode, configure
+Context7, choose role profiles, run the VS Code + Codex real-environment
+qualification, or open logs. Qualification stays inside this searchable menu
+so the extension continues to expose only one Command Palette action.
 
 ### Git modes
 
 ```text
-Git worktree       recommended, isolated, recoverable
-Current workspace  in-place, clean Git repository required
+Current workspace  recommended default, direct work in the trusted Git repository
+Ask permission     optional per-task pause before the first write
 Non-Git            explicit consent, reduced recovery guarantees
 ```
 
-The extension never silently disables Git safety.
+Legacy worktree/shadow sessions keep their recorded recovery semantics. The
+extension never silently changes the mode of an existing durable session.
 
 ## Durable state
 
 Tasks are persisted by the core in SQLite, not in the webview. Closing VS Code or restarting Baldr does not erase the work-item list. The selected item displays architecture, implementation, review, durable cancellation, and reconciliation state.
+
+On shutdown the extension terminates every runtime process tree it owns. On the
+next trusted startup it asks the Router to settle the workspace: safe
+read-only interruptions resume, pending cancellations finish, and ambiguous
+write effects remain paused for an explicit choice. The Router response also
+validates that no managed process remains orphaned. Technical failures keep
+their stable code and redacted message under details while the main view shows
+one actionable summary.
 
 Each normal follow-up appends an immutable turn to the same work item and
 starts a new durable run. Only a bounded structured result from the previous

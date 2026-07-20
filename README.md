@@ -52,6 +52,11 @@ agente. Los drivers traducen el protocolo neutral de Builder al toolchain de un
 lenguaje. Baldr almacena la identidad y ubicación del release; no se convierte
 en dueño del código fuente del agente.
 
+> **¿Querés usar Baldr y no desarrollar el monorepo?** Empezá por el
+> [`golden path`](docs/golden-path.md): instalación, primera tarea,
+> recuperación, agentes externos, actualización y rollback sin editar
+> configuración manual.
+
 ## Dos formas de usar Baldr
 
 ### 1. Codex o Kiro directamente
@@ -227,8 +232,9 @@ make check
 
 > **v0.20.0 — Agentes externos políglotas.** La consola explica en lenguaje cotidiano
 > qué entendió Baldr, qué está haciendo, qué produjo Planificación, Ejecución y
-> Revisión, qué comprobó y cuándo necesita una decisión. La protección
-> automática de v0.18 continúa siendo la opción recomendada.
+> Revisión, qué comprobó y cuándo necesita una decisión. El recorrido normal
+> trabaja directamente sobre el workspace confiado; la autorización por tarea
+> de v0.18 continúa disponible como una opción explícita.
 
 
 ## Real Environment Qualification
@@ -243,17 +249,22 @@ Comandos operativos, sin cambiar las intenciones MCP públicas `setup/status/run
 
 ```bash
 baldr-router qualification definitions
-baldr-router qualification template --profile vscode-windows-wsl --output-dir ./qualification-input
+baldr-router qualification template --profile vscode-remote-wsl --output-dir ./qualification-input
 baldr-router qualification run \
-  --profile vscode-windows-wsl \
+  --profile vscode-remote-wsl \
   --workspace-root /path/to/repo \
   --client-assertions ./qualification-input/client-assertions.json \
   --canary-results ./qualification-input/canary-results.json \
   --repeat 3
 baldr-router qualification status --latest
+baldr-router qualification promotion-status --receipt ./qualification-output --release-version 0.20.0
 ```
 
 `qualified` exige el entorno exacto, todas las assertions del cliente, tres pases del Lab y diez tareas con evidence sobre dos repositorios distintos. Un build de CI siempre queda como máximo `provisional`.
+
+El gate de promoción de esta iteración es el recorrido VS Code Remote WSL +
+Codex. Kiro mantiene su implementación, paquetes y pruebas, pero su
+qualification real no bloquea v0.20 y se retomará en una iteración posterior.
 
 Guía: [`docs/real-environment-qualification.md`](docs/real-environment-qualification.md)
 
@@ -390,6 +401,18 @@ Después instalá el Power desde:
 facades/kiro/baldr-orchestrator/
 ```
 
+La distribución ejecutable también incluye
+`artifacts/node/baldr-router-launcher-0.20.0.tgz`. Instalalo en el host que
+inicia Kiro antes de cargar el Power; el launcher encuentra primero un Router
+local y usa WSL como fallback automático. No hace falta editar `mcp.json` ni
+depender de un checkout del monorepo:
+
+```bash
+npm install --global \
+  ./artifacts/node/baldr-router-launcher-0.20.0.tgz
+baldr-router-launcher detect
+```
+
 Frase sugerida:
 
 ```text
@@ -417,7 +440,7 @@ Un solo perfil puede respaldar las tres fases o cada fase puede tener su lista o
 Baldr control plane
   -> SQLite state machine + event journal
   -> architecture participants
-  -> autorización de escritura cuando el plan la requiere
+  -> permisos efectivos = fase ∩ capacidades del agente
   -> implementación directa en el workspace elegido
   -> review participants
   -> bounded fixes
@@ -524,7 +547,7 @@ baldr-router trust-workspace /path/to/repo
 baldr-router untrust-workspace /path/to/repo
 ```
 
-Las fachadas nativas pueden pasar roots confiables mediante `BALDR_TRUSTED_WORKSPACE_ROOTS_JSON`; eso no desactiva el bloqueo de rutas sensibles, la autorización de escritura ni la confirmación requerida para trabajar sin Git.
+Las fachadas nativas pueden pasar roots confiables mediante `BALDR_TRUSTED_WORKSPACE_ROOTS_JSON`; eso no desactiva el bloqueo de rutas sensibles, la intersección de capacidades de escritura ni la confirmación requerida para trabajar sin Git.
 
 ## Error handling y cancelación
 
@@ -540,6 +563,14 @@ codex_invalid_structured_output
 ```
 
 Los subprocesses se ejecutan en grupos propios y Baldr termina sus descendientes ante timeout, cancelación, señal o shutdown. Los runners `app-server` y `sdk` permanecen experimentales; `exec-json` es el default estable.
+
+El mismo contrato se usa desde Router y VS Code: cancelar persiste primero
+`cancelling`, termina el árbol y materializa `cancelled`; cerrar el cliente
+termina los árboles capturados y el siguiente arranque resuelve únicamente los
+estados recuperables sin decisiones alternativas. Cada cierre automático
+incluye `process_validation.orphan_processes`, y cada error separa el código y
+mensaje técnicos de `error.summary` y `error.action`. La definición normativa
+está en [`docs/consistency-operator-control.md`](docs/consistency-operator-control.md#contrato-único-de-cierre-cancelación-y-recuperación).
 
 ## Context7 y secretos
 
@@ -635,6 +666,8 @@ El build genera wheels, VSIX, ZIPs de fachadas, checksums y `dist/RC_VALIDATION.
 
 ## Documentación
 
+- [`docs/golden-path.md`](docs/golden-path.md) — recorrido único de instalación, primera tarea, recuperación y agentes externos
+- [`docs/product-readiness.md`](docs/product-readiness.md) — evidencia automática y qualification real pendiente
 - [`docs/agentes-externos-necesitan-fronteras.md`](docs/agentes-externos-necesitan-fronteras.md) — artículo de diseño sobre la plataforma de agentes externos
 - [`docs/architecture.md`](docs/architecture.md)
 - [`docs/durable-orchestration.md`](docs/durable-orchestration.md)

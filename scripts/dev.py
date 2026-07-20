@@ -223,6 +223,17 @@ def verify_release() -> None:
         raise SystemExit("dist/release-manifest.json is missing. Run `python scripts/dev.py build` first.")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     failures: list[str] = []
+    promotion = manifest.get("promotion") or {}
+    if manifest.get("qualification_required_for_promotion") is not True:
+        failures.append("release manifest does not require real qualification")
+    if promotion.get("provider") != "codex":
+        failures.append("release promotion provider must be codex")
+    if promotion.get("required_profiles") != ["vscode-remote-wsl"]:
+        failures.append(
+            "release promotion must require only the vscode-remote-wsl profile"
+        )
+    if "kiro-windows-wsl" not in (promotion.get("deferred_profiles") or []):
+        failures.append("Kiro must remain explicitly deferred from the v0.20 gate")
     for item in manifest.get("artifacts", []):
         path = DIST / str(item["path"])
         if not path.exists():

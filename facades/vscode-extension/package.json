@@ -26,6 +26,7 @@
     "ui"
   ],
   "activationEvents": [
+    "onStartupFinished",
     "onView:baldr.console",
     "onCommand:baldr.open",
     "onChatParticipant:baldr.vscode",
@@ -130,11 +131,13 @@
     "compile": "npm run clean && tsc -p ./",
     "check": "tsc -p ./ --noEmit",
     "package": "npm run compile && vsce package --no-dependencies --allow-missing-repository",
-    "test": "npm run compile && node --test ./tests/*.test.mjs"
+    "test": "npm run compile && node --test ./tests/*.test.mjs",
+    "test:extension-host": "npm run compile && node ./scripts/run-extension-host-tests.mjs"
   },
   "devDependencies": {
     "@types/node": "^26.1.1",
     "@types/vscode": "^1.125.0",
+    "@vscode/test-electron": "^3.0.0",
     "@vscode/vsce": "^3.9.2",
     "typescript": "^5.8.3"
   },

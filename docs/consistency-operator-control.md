@@ -1,5 +1,72 @@
 # Consistency & Operator Control
 
+> **Baldr retoma las operaciones que ya están preparadas. Si el siguiente paso
+> requiere cambiar esa preparación, presenta las opciones disponibles antes de
+> continuar.**
+
+Esta regla es compartida por Baldr y sus interfaces. Al retomar se reutilizan
+el espacio de trabajo, el modo, las asignaciones y la ejecución previamente
+registrados. Las alternativas con resultados distintos permanecen detenidas
+hasta que se elija una.
+
+## Contrato único de cierre, cancelación y recuperación
+
+El Router es la única fuente de verdad. VS Code, CLI y MCP invocan las mismas
+acciones durables; ninguna interfaz vuelve a deducir estados ni ejecuta una
+recuperación propia.
+
+```text
+cancelación solicitada
+  -> persistir cancelling
+  -> terminar el árbol de procesos
+  -> materializar cancelled
+  -> validar orphan_processes = 0
+
+cierre de VS Code/runtime
+  -> terminar todos los árboles capturados por el cliente
+  -> el Router termina sus providers al recibir la señal
+  -> el siguiente inicio clasifica el run durable y lo retoma o reconcilia
+```
+
+Al iniciar sobre una carpeta confiable, VS Code llama una vez a
+`settle-workspace`. El Router ejecuta primero `recover_stale_runs` y aplica
+solamente una resolución ya autorizada y sin una alternativa de efectos
+equivalente:
+
+| Estado durable | Acción automática | Resultado |
+| --- | --- | --- |
+| `cancelling` | `finalize_cancel` | cierre terminal idempotente |
+| `interrupted` o `recovering` de solo lectura | `resume` | continuación desde el estado confirmado |
+| conflicto de publicación con un único efecto seguro hacia adelante | `apply_shadow_changes` | publicación idempotente o nueva pausa explícita |
+| reconciliación cuyo único cierre permitido es `mark_failed` | `mark_failed` | cierre terminal preservando evidencia |
+| escritura incierta con efectos alternativos | ninguna | `requires_user=true` y opciones durables exactas |
+
+Cada resolución devuelve `cause`, `action`, `performed_action`,
+`requires_user`, `permission_boundary` y `process_validation`. Una respuesta no
+puede declararse limpia sólo porque el registro en memoria quedó vacío: si la
+terminación falla, el proceso permanece registrado y la validación devuelve su
+PID como huérfano.
+
+Los errores usan un solo formato en el Router:
+
+```text
+error.code       -> identificador técnico estable
+error.message    -> detalle técnico redactado
+error.summary    -> síntesis segura para la persona
+error.action     -> siguiente paso concreto
+error.retryable  -> habilita o no el reintento durable
+```
+
+VS Code muestra `summary` y la acción permitida; el código y el mensaje quedan
+en **Detalles técnicos**. Si la recuperación automática falla, la sesión sigue
+guardada, VS Code ofrece abrir Baldr y el Router devuelve
+`automatic_settlement_failed` sin inventar un estado terminal.
+
+La respuesta expone `cause`, `action`, `requires_user`, `needs_input_reason`,
+`allowed_actions` y `permission_boundary`. Esta última indica
+`expands_permissions=false`, por lo que una interfaz puede explicar lo ocurrido sin
+deducir ni alterar el alcance guardado.
+
 Baldr Router v0.16 mantiene el contrato público congelado en `setup`, `status` y `run`, pero endurece el control plane durable para que crashes, takeovers, cancelaciones y reintentos no produzcan estados contradictorios.
 
 ## 1. Fencing tokens
@@ -99,7 +166,7 @@ La política siguiente permanece para flujos aislados explícitos de worktree/sh
 dirty_workspace_policy = "reject"
 ```
 
-`automatic` es el flujo predeterminado de escritura directa con autorización previa por tarea. `current` e `in-place` conservan el consentimiento directo persistente y exactamente la subcarpeta elegida como cwd, aunque Git se encuentre en un padre. `non-git` corresponde a **Sin protección** y exige consentimiento explícito. `worktree`, `auto` de bajo nivel y los shadows se conservan para runs aislados existentes y configuración avanzada.
+`current` es el flujo predeterminado: conserva el consentimiento del workspace confiado y exactamente la subcarpeta elegida como cwd, aunque Git se encuentre en un padre. `automatic` es una elección explícita que agrega autorización previa por tarea. `non-git` corresponde a **Sin protección** y exige consentimiento explícito. `worktree`, `auto` de bajo nivel y los shadows se conservan para runs aislados existentes y configuración avanzada.
 
 Antes de crear un shadow, Baldr excluye `.git`, `.hg`, `.svn`, un denylist mínimo no reemplazable de credenciales, patrones sensibles configurados y artefactos generados. Aplica límites visibles de entradas (incluidos directorios), bytes totales, tamaño individual, profundidad y enlaces. Sólo acepta symlinks relativos que permanezcan dentro del alcance; rechaza rutas no portables y reparse points no soportados. Los modos POSIX se conservan donde el filesystem los soporte; Windows usa semántica de permisos de mejor esfuerzo y falla explícitamente si no puede recrear un enlace.
 

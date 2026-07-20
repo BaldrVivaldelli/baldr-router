@@ -114,7 +114,7 @@ def test_team_preferences_are_explicit_and_frozen_into_each_work_item(
     service = WorkItemService()
 
     defaults = service.preferences(repo)
-    assert defaults["team_mode"] == "automatic"
+    assert defaults["team_mode"] == "configured"
     assert defaults["agent_overrides"] == {}
 
     reference = "local://kiro/planner@1.0.0"
@@ -436,6 +436,13 @@ def test_console_options_are_aliases_over_setup_status_run():
     assert "recommended" not in safety["automatic"]
     assert "default" not in safety["automatic"]
     assert safety["non-git"]["label"] == "Sin protección"
+    teams = {entry["id"]: entry for entry in options["team_modes"]}
+    assert set(teams) == {"automatic", "configured"}
+    assert teams["configured"]["label"] == "Codex o Kiro normal"
+    assert teams["configured"]["recommended"] is True
+    assert teams["configured"]["default"] is True
+    assert "recommended" not in teams["automatic"]
+    assert "default" not in teams["automatic"]
     assert {entry["id"] for entry in options["presets"]} == {
         "fast",
         "balanced",

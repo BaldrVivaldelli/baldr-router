@@ -35,6 +35,20 @@ baldr-router-launcher detect
 baldr-router-launcher mcp
 ```
 
+## Install from a Baldr release
+
+The executable artifact bundle includes the exact launcher version expected by
+the Kiro Power. On the host that starts Kiro and its MCP processes, run:
+
+```bash
+npm install --global \
+  ./artifacts/node/baldr-router-launcher-0.20.0.tgz
+baldr-router-launcher detect
+```
+
+This installation uses the local tarball and does not require the Baldr source
+checkout or a published npm registry package.
+
 ## Modes
 
 ```text

@@ -148,6 +148,84 @@ function hostVenvPaths(runtimeDir, version = VERSION, rootOverride = '') {
   };
 }
 
+function pauseSynchronously(milliseconds) {
+  const signal = new Int32Array(new SharedArrayBuffer(4));
+  Atomics.wait(signal, 0, 0, Math.max(1, milliseconds));
+}
+
+function activeLockOwner(lockRoot) {
+  try {
+    const owner = JSON.parse(fs.readFileSync(path.join(lockRoot, 'owner.json'), 'utf8'));
+    if (owner.hostname !== os.hostname()) return false;
+    const pid = Number(owner.pid);
+    if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      return error?.code === 'EPERM';
+    }
+  } catch {
+    return false;
+  }
+}
+
+export function acquireHostInstallLock(runtimeDir, options = {}) {
+  const version = options.version || VERSION;
+  const timeoutMs = Math.max(1, Number(options.timeoutMs ?? 180_000));
+  const staleMs = Math.max(timeoutMs, Number(options.staleMs ?? 600_000));
+  const pollMs = Math.max(10, Number(options.pollMs ?? 100));
+  const debug = options.debug || (() => {});
+  const versionDir = path.join(runtimeDir, version);
+  const lockRoot = path.join(versionDir, 'host.install.lock');
+  const token = `${process.pid}-${Date.now()}`;
+  const deadline = Date.now() + timeoutMs;
+  fs.mkdirSync(versionDir, { recursive: true });
+
+  while (true) {
+    try {
+      fs.mkdirSync(lockRoot);
+      fs.writeFileSync(path.join(lockRoot, 'owner.json'), `${JSON.stringify({
+        token,
+        pid: process.pid,
+        hostname: os.hostname(),
+        createdAt: new Date().toISOString(),
+      })}\n`, 'utf8');
+      return {
+        lockRoot,
+        release() {
+          try {
+            const owner = JSON.parse(fs.readFileSync(path.join(lockRoot, 'owner.json'), 'utf8'));
+            if (owner.token === token) fs.rmSync(lockRoot, { recursive: true, force: true });
+          } catch {
+            // A failed or replaced lock must never remove another installer's lock.
+          }
+        },
+      };
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw error;
+      let ageMs = 0;
+      try {
+        ageMs = Date.now() - fs.statSync(lockRoot).mtimeMs;
+      } catch (statError) {
+        if (statError?.code === 'ENOENT') continue;
+        throw statError;
+      }
+      if (ageMs > staleMs && !activeLockOwner(lockRoot)) {
+        debug(`removing stale runtime install lock at ${lockRoot}`);
+        fs.rmSync(lockRoot, { recursive: true, force: true });
+        continue;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `Timed out waiting for another Baldr process to finish installing the private runtime at ${lockRoot}`,
+        );
+      }
+      pauseSynchronously(pollMs);
+    }
+  }
+}
+
 function findHostPython(options = {}) {
   const platform = options.platform || process.platform;
   const capture = options.capture || runCapture;
@@ -172,7 +250,20 @@ function findHostPython(options = {}) {
   return null;
 }
 
-function installHostRuntime({ runtimeDir, wheelPath, debug, keepVersions, platform, capture }) {
+function installHostRuntime(options) {
+  const { runtimeDir, wheelPath, debug } = options;
+  const finalPaths = hostVenvPaths(runtimeDir);
+  if (managedRuntimeCurrent(finalPaths.root, finalPaths.router, wheelPath)) return finalPaths.router;
+  const installLock = acquireHostInstallLock(runtimeDir, { debug });
+  try {
+    if (managedRuntimeCurrent(finalPaths.root, finalPaths.router, wheelPath)) return finalPaths.router;
+    return installHostRuntimeUnlocked(options);
+  } finally {
+    installLock.release();
+  }
+}
+
+function installHostRuntimeUnlocked({ runtimeDir, wheelPath, debug, keepVersions, platform, capture }) {
   const finalPaths = hostVenvPaths(runtimeDir);
   if (managedRuntimeCurrent(finalPaths.root, finalPaths.router, wheelPath)) return finalPaths.router;
   if (!wheelPath || !fs.existsSync(wheelPath)) {
@@ -531,7 +622,14 @@ export function spawnRuntime(target, routerArgs, options = {}) {
 }
 
 export async function terminateChildTree(child, { graceMs = 400 } = {}) {
-  if (!child?.pid || child.exitCode !== null || child.killed) return;
+  if (!child?.pid) return;
+  const waitForClose = async (milliseconds) => {
+    if (child.exitCode !== null) return;
+    await new Promise((resolve) => {
+      const timer = setTimeout(resolve, milliseconds);
+      child.once('close', () => { clearTimeout(timer); resolve(); });
+    });
+  };
   if (process.platform === 'win32') {
     const killer = spawn('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], {
       windowsHide: true,
@@ -541,13 +639,17 @@ export async function terminateChildTree(child, { graceMs = 400 } = {}) {
       killer.once('error', resolve);
       killer.once('close', resolve);
     });
+    await waitForClose(1000);
     return;
   }
   try { process.kill(-child.pid, 'SIGTERM'); } catch { try { child.kill('SIGTERM'); } catch { /* best effort */ } }
   await new Promise((resolve) => setTimeout(resolve, graceMs));
-  if (child.exitCode === null) {
+  let groupAlive = false;
+  try { process.kill(-child.pid, 0); groupAlive = true; } catch { /* already gone */ }
+  if (groupAlive) {
     try { process.kill(-child.pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch { /* best effort */ } }
   }
+  await waitForClose(1000);
 }
 
 export function proxyRuntime(target, routerArgs, options = {}) {

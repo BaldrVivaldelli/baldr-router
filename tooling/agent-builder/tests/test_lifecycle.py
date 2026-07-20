@@ -249,6 +249,57 @@ def test_cli_refuses_to_overwrite_an_initialized_directory(
     )
 
 
+def test_cli_sets_exact_version_without_rewriting_project_config(
+    tmp_path: Path, capsys
+) -> None:
+    root = _project(tmp_path)
+    config = root / "baldr-agent.toml"
+    before = config.read_text(encoding="utf-8")
+
+    exit_code = main(["version", "1.1.0", "--project", str(root)])
+    result = json.loads(capsys.readouterr().out)
+    after = config.read_text(encoding="utf-8")
+
+    assert exit_code == 0
+    assert result["previous_version"] == "1.0.0"
+    assert result["version"] == "1.1.0"
+    assert result["changed"] is True
+    assert load_project(root).version == "1.1.0"
+    assert after == before.replace('version = "1.0.0"', 'version = "1.1.0"', 1)
+
+    assert main(["version", "1.1.0", "--project", str(root)]) == 0
+    assert json.loads(capsys.readouterr().out)["changed"] is False
+
+
+def test_cli_rejects_moving_project_version(tmp_path: Path, capsys) -> None:
+    root = _project(tmp_path)
+
+    exit_code = main(["version", "latest", "--project", str(root)])
+    result = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 2
+    assert result["error"]["code"] == "baldr_agent_operation_failed"
+    assert "exact and immutable" in result["error"]["message"]
+    assert load_project(root).version == "1.0.0"
+
+
+def test_cli_version_preserves_literal_toml_quoting(tmp_path: Path, capsys) -> None:
+    root = _project(tmp_path)
+    config = root / "baldr-agent.toml"
+    config.write_text(
+        config.read_text(encoding="utf-8").replace(
+            'version = "1.0.0"', "version = '1.0.0'", 1
+        ),
+        encoding="utf-8",
+    )
+
+    assert main(["version", "1.1.0", "--project", str(root)]) == 0
+    capsys.readouterr()
+
+    assert "version = '1.1.0'" in config.read_text(encoding="utf-8")
+    assert load_project(root).version == "1.1.0"
+
+
 def test_cli_exposes_run_and_driver_conformance(capsys) -> None:
     with pytest.raises(SystemExit) as run_help:
         main(["run", "--help"])

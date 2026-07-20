@@ -39,12 +39,46 @@ test('VS Code extension bundles the exact shared runtime bootstrap', () => {
 
 import os from 'node:os';
 import {
+  acquireHostInstallLock,
   managedRuntimeCurrent,
   pruneOldHostRuntimes,
   resolveRuntime,
   sha256File,
   terminateChildTree,
 } from '../lib/runtime-bootstrap.mjs';
+
+test('host runtime installation lock is exclusive and recovers stale owners', () => {
+  const runtimeDir = fs.mkdtempSync(join(os.tmpdir(), 'baldr-runtime-lock-'));
+  const first = acquireHostInstallLock(runtimeDir, {
+    timeoutMs: 50,
+    pollMs: 10,
+  });
+  assert.throws(
+    () => acquireHostInstallLock(runtimeDir, { timeoutMs: 25, pollMs: 10 }),
+    /Timed out waiting for another Baldr process/,
+  );
+  first.release();
+
+  const lockRoot = join(runtimeDir, '0.20.0', 'host.install.lock');
+  fs.mkdirSync(lockRoot, { recursive: true });
+  fs.writeFileSync(join(lockRoot, 'owner.json'), JSON.stringify({
+    token: 'orphaned',
+    pid: 999_999_999,
+    hostname: os.hostname(),
+  }));
+  const old = new Date(Date.now() - 10_000);
+  fs.utimesSync(lockRoot, old, old);
+
+  const recovered = acquireHostInstallLock(runtimeDir, {
+    timeoutMs: 50,
+    staleMs: 50,
+    pollMs: 10,
+  });
+  assert.equal(recovered.lockRoot, lockRoot);
+  recovered.release();
+  assert.equal(fs.existsSync(lockRoot), false);
+  fs.rmSync(runtimeDir, { recursive: true, force: true });
+});
 
 test('managed runtime manifest detects current wheel and upgrade mismatch', () => {
   const root = fs.mkdtempSync(join(os.tmpdir(), 'baldr-runtime-manifest-'));

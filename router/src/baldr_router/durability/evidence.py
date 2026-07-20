@@ -438,6 +438,85 @@ def _bundle_is_complete(root: Path) -> bool:
     return True
 
 
+def validate_workflow_evidence(
+    evidence_id: str,
+    *,
+    run_id: str,
+    expected_version: str | None = None,
+) -> dict[str, Any]:
+    """Validate an existing workflow bundle before it is used for promotion."""
+
+    clean_id = str(evidence_id or "").strip()
+    clean_run_id = str(run_id or "").strip()
+    if not _TOKEN.fullmatch(clean_id) or not clean_id.startswith("br-workflow-"):
+        return {"ok": False, "reason": "invalid-evidence-id"}
+    if not _TOKEN.fullmatch(clean_run_id):
+        return {"ok": False, "reason": "invalid-run-id"}
+    root = evidence_root() / clean_id
+    if not root.is_dir():
+        return {"ok": False, "reason": "evidence-not-found"}
+    if not _bundle_is_complete(root):
+        return {"ok": False, "reason": "evidence-hash-or-file-mismatch"}
+    try:
+        manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+        materialized = json.loads(
+            (root / "materialized-state.json").read_text(encoding="utf-8")
+        )
+        journal = json.loads((root / "event-journal.json").read_text(encoding="utf-8"))
+        schema = json.loads((root / "durable-schema.json").read_text(encoding="utf-8"))
+        redaction = json.loads(
+            (root / "redaction-report.json").read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError):
+        return {"ok": False, "reason": "evidence-invalid-json"}
+    if not all(
+        isinstance(value, Mapping)
+        for value in (manifest, materialized, journal, schema, redaction)
+    ):
+        return {"ok": False, "reason": "evidence-invalid-shape"}
+    if (
+        manifest.get("kind") != "workflow"
+        or manifest.get("schema_version") != WORKFLOW_EVIDENCE_SCHEMA_VERSION
+        or manifest.get("evidence_id") != clean_id
+        or manifest.get("run_id") != clean_run_id
+        or journal.get("run_id") != clean_run_id
+    ):
+        return {"ok": False, "reason": "evidence-identity-mismatch"}
+    if expected_version and manifest.get("baldr_version") != expected_version:
+        return {
+            "ok": False,
+            "reason": "evidence-version-mismatch",
+            "actual_version": manifest.get("baldr_version"),
+            "expected_version": expected_version,
+        }
+    state_fingerprint = _canonical_hash(
+        {
+            "schema_version": WORKFLOW_EVIDENCE_SCHEMA_VERSION,
+            "materialized": materialized,
+            "journal": journal,
+            "durable_schema": schema,
+        }
+    )
+    if manifest.get("state_fingerprint") != state_fingerprint:
+        return {"ok": False, "reason": "evidence-state-fingerprint-mismatch"}
+    if (
+        manifest.get("raw_task_included") is not False
+        or manifest.get("raw_prompts_included") is not False
+        or manifest.get("private_workspace_metadata_included") is not False
+        or redaction.get("ok") is not True
+        or redaction.get("secret_patterns_redacted") not in (True, "<redacted>")
+    ):
+        return {"ok": False, "reason": "evidence-privacy-contract-failed"}
+    return {
+        "ok": True,
+        "evidence_id": clean_id,
+        "run_id": clean_run_id,
+        "run_status": manifest.get("run_status"),
+        "baldr_version": manifest.get("baldr_version"),
+        "state_fingerprint": state_fingerprint,
+    }
+
+
 def _existing_evidence(
     *, run_id: str, state_fingerprint: str
 ) -> tuple[Path, dict[str, Any]] | None:
@@ -522,6 +601,13 @@ def create_workflow_evidence(store: DurableStore, run_id: str) -> dict[str, Any]
         "event_count": len(events),
         "events": events,
     }
+    # The persisted bundle is sanitized defensively by ``_write_json``.  Hash
+    # that exact public representation as well: otherwise a real environment
+    # secret or home path appearing in an allowlisted lifecycle field changes
+    # the bytes on disk after the fingerprint has already been computed.
+    materialized = sanitize_evidence(materialized)
+    journal = sanitize_evidence(journal)
+    schema = sanitize_evidence(schema)
     state_fingerprint = _canonical_hash(
         {
             "schema_version": WORKFLOW_EVIDENCE_SCHEMA_VERSION,

@@ -3,7 +3,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from baldr_router.durability.evidence import create_workflow_evidence
+from baldr_router.durability.evidence import (
+    create_workflow_evidence,
+    validate_workflow_evidence,
+)
 from baldr_router.durability.store import DurableStore
 
 
@@ -54,6 +57,99 @@ def test_workflow_evidence_is_generated_from_sqlite_without_raw_task(
     assert manifest["kind"] == "workflow"
     assert manifest["schema_version"] == 2
     assert manifest["raw_task_included"] is False
+
+
+def test_workflow_evidence_validation_rejects_wrong_identity_and_tampering(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    store = DurableStore(path=tmp_path / "state.sqlite3")
+    task = store.store_artifact(
+        run_id=None,
+        kind="workflow-input-private",
+        value={"task": "validate evidence"},
+        redact=False,
+        redaction_level="private",
+    )
+    store.create_run(
+        run_id="validated-run",
+        idempotency_key=None,
+        resume_token="resume-validated",
+        workflow_name="architect-implement-review",
+        workflow_version=1,
+        workspace_root="/tmp/repo",
+        workspace_id="workspace",
+        client_name="test",
+        task_artifact_id=task,
+        config_snapshot={},
+    )
+    store.transition_run("validated-run", "running")
+    store.transition_run("validated-run", "approved")
+    evidence = create_workflow_evidence(store, "validated-run")
+
+    valid = validate_workflow_evidence(
+        evidence["evidence_id"],
+        run_id="validated-run",
+        expected_version=evidence["manifest"]["baldr_version"],
+    )
+    assert valid["ok"] is True
+    wrong_run = validate_workflow_evidence(
+        evidence["evidence_id"],
+        run_id="different-run",
+    )
+    assert wrong_run == {"ok": False, "reason": "evidence-identity-mismatch"}
+
+    journal = Path(evidence["path"]) / "event-journal.json"
+    journal.write_text("{}\n", encoding="utf-8")
+    tampered = validate_workflow_evidence(
+        evidence["evidence_id"],
+        run_id="validated-run",
+    )
+    assert tampered == {"ok": False, "reason": "evidence-hash-or-file-mismatch"}
+
+
+def test_workflow_evidence_fingerprint_uses_the_persisted_redacted_projection(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    secret = "synthetic-qualification-secret"
+    monkeypatch.setenv("OPENAI_API_KEY", secret)
+    store = DurableStore(path=tmp_path / "state.sqlite3")
+    task = store.store_artifact(
+        run_id=None,
+        kind="workflow-input-private",
+        value={"task": "validate a redacted fingerprint"},
+        redact=False,
+        redaction_level="private",
+    )
+    store.create_run(
+        run_id="redacted-fingerprint-run",
+        idempotency_key=None,
+        resume_token="synthetic-resume-redacted-fingerprint",
+        workflow_name="architect-implement-review",
+        workflow_version=1,
+        workspace_root="/tmp/repo",
+        workspace_id="workspace",
+        client_name=secret,
+        task_artifact_id=task,
+        config_snapshot={},
+    )
+    store.transition_run("redacted-fingerprint-run", "running")
+    store.transition_run("redacted-fingerprint-run", "approved")
+
+    evidence = create_workflow_evidence(store, "redacted-fingerprint-run")
+    materialized = json.loads(
+        (Path(evidence["path"]) / "materialized-state.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert materialized["run"]["client_name"] == "<redacted>"
+    assert validate_workflow_evidence(
+        evidence["evidence_id"],
+        run_id="redacted-fingerprint-run",
+        expected_version=evidence["manifest"]["baldr_version"],
+    )["ok"] is True
 
 
 def test_shadow_evidence_exposes_only_public_checkpoint_and_publication_facts(

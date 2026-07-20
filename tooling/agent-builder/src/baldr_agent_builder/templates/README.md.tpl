@@ -9,6 +9,6 @@ baldr-agent publish
 baldr-agent doctor
 ```
 
-Change `version` in `baldr-agent.toml` before publishing changed source under a
-new immutable AgentRef. Use `baldr-agent rollback <version>` to reactivate a
+Run `baldr-agent version <next-version>` before publishing changed source under
+a new immutable AgentRef. Use `baldr-agent rollback <version>` to reactivate a
 previously published local version without deleting newer releases.

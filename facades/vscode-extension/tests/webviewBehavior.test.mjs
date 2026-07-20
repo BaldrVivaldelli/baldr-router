@@ -89,6 +89,13 @@ class FakeElement {
       focusNodes.push(node);
     }
     this.generated.set('[data-focus-key]', focusNodes);
+    const actionNodes = [];
+    for (const match of this._innerHTML.matchAll(/data-action="([^"]+)"/g)) {
+      const node = create(`action:${match[1]}:${actionNodes.length}`);
+      node.dataset.action = match[1];
+      actionNodes.push(node);
+    }
+    this.generated.set('[data-action]', actionNodes);
     const changedFileNodes = [];
     for (const match of this._innerHTML.matchAll(/data-open-changed-file="([^"]+)"/g)) {
       const node = create(`changed-file:${match[1]}:${changedFileNodes.length}`);
@@ -268,6 +275,23 @@ test('real webview script renders escaped narrative stages and evidence', () => 
   assert.match(harness.elements.tasks.innerHTML, /class="task-summary">Preparando cambios seguros/);
   assert.match(harness.elements.tasks.innerHTML, /class="task-meta-time">/);
   assert.match(harness.elements.tasks.innerHTML, /Tarea &lt;privada&gt;/);
+});
+
+test('cancel button dispatches the selected work item through the UI message boundary', () => {
+  const harness = createHarness();
+  harness.receive({ type: 'state', state: state() });
+
+  const cancel = harness.elements.content
+    .querySelectorAll('[data-action]')
+    .find((node) => node.dataset.action === 'cancel');
+  assert.ok(cancel, 'the running session must render a cancel action');
+  cancel.listeners.get('click')();
+
+  assert.deepEqual(harness.messages.at(-1), {
+    type: 'itemAction',
+    action: 'cancel',
+    itemId: 'wi-1',
+  });
 });
 
 test('changed file rows ask the extension host to open the selected workspace file', () => {

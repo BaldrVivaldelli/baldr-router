@@ -322,6 +322,108 @@ def test_projection_groups_rounds_and_exposes_only_whitelisted_reports() -> None
     ]
 
 
+def test_direct_mode_hides_obsolete_planner_write_authorization_narration() -> None:
+    report = _report("blocked", "Se requiere autorización para actualizar el informe.")
+    report.update(
+        {
+            "interpretation": "Hay que pedir permiso para modificar el archivo.",
+            "work_next": [
+                "Obtener autorización de escritura.",
+                "Actualizar y validar baldr_instrospeccion.md.",
+            ],
+            "follow_up": [
+                "Autorizar la actualización del informe para iniciar el análisis."
+            ],
+            "blockers": ["Falta autorización para modificar el archivo."],
+            "decisions": {
+                "write_authorization": "required",
+                "write_request": "Autorizar la actualización del informe.",
+                "target_file": "baldr_instrospeccion.md",
+            },
+            "constraints": [
+                "No se harán cambios antes de recibir autorización.",
+                "No modificar otros archivos.",
+            ],
+        }
+    )
+    item = _item("completed")
+    item["safety_mode"] = "current"
+    progress = project_work_item_progress(
+        item,
+        _snapshot(
+            "approved",
+            [
+                _step(
+                    "plan",
+                    "architect",
+                    "succeeded",
+                    sequence=10,
+                    report=report,
+                )
+            ],
+            current_step_id="plan",
+        ),
+    )
+
+    planning = _stages(progress)["planning"]
+    encoded = json.dumps(
+        {
+            "report": planning["report"],
+            "technical": planning["technical"],
+            "final_report": progress["final_report"],
+        },
+        ensure_ascii=False,
+    ).lower()
+    assert planning["state"] == "complete"
+    assert planning["outcome"] == "planned"
+    assert planning["report"]["status"] == "planned"  # type: ignore[index]
+    assert planning["report"]["summary"] == (  # type: ignore[index]
+        "La planificación está completa y la implementación puede continuar."
+    )
+    assert planning["report"]["decisions"] == [  # type: ignore[index]
+        {"key": "target_file", "value": "baldr_instrospeccion.md"}
+    ]
+    assert "autoriz" not in encoded
+    assert "permiso" not in encoded
+    assert "actualizar y validar baldr_instrospeccion.md" in encoded
+    assert "no modificar otros archivos" in encoded
+
+
+def test_automatic_mode_preserves_real_write_authorization_narration() -> None:
+    report = _report("blocked", "Permission is required to update the report.")
+    report["decisions"] = {
+        "write_authorization": "required",
+        "write_request": "Authorize updating the report file.",
+    }
+    item = _item("needs_attention")
+    item["safety_mode"] = "automatic"
+    progress = project_work_item_progress(
+        item,
+        _snapshot(
+            "awaiting_reconciliation",
+            [
+                _step(
+                    "plan",
+                    "architect",
+                    "succeeded",
+                    sequence=10,
+                    report=report,
+                )
+            ],
+            current_step_id="plan",
+        ),
+    )
+
+    planning = _stages(progress)["planning"]
+    assert planning["report"]["summary"] == (  # type: ignore[index]
+        "Permission is required to update the report."
+    )
+    assert planning["report"]["decisions"] == [  # type: ignore[index]
+        {"key": "write_authorization", "value": "required"},
+        {"key": "write_request", "value": "Authorize updating the report file."},
+    ]
+
+
 def test_report_redacts_secrets_and_never_crosses_absolute_or_parent_paths() -> None:
     public, technical = normalize_public_report(
         {
@@ -706,6 +808,72 @@ def test_attention_exposes_retry_only_with_explicit_attempt_evidence(
 
     assert attention["retryable"] is retryable  # type: ignore[index]
     assert [action["id"] for action in attention["actions"]] == expected_actions  # type: ignore[index]
+
+
+def test_technical_provider_error_has_an_actionable_public_synthesis() -> None:
+    failed = _step(
+        "implementation",
+        "implementer",
+        "failed",
+        sequence=20,
+        report=None,
+    )
+    participant = failed["participants"][0]  # type: ignore[index]
+    participant["error_code"] = "codex_not_authenticated"
+    participant["result"] = {
+        "error": {
+            "code": "codex_not_authenticated",
+            "message": "private technical authentication output",
+            "retryable": True,
+        }
+    }
+    item = _item("failed")
+    item["allowed_actions"] = ["start", "archive"]
+    snapshot = _snapshot("failed", [failed], current_step_id="implementation")
+    snapshot["run"]["error_code"] = "phase_min_successes_not_met"  # type: ignore[index]
+
+    progress = project_work_item_progress(item, snapshot)
+    attention = progress["attention"]
+
+    assert attention["title"] == "Codex necesita iniciar sesión"  # type: ignore[index]
+    assert "codex login" in attention["summary"].lower()  # type: ignore[index]
+    assert [action["id"] for action in attention["actions"]] == [  # type: ignore[index]
+        "start",
+        "archive",
+    ]
+    assert "private technical authentication output" not in json.dumps(progress)
+    assert "codex_not_authenticated" in _stages(progress)["execution"]["technical"][  # type: ignore[index]
+        "error_codes"
+    ]
+
+
+def test_review_changes_expose_safe_continuation_without_blind_retry() -> None:
+    review = _step(
+        "review",
+        "reviewer",
+        "succeeded",
+        sequence=30,
+        report=_report(
+            "needs_changes",
+            "The review found changes to address.",
+            decision="changes_required",
+        ),
+    )
+    item = _item("needs_attention")
+    item["allowed_actions"] = ["start", "continue", "archive"]
+
+    progress = project_work_item_progress(
+        item, _snapshot("needs_changes", [review], current_step_id="review")
+    )
+    attention = progress["attention"]
+
+    assert attention["kind"] == "changes_requested"  # type: ignore[index]
+    assert attention["retryable"] is None  # type: ignore[index]
+    assert [action["id"] for action in attention["actions"]] == [  # type: ignore[index]
+        "continue",
+        "archive",
+    ]
+    assert attention["action_label"] == "Indicar correcciones"  # type: ignore[index]
 
 
 def test_preflight_failure_without_a_run_exposes_safe_retry() -> None:
@@ -1472,6 +1640,18 @@ def test_current_mode_uses_persisted_consent_without_a_per_task_pause(
             decision="approved" if phase == "reviewer" else "not_applicable",
         )
         if phase == "architect":
+            report["status"] = "blocked"
+            report["summary"] = (
+                "El análisis está preparado, pero falta autorización para "
+                "actualizar `direct.md`."
+            )
+            report["work_next"] = ["Autorizar la escritura del archivo direct.md."]
+            report["follow_up"] = [
+                "Autorizar la actualización del informe para iniciar el análisis."
+            ]
+            report["blockers"] = [
+                "Falta autorización para modificar el archivo direct.md."
+            ]
             report["decisions"] = {
                 "write_authorization": "required",
                 "write_request": "Create direct.txt.",
@@ -1506,6 +1686,18 @@ def test_current_mode_uses_persisted_consent_without_a_per_task_pause(
     assert result["status"] == "approved"
     assert calls == ["architect", "implementer", "reviewer"]
     assert (repo / "direct.txt").read_text(encoding="utf-8") == "direct\n"
+    persisted = store.snapshot_run(str(result["run_id"]))
+    architecture = next(
+        step for step in persisted["steps"] if step["phase"] == "architect"
+    )
+    architecture_json = json.dumps(architecture["output"], ensure_ascii=False)
+    assert architecture["output"]["status"] == "planned"
+    assert architecture["output"]["final_report"]["decisions"] == {
+        "write_authorization": "not_required",
+    }
+    assert "write_request" not in architecture_json
+    assert "Autorizar" not in architecture_json
+    assert "autorización" not in architecture_json
 
 
 def test_legacy_write_policy_authorization_replays_the_architect(

@@ -17,13 +17,15 @@ import {
 
 type Intent = BaldrIntentId;
 type JsonRecord = Record<string, unknown>;
+let activeRuntime: BaldrRuntime | undefined;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const output = vscode.window.createOutputChannel('Baldr Router', { log: true });
   const runtime = new BaldrRuntime(context, output);
+  activeRuntime = runtime;
   const changed = new vscode.EventEmitter<void>();
   const consoleProvider = new BaldrConsoleProvider(context, runtime, output);
-  context.subscriptions.push(output, changed, consoleProvider);
+  context.subscriptions.push(runtime, output, changed, consoleProvider);
 
   const mcpProvider: vscode.McpServerDefinitionProvider<vscode.McpStdioServerDefinition> = {
     onDidChangeMcpServerDefinitions: changed.event,
@@ -46,6 +48,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
   );
 
+  context.subscriptions.push(
+    vscode.commands.registerCommand('baldr.qualification.cancelCanary', async () => {
+      if (!vscode.workspace.isTrusted) {
+        throw new Error('Trust this VS Code workspace before running qualification canaries.');
+      }
+      const result = await runtime.runExtensionHostCancellationCanary();
+      await runtime.recordClientReceipt(undefined, {
+        extension_host_cancellation: result,
+      });
+      return result;
+    }),
+  );
+
   const participant = vscode.chat.createChatParticipant(
     'baldr.vscode',
     createChatHandler(runtime, output, consoleProvider),
@@ -64,8 +79,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   void warmRuntime(context, runtime, output, changed, consoleProvider);
 }
 
-export function deactivate(): void {
-  // VS Code disposes all registered resources from context.subscriptions.
+export async function deactivate(): Promise<void> {
+  const runtime = activeRuntime;
+  activeRuntime = undefined;
+  await runtime?.shutdown();
 }
 
 function createChatHandler(
@@ -212,6 +229,33 @@ async function warmRuntime(
     await runtime.recordClientReceipt();
     output.info(`Runtime ready: ${JSON.stringify(target)}`);
     changed.fire();
+    if (vscode.workspace.isTrusted) {
+      for (const folder of vscode.workspace.workspaceFolders ?? []) {
+        const settled = await runtime.settleWorkItems(folder.uri.fsPath);
+        const settledCount = Number(settled.settled_count ?? 0);
+        const requiresInput = Number(settled.requires_input_count ?? 0);
+        const failedSettlements = Array.isArray(settled.settled)
+          ? settled.settled.map(record).filter((item) => item.ok === false)
+          : [];
+        const processValidation = record(settled.process_validation);
+        if (settledCount > 0 || requiresInput > 0 || failedSettlements.length > 0) {
+          output.info(`Automatic recovery: ${JSON.stringify({
+            workspace: folder.uri.fsPath,
+            settled_count: settledCount,
+            requires_input_count: requiresInput,
+            failed_count: failedSettlements.length,
+            orphan_processes: Number(processValidation.orphan_processes ?? 0),
+          })}`);
+        }
+        if (failedSettlements.length > 0 || processValidation.ok === false) {
+          output.warn(`Automatic recovery needs attention: ${JSON.stringify(failedSettlements)}`);
+          void vscode.window.showWarningMessage(
+            'Baldr no pudo cerrar o recuperar todas las sesiones. El trabajo sigue guardado; abrí Baldr para revisar la acción recomendada.',
+            'Abrir Baldr',
+          ).then((action) => action === 'Abrir Baldr' ? consoleProvider.reveal() : undefined);
+        }
+      }
+    }
     await consoleProvider.refresh(false);
   } catch (error) {
     output.error(error instanceof Error ? error : new Error(String(error)));

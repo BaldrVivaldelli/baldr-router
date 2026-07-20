@@ -77,6 +77,46 @@ def test_clean_git_workspace_uses_worktree_checkpoint_and_publishes(tmp_path: Pa
     assert cleanup["removed"] is True
 
 
+def test_direct_git_workspace_records_pre_existing_changes(tmp_path: Path) -> None:
+    repo = tmp_path / "repo-direct-baseline"
+    _init_repo(repo)
+    (repo / "user-notes.txt").write_text("keep me\n", encoding="utf-8")
+    store = DurableStore(path=tmp_path / "direct-baseline.sqlite3")
+    task = store.store_artifact(
+        run_id=None, kind="task", value={"task": "x"}, redact=False
+    )
+    store.create_run(
+        run_id="run-direct-baseline",
+        idempotency_key=None,
+        resume_token="resume-direct-baseline",
+        workflow_name="architect-implement-review",
+        workflow_version=1,
+        workspace_root=str(repo),
+        workspace_id="workspace-direct-baseline",
+        client_name="test",
+        task_artifact_id=task,
+        config_snapshot={},
+    )
+
+    execution = GitWorkspaceManager(store).prepare(
+        run_id="run-direct-baseline",
+        workspace_root=repo,
+        mode="in-place",
+        dirty_policy="in-place",
+    )
+
+    assert execution.mode == "in-place"
+    assert execution.metadata["pre_existing_change_count"] == 1
+    assert execution.metadata["pre_existing_changes"] == [
+        {"status": "??", "path": "user-notes.txt"}
+    ]
+    checkpoint = store.latest_checkpoint("run-direct-baseline")
+    assert checkpoint is not None
+    assert checkpoint["metadata"]["pre_existing_changes"] == [
+        {"status": "??", "path": "user-notes.txt"}
+    ]
+
+
 def test_publish_is_idempotent_after_crash_between_apply_and_sqlite_commit(
     tmp_path: Path, monkeypatch
 ) -> None:

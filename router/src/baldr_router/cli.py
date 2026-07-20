@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -55,10 +56,12 @@ from .discovery.workspace_profile import workspace_profile, workspace_profile_st
 from .evidence import latest_evidence, list_evidence
 from .lab.matrix import run_lab_matrix
 from .qualification.receipts import record_client_receipt
+from .qualification.extension_host import run_extension_host_cancellation_canary
 from .qualification.runner import (
     definitions_status as qualification_definitions_status,
     latest_qualification,
     list_qualifications,
+    promotion_status,
     run_qualification,
     write_qualification_template,
 )
@@ -1062,6 +1065,13 @@ def cmd_qualification(args: argparse.Namespace) -> int:
         else:
             print_json(list_qualifications(limit=args.limit))
         return 0
+    if args.action == "promotion-status":
+        result = promotion_status(
+            receipt_paths=args.receipt,
+            release_version=args.release_version,
+        )
+        print_json(result)
+        return 0 if result.get("ok") else 2
     if args.action == "client-receipt":
         try:
             facts = json.loads(args.facts_json) if args.facts_json else {}
@@ -1077,6 +1087,10 @@ def cmd_qualification(args: argparse.Namespace) -> int:
             )
         )
         return 0
+    if args.action == "extension-host-cancel-canary":
+        result = run_extension_host_cancellation_canary(client=args.client)
+        print_json(result)
+        return 0 if result.get("ok") else 2
     if args.action == "run":
         result = run_qualification(
             profile_id=args.profile,
@@ -1403,6 +1417,13 @@ def build_parser() -> argparse.ArgumentParser:
     q.set_defaults(func=cmd_qualification)
 
     q = qualification_sub.add_parser(
+        "extension-host-cancel-canary",
+        help="Run the automated durable cancellation canary owned by a VS Code Extension Host",
+    )
+    q.add_argument("--client", default="vscode-extension")
+    q.set_defaults(func=cmd_qualification)
+
+    q = qualification_sub.add_parser(
         "run", help="Run the three-pass lab and evaluate real-client evidence"
     )
     q.add_argument("--profile", required=True)
@@ -1421,6 +1442,18 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--profile")
     q.add_argument("--qualified-only", action="store_true")
     q.add_argument("--limit", type=int, default=20)
+    q.set_defaults(func=cmd_qualification)
+
+    q = qualification_sub.add_parser(
+        "promotion-status", help="Verify the real receipts required for release promotion"
+    )
+    q.add_argument(
+        "--receipt",
+        action="append",
+        default=[],
+        help="Receipt file or directory; repeat for multiple inputs. Defaults to local receipts.",
+    )
+    q.add_argument("--release-version", default=__version__)
     q.set_defaults(func=cmd_qualification)
 
     p = sub.add_parser("extensions", help="Show installed client-adapter extensions")
@@ -1908,6 +1941,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Console-script and ``python -m`` entrypoints own their process tree. Keep
+    # library callers (which pass argv explicitly in tests/embedders) free from
+    # process-wide signal-handler mutation.
+    if argv is None:
+        os.environ.setdefault("BALDR_INSTALL_SIGNAL_HANDLERS", "1")
     parser = build_parser()
     args = parser.parse_args(argv)
     return int(args.func(args))

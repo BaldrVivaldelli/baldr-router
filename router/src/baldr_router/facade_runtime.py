@@ -366,6 +366,10 @@ def run_facade(
         "start-item": "start-item",
         "cancel": "cancel-item",
         "cancel-item": "cancel-item",
+        "settle": "settle-item",
+        "settle-item": "settle-item",
+        "settle-all": "settle-workspace",
+        "settle-workspace": "settle-workspace",
         "reconcile": "reconcile-item",
         "reconcile-item": "reconcile-item",
         "archive": "archive-item",
@@ -536,6 +540,23 @@ def run_facade(
                 "version": DELIVERABLE_INDEX_PAGE_VERSION,
                 **page,
             }
+
+        if action == "settle-workspace":
+            result = service.settle_workspace(
+                workspace_root,
+                client_name=client_name,
+            )
+            result.setdefault("intent", "run")
+            result["operation"] = action
+            return result
+
+        if action == "settle-item":
+            if not work_item_id:
+                raise ValueError("work_item_id is required for settle-item.")
+            result = service.settle(work_item_id, client_name=client_name)
+            result.setdefault("intent", "run")
+            result["operation"] = action
+            return result
 
         if action == "cancel-item" or (cancel and work_item_id):
             if not work_item_id:

@@ -1,6 +1,6 @@
 # Feature Freeze — línea de estabilización v0.20
 
-Baldr permanece bajo **congelación funcional**. v0.20 agrega la plataforma de agentes externos políglotas, Agent Builder, Runner y resolución durable de equipos sin ampliar las intenciones públicas `setup/status/run`; la protección automática y el progreso narrativo de las líneas anteriores continúan vigentes.
+Baldr permanece bajo **congelación funcional**. v0.20 agrega la plataforma de agentes externos políglotas, Agent Builder, Runner y resolución durable de equipos sin ampliar las intenciones públicas `setup/status/run`; el trabajo directo sobre un workspace confiado es el default y los modos de protección anteriores continúan disponibles de forma explícita junto al progreso narrativo.
 
 ## Superficie congelada
 
@@ -51,9 +51,9 @@ La lista exacta de tools, prompts, providers, roles y workflows está declarada 
 1. Build reproducible de wheel, adapter, launcher, VSIX, Power y Agent Plugin.
 2. Pruebas automáticas de trusted workspaces, recursión, errores de Codex, structured output, redacción de secretos y limpieza de procesos.
 3. Conformidad semántica de `setup/status/run` entre CLI, MCP y fachadas.
-4. Validación real de VS Code Windows + WSL automático.
-5. Validación real de VS Code Remote WSL.
-6. Validación real de Kiro Power + adapter.
+4. Validación real de promoción de VS Code Remote WSL con Codex.
+5. Compatibilidad sintética y packaging de VS Code Windows + WSL automático conservados.
+6. Compatibilidad, Power, adapter y pruebas de Kiro conservados; su qualification real queda diferida.
 7. Upgrade v0.19 → v0.20 sin destruir el runtime anterior si falla la instalación nueva.
 8. Cancelación sin procesos huérfanos.
 9. Context7 sin secretos en logs, configuración, telemetría ni cache.
@@ -64,7 +64,7 @@ La lista exacta de tools, prompts, providers, roles y workflows está declarada 
 14. Cancelación durable y las cuatro acciones de reconciliación verificadas.
 15. SQLite integrity/backup/GC, session invalidation y worktree reconstruction verificados.
 
-Los tests sintéticos son necesarios pero no reemplazan los runbooks de entorno real bajo `e2e/`. Cada perfil obligatorio debe pasar tres veces consecutivas desde un estado limpio.
+Los tests sintéticos son necesarios pero no reemplazan los runbooks de entorno real bajo `e2e/`. El perfil obligatorio VS Code Remote WSL + Codex debe pasar tres veces consecutivas desde un estado limpio.
 
 
 ## Permitido en v0.20.x Real Environment Qualification

@@ -172,7 +172,11 @@ def terminate_process_tree(
     except Exception:
         result["terminated"] = True
         result["exit_code"] = None
-    unregister_process(proc)
+    # Keep an unresponsive process registered. Removing it here would make the
+    # lifecycle verifier report a clean registry while the OS process is still
+    # alive, which is precisely the orphan condition this module must expose.
+    if result["terminated"]:
+        unregister_process(proc)
     return result
 
 
@@ -232,6 +236,38 @@ def active_processes(*, run_id: str | None = None) -> list[dict[str, Any]]:
             }
         )
     return result
+
+
+def validate_process_cleanup(
+    *,
+    run_id: str | None = None,
+    terminate_remaining: bool = False,
+    grace_seconds: float = 0.75,
+) -> dict[str, Any]:
+    """Validate, and optionally repair, the managed-process invariant.
+
+    Only live processes count as orphans. Returned evidence is deliberately
+    bounded to process ids and cleanup results so command arguments never leak
+    through a user-facing recovery response.
+    """
+
+    observed = [item for item in active_processes(run_id=run_id) if item["running"]]
+    cleanup: list[dict[str, Any]] = []
+    if observed and terminate_remaining:
+        cleanup = (
+            terminate_processes_for_run(run_id, grace_seconds=grace_seconds)
+            if run_id is not None
+            else terminate_all_processes(grace_seconds=grace_seconds)
+        )
+    remaining = [item for item in active_processes(run_id=run_id) if item["running"]]
+    return {
+        "ok": not remaining,
+        "run_id": run_id,
+        "observed_processes": len(observed),
+        "cleanup_attempts": cleanup,
+        "orphan_processes": len(remaining),
+        "orphan_pids": [int(item["pid"]) for item in remaining],
+    }
 
 
 def _signal_handler(signum: int, frame: Any) -> None:

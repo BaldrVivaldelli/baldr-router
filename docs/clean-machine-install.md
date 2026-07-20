@@ -23,13 +23,18 @@ Context7 is optional and is configured during `/setup`.
 
 1. Install the `baldr-router-vscode-0.20.0.vsix`, or install Baldr Router from the Marketplace when published.
 2. Accept VS Code's publisher and MCP trust dialogs.
-3. Open the folder you want BALDR to work on; Git is optional under Automatic protection.
-4. Open the **Baldr** icon in the Activity Bar. The dedicated console prepares status and setup; `@baldr /setup` remains an optional shortcut.
+3. Open the Git repository you want Baldr to work on. Direct work is the default; a non-Git folder remains an explicit reduced-guarantee choice.
+4. Once startup finishes, Baldr prepares its private runtime in the background
+   and offers to open the console. You can also open the **Baldr** icon in the
+   Activity Bar; `@baldr /setup` remains an optional shortcut.
 5. The extension tries a private Windows runtime first. If Windows cannot provide a compatible runtime and WSL is available, it installs/uses the private WSL runtime automatically.
 6. Complete `codex login` in the environment reported by Baldr if status requests it.
 7. Optionally store a Context7 key through the secure input. The extension uses VS Code `SecretStorage`; it does not write the key to the workspace or Baldr TOML.
 
 No `.vscode/mcp.json`, global launcher, `uv tool install`, or manual WSL bridge is required.
+
+The complete first-use and external-agent journey is documented in
+[`golden-path.md`](golden-path.md).
 
 ## VS Code Remote WSL
 
@@ -40,17 +45,52 @@ No `.vscode/mcp.json`, global launcher, `uv tool install`, or manual WSL bridge 
 
 ## Kiro
 
-Kiro uses the optional facade rather than the VS Code extension:
+Kiro uses the optional facade rather than the VS Code extension. Its packages
+and compatibility tests remain part of v0.20, but its real-client
+qualification is explicitly deferred and cannot block or satisfy this
+iteration's VS Code Remote WSL + Codex promotion gate:
 
-1. Install the core and adapter into the same environment:
+1. Download and extract `baldr-router-0.20.0-artifacts.zip`.
+2. From the extracted directory, install the core and adapter into the same
+   environment where Router will run (the host or the selected WSL
+   distribution):
 
    ```bash
-   uv tool install --force ./router --with ./facades/kiro/adapter
+   cd artifacts/python
+   uv tool install --force ./baldr_router-0.20.0-py3-none-any.whl \
+     --with ./baldr_kiro_adapter-0.20.0-py3-none-any.whl \
+     --with-executables-from baldr-kiro-adapter
+   cd ../..
    ```
 
-2. Install the Power from `facades/kiro/baldr-orchestrator/`.
-3. Start the shared setup intent. The adapter trusts the current Git workspace only after the setup action and creates the managed hook idempotently.
-4. Confirm `router_extension_status` lists the Kiro adapter.
+3. On the host that starts Kiro and its MCP servers—normally Windows
+   PowerShell—install the launcher shipped in the same release and verify that
+   it resolves Router `0.20.0`:
+
+   ```bash
+   npm install --global \
+     ./artifacts/node/baldr-router-launcher-0.20.0.tgz
+   baldr-router-launcher detect
+   ```
+
+4. Extract `artifacts/baldr-orchestrator-kiro-0.20.0.zip`. In Kiro, use
+   **Powers → Add Custom Power → Import power from a folder → Install** and
+   select the resulting `baldr-orchestrator/` directory. Do not copy the
+   directory into `~/.kiro/powers/installed`: the supported install action is
+   what registers the namespaced MCP entry under `powers.mcpServers`.
+5. Start the shared setup intent. The adapter trusts the current Git workspace only after the setup action and creates the managed hook idempotently.
+6. Confirm `router_extension_status` lists the Kiro adapter.
+
+The release does not depend on an npm registry or a source checkout: the
+launcher tarball, Power ZIP, Router wheel, and adapter wheel are all contained
+in the artifact bundle.
+
+If **Kiro - MCP Logs** reports `excluded by registry-only access mode`, an
+organization policy is rejecting every local/non-registry MCP server. This is
+not a launcher fallback condition. Ask the Kiro administrator to allow local
+Powers or publish/allow Baldr in the organization's MCP Registry, or qualify
+with a profile where local Powers are permitted. Baldr must not bypass the
+client's enterprise policy.
 
 ## Generic MCP clients
 

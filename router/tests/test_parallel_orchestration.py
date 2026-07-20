@@ -320,5 +320,7 @@ def test_cancellation_interrupts_a_parallel_read_phase_and_finalizes_the_run(
 
     assert not worker.is_alive()
     assert cancel_result["status"] in {"cancelling", "cancelled"}
+    assert cancel_result["evidence"]["manifest"]["run_id"] == str(row["id"])
     assert completed["result"]["status"] == "cancelled"
     assert completed["result"]["ok"] is False
+    assert completed["result"]["evidence"]["manifest"]["run_status"] == "cancelled"

@@ -26,6 +26,9 @@ METADATA_DIR = DIST / "metadata"
 EXTENSION = ROOT / "facades" / "vscode-extension"
 EXTENSION_RUNTIME = EXTENSION / "resources" / "runtime"
 ADAPTER = ROOT / "facades" / "kiro" / "adapter"
+QUALIFICATION_PROFILES = (
+    ROOT / "router" / "src" / "baldr_router" / "qualification" / "profiles-v1.json"
+)
 VALIDATION: list[dict[str, Any]] = []
 
 
@@ -145,6 +148,23 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def promotion_policy() -> dict[str, Any]:
+    definitions = json.loads(QUALIFICATION_PROFILES.read_text(encoding="utf-8"))
+    policy = definitions.get("promotion") or {}
+    required_profiles = [str(item) for item in (policy.get("required_profiles") or [])]
+    provider = str(policy.get("provider") or "").strip().lower()
+    if not provider or not required_profiles:
+        raise SystemExit("Qualification promotion policy is incomplete.")
+    return {
+        "provider": provider,
+        "required_profiles": required_profiles,
+        "deferred_profiles": [
+            str(item) for item in (policy.get("deferred_profiles") or [])
+        ],
+        "note": str(policy.get("note") or ""),
+    }
+
+
 def zip_directory(
     source: Path,
     target: Path,
@@ -239,6 +259,96 @@ def bootstrap_runtime_validation(node: str) -> None:
             raise SystemExit(f"Private runtime version mismatch: {reported!r}")
 
 
+def installed_facade_agent_validation(
+    *,
+    router_cli: Path,
+    root: Path,
+    env: dict[str, str],
+    role_references: dict[str, str],
+    result_filename: str,
+    task: str,
+) -> dict[str, dict[str, Any]]:
+    """Run the same omitted-default external team from both product facades."""
+
+    results: dict[str, dict[str, Any]] = {}
+    workspaces = {
+        client: root / f"{client}-workspace"
+        for client in ("vscode-extension", "kiro")
+    }
+    facade_env = {
+        **env,
+        "BALDR_TRUSTED_WORKSPACE_ROOTS_JSON": json.dumps(
+            [str(path) for path in workspaces.values()]
+        ),
+    }
+    for client, workspace in workspaces.items():
+        workspace.mkdir()
+        run(
+            executable("git"),
+            "init",
+            "-q",
+            str(workspace),
+            cwd=root,
+            env=facade_env,
+            label=f"initialize {client} facade workspace",
+        )
+        arguments = [
+            str(router_cli),
+            "facade",
+            "run",
+            str(workspace),
+            task,
+            # Deliberately omit --workspace-mode. This release gate proves
+            # that every shared facade resolves the product default itself.
+            "--team-mode",
+            "automatic",
+        ]
+        for role, reference in role_references.items():
+            arguments.extend(("--agent-override", f"{role}={reference}"))
+        arguments.extend(("--client", client))
+        facade_result = parse_json_output(
+            run(
+                *arguments,
+                cwd=root,
+                env=facade_env,
+                label=f"installed {client} external-agent facade execution",
+            ),
+            label=f"installed {client} external-agent facade execution",
+        )
+        actual_references = {
+            str(step.get("phase")): str(profile.get("agent_ref"))
+            for step in facade_result.get("steps", [])
+            if isinstance(step, dict)
+            for profile in step.get("profiles", [])
+            if isinstance(profile, dict)
+        }
+        workspace_mode = str(
+            (facade_result.get("work_item") or {}).get("safety_mode") or ""
+        )
+        if (
+            facade_result.get("ok") is not True
+            or facade_result.get("status") != "approved"
+            or (facade_result.get("facade") or {}).get("client") != client
+            or actual_references != role_references
+            or workspace_mode != "current"
+            or not (workspace / result_filename).is_file()
+        ):
+            raise SystemExit(
+                f"Installed {client} facade execution failed: {facade_result}"
+            )
+        results[client] = {
+            "status": facade_result.get("status"),
+            "workflow": facade_result.get("workflow"),
+            "roles": actual_references,
+            "workspace_mode": workspace_mode,
+            "write_authorization_requested": (
+                (facade_result.get("error") or {}).get("code")
+                == "write_authorization_required"
+            ),
+        }
+    return results
+
+
 def isolated_python_validation(
     uv: str,
     core_wheel: Path,
@@ -265,6 +375,24 @@ def isolated_python_validation(
             str(runner_wheel),
             label="isolated wheel install",
         )
+        scripts = python.parent
+        isolated_path = os.pathsep.join(
+            dict.fromkeys((str(scripts), os.environ.get("PATH", "")))
+        )
+        env = {
+            **{
+                key: value
+                for key, value in os.environ.items()
+                if not key.upper().startswith("BALDR_")
+            },
+            "PATH": isolated_path,
+            "XDG_CONFIG_HOME": str(root / "config"),
+            "XDG_CACHE_HOME": str(root / "cache"),
+            "XDG_STATE_HOME": str(root / "state"),
+            "XDG_DATA_HOME": str(root / "data"),
+            "BALDR_AGENT_REGISTRY_PATH": str(root / "catalog" / "agents.json"),
+            "BALDR_AGENT_INSTALL_ROOT": str(root / "installed-agents"),
+        }
         code = f"""
 import asyncio, json
 from baldr_agent_runner import __version__ as runner_version
@@ -284,14 +412,25 @@ assert any(item.get('adapter') == 'kiro' for item in status.get('results', [])),
 assert 'kiro_install_workspace' in tools
 print(json.dumps({{'version': __version__, 'sdk': sdk_version, 'builder': builder_version, 'runner': runner_version, 'kiro_tool_loaded': True}}))
 """
-        run(str(python), "-c", code, label="isolated adapter discovery")
+        run(
+            str(python),
+            "-c",
+            code,
+            env=env,
+            label="isolated adapter discovery",
+        )
         runner = venv / (
             "Scripts/baldr-agent-runner.exe"
             if os.name == "nt"
             else "bin/baldr-agent-runner"
         )
         health = parse_json_output(
-            run(str(runner), "health", label="isolated agent runner health"),
+            run(
+                str(runner),
+                "health",
+                env=env,
+                label="isolated agent runner health",
+            ),
             label="isolated agent runner health",
         )
         if health.get("status") != "ok" or 1 not in health.get("protocols", []):
@@ -299,8 +438,14 @@ print(json.dumps({{'version': __version__, 'sdk': sdk_version, 'builder': builde
         agent_cli = venv / (
             "Scripts/baldr-agent.exe" if os.name == "nt" else "bin/baldr-agent"
         )
+        router_cli = venv / (
+            "Scripts/baldr-router.exe" if os.name == "nt" else "bin/baldr-router"
+        )
         help_text = run(
-            str(agent_cli), "--help", label="isolated external agent CLI"
+            str(agent_cli),
+            "--help",
+            env=env,
+            label="isolated external agent CLI",
         )
         for command in (
             "init",
@@ -310,19 +455,269 @@ print(json.dumps({{'version': __version__, 'sdk': sdk_version, 'builder': builde
             "run",
             "doctor",
             "rollback",
+            "version",
         ):
             if command not in help_text:
                 raise SystemExit(
                     f"External agent CLI does not expose {command!r}: {help_text}"
                 )
         driver_help = run(
-            str(agent_cli), "driver", "--help", label="isolated driver CLI"
+            str(agent_cli),
+            "driver",
+            "--help",
+            env=env,
+            label="isolated driver CLI",
         )
         if "conformance" not in driver_help:
             raise SystemExit(
                 "External agent CLI does not expose driver conformance: "
                 f"{driver_help}"
             )
+
+        project = root / "python-agent"
+        workspace = root / "python-workspace"
+        workspace.mkdir()
+        run(
+            str(agent_cli),
+            "init",
+            str(project),
+            "--name",
+            "distribution-python-agent",
+            "--owner",
+            "release-test",
+            "--namespace",
+            "distribution",
+            "--language",
+            "python",
+            cwd=root,
+            env=env,
+            label="isolated Python agent scaffold",
+        )
+        run(
+            str(agent_cli),
+            "test",
+            "--project",
+            str(project),
+            cwd=root,
+            env=env,
+            label="isolated Python agent tests",
+        )
+        conformance = parse_json_output(
+            run(
+                str(agent_cli),
+                "driver",
+                "conformance",
+                "baldr.python",
+                "--project",
+                str(project),
+                "--output-root",
+                str(root / "python-conformance"),
+                cwd=root,
+                env=env,
+                label="installed Python driver conformance",
+            ),
+            label="installed Python driver conformance",
+        )
+        if conformance.get("ok") is not True or not all(
+            item.get("ok") is True for item in conformance.get("checks", [])
+        ):
+            raise SystemExit(
+                f"Installed Python driver failed conformance: {conformance}"
+            )
+
+        direct_run = parse_json_output(
+            run(
+                str(agent_cli),
+                "run",
+                "--project",
+                str(project),
+                "--role",
+                "implementer",
+                "--workspace",
+                str(workspace),
+                "--request",
+                "Create the generated Python result",
+                "--output-dir",
+                str(root / "python-run-build"),
+                "--runtime-command",
+                str(python),
+                "--runner-command",
+                str(runner),
+                cwd=root,
+                env=env,
+                label="direct Python agent execution",
+            ),
+            label="direct Python agent execution",
+        )
+        if (
+            direct_run.get("ok") is not True
+            or direct_run.get("state") != "succeeded"
+            or not (workspace / "distribution-python-agent_result.md").is_file()
+        ):
+            raise SystemExit(
+                f"Installed Python agent direct run failed: {direct_run}"
+            )
+
+        builds = []
+        for ordinal in ("one", "two"):
+            builds.append(
+                parse_json_output(
+                    run(
+                        str(agent_cli),
+                        "build",
+                        "--project",
+                        str(project),
+                        "--output-dir",
+                        str(root / f"python-build-{ordinal}"),
+                        cwd=root,
+                        env=env,
+                        label=f"isolated Python build {ordinal}",
+                    ),
+                    label=f"isolated Python build {ordinal}",
+                )
+            )
+        first_artifact = Path(str(builds[0].get("artifact") or ""))
+        second_artifact = Path(str(builds[1].get("artifact") or ""))
+        if (
+            builds[0].get("artifact_digest") != builds[1].get("artifact_digest")
+            or not first_artifact.is_file()
+            or first_artifact.read_bytes() != second_artifact.read_bytes()
+        ):
+            raise SystemExit(
+                "Installed Python packages produced a non-reproducible build"
+            )
+
+        def publish(label: str, *, allowed_returncodes: tuple[int, ...] = (0,)) -> dict[str, Any]:
+            return parse_json_output(
+                run(
+                    str(agent_cli),
+                    "publish",
+                    "--project",
+                    str(project),
+                    "--install-root",
+                    str(root / "installed-agents"),
+                    "--runtime-command",
+                    str(python),
+                    cwd=root,
+                    env=env,
+                    label=label,
+                    allowed_returncodes=allowed_returncodes,
+                ),
+                label=label,
+            )
+
+        first_publication = publish("publish isolated Python agent 1.0.0")
+        doctor = parse_json_output(
+            run(
+                str(agent_cli),
+                "doctor",
+                "--project",
+                str(project),
+                "--install-root",
+                str(root / "installed-agents"),
+                cwd=root,
+                env=env,
+                label="diagnose isolated Python agent",
+            ),
+            label="diagnose isolated Python agent",
+        )
+        if first_publication.get("ok") is not True or doctor.get("ok") is not True:
+            raise SystemExit(
+                f"Initial Python release is unhealthy: {first_publication=} {doctor=}"
+            )
+
+        facade_runs = installed_facade_agent_validation(
+            router_cli=router_cli,
+            root=root,
+            env=env,
+            role_references={
+                "architect": (
+                    "local://distribution/distribution-python-agent-planner@1.0.0"
+                ),
+                "implementer": (
+                    "local://distribution/distribution-python-agent-writer@1.0.0"
+                ),
+                "reviewer": (
+                    "local://distribution/distribution-python-agent-reviewer@1.0.0"
+                ),
+            },
+            result_filename="distribution-python-agent_result.md",
+            task="Create the generated Python result through the shared facade",
+        )
+
+        agent_source = project / "agent.py"
+        agent_source.write_text(
+            agent_source.read_text(encoding="utf-8")
+            + "\n# Release validation update.\n",
+            encoding="utf-8",
+        )
+        immutable_rejection = publish(
+            "reject changed Python agent 1.0.0",
+            allowed_returncodes=(2,),
+        )
+        error = immutable_rejection.get("error") or {}
+        if immutable_rejection.get("ok") is not False or "bump version" not in str(
+            error.get("message") or ""
+        ).lower():
+            raise SystemExit(
+                "Changed Python source replaced an immutable version instead of "
+                f"being rejected: {immutable_rejection}"
+            )
+
+        version_update = parse_json_output(
+            run(
+                str(agent_cli),
+                "version",
+                "1.1.0",
+                "--project",
+                str(project),
+                cwd=root,
+                env=env,
+                label="set isolated Python agent version 1.1.0",
+            ),
+            label="set isolated Python agent version 1.1.0",
+        )
+        if version_update.get("version") != "1.1.0":
+            raise SystemExit(f"Python version update failed: {version_update}")
+        second_publication = publish("publish isolated Python agent 1.1.0")
+        rollback = parse_json_output(
+            run(
+                str(agent_cli),
+                "rollback",
+                "1.0.0",
+                "--project",
+                str(project),
+                cwd=root,
+                env=env,
+                label="rollback isolated Python agent",
+            ),
+            label="rollback isolated Python agent",
+        )
+        if second_publication.get("ok") is not True or rollback.get("version") != "1.0.0":
+            raise SystemExit(
+                f"Python update/rollback validation failed: {second_publication=} {rollback=}"
+            )
+
+        write_json(
+            VALIDATION_DIR / "python-distribution.json",
+            {
+                "ok": True,
+                "installed_wheels": [
+                    core_wheel.name,
+                    sdk_wheel.name,
+                    builder_wheel.name,
+                    runner_wheel.name,
+                ],
+                "driver_conformance": conformance,
+                "direct_run": direct_run,
+                "reproducible_build_digest": builds[0]["artifact_digest"],
+                "published_versions": ["1.0.0", "1.1.0"],
+                "immutable_replacement_rejected": True,
+                "rollback": rollback,
+                "shared_facade_runs": facade_runs,
+            },
+            replacements={str(root): "<isolated-python>"},
+        )
 
 
 def isolated_typescript_distribution_validation(
@@ -602,90 +997,18 @@ def isolated_typescript_distribution_validation(
                 f"Initial TypeScript release is unhealthy: {first_publication=} {doctor=}"
             )
 
-        facade_runs: dict[str, dict[str, Any]] = {}
         role_references = {
             "architect": "local://distribution/distribution-agent-planner@1.0.0",
             "implementer": "local://distribution/distribution-agent-writer@1.0.0",
             "reviewer": "local://distribution/distribution-agent-reviewer@1.0.0",
         }
-        facade_workspaces = {
-            client: root / f"{client}-workspace"
-            for client in ("vscode-extension", "kiro")
-        }
-        facade_env = {
-            **env,
-            "BALDR_TRUSTED_WORKSPACE_ROOTS_JSON": json.dumps(
-                [str(path) for path in facade_workspaces.values()]
-            ),
-        }
-        for client, workspace in facade_workspaces.items():
-            workspace.mkdir()
-            run(
-                executable("git"),
-                "init",
-                "-q",
-                str(workspace),
-                cwd=root,
-                env=facade_env,
-                label=f"initialize {client} facade workspace",
-            )
-            arguments = [
-                str(router_cli),
-                "facade",
-                "run",
-                str(workspace),
-                "Create the generated TypeScript result through the shared facade",
-                "--workspace-mode",
-                "current",
-                "--team-mode",
-                "automatic",
-            ]
-            for role, reference in role_references.items():
-                arguments.extend(("--agent-override", f"{role}={reference}"))
-            arguments.extend(("--client", client))
-            facade_result = parse_json_output(
-                run(
-                    *arguments,
-                    cwd=root,
-                    env=facade_env,
-                    label=f"installed {client} external-agent facade execution",
-                ),
-                label=f"installed {client} external-agent facade execution",
-            )
-            actual_references = {
-                str(step.get("phase")): str(profile.get("agent_ref"))
-                for step in facade_result.get("steps", [])
-                if isinstance(step, dict)
-                for profile in step.get("profiles", [])
-                if isinstance(profile, dict)
-            }
-            if (
-                facade_result.get("ok") is not True
-                or facade_result.get("status") != "approved"
-                or (facade_result.get("facade") or {}).get("client") != client
-                or actual_references != role_references
-                or not (workspace / "distribution-agent_result.md").is_file()
-            ):
-                raise SystemExit(
-                    f"Installed {client} facade execution failed: {facade_result}"
-                )
-            facade_runs[client] = {
-                "status": facade_result.get("status"),
-                "workflow": facade_result.get("workflow"),
-                "roles": actual_references,
-                "write_authorization_requested": (
-                    (facade_result.get("error") or {}).get("code")
-                    == "write_authorization_required"
-                ),
-            }
-
-        config = project / "baldr-agent.toml"
-        configured = config.read_text(encoding="utf-8")
-        if 'version = "1.0.0"' not in configured:
-            raise SystemExit("Generated project did not declare version 1.0.0")
-        config.write_text(
-            configured.replace('version = "1.0.0"', 'version = "1.1.0"', 1),
-            encoding="utf-8",
+        facade_runs = installed_facade_agent_validation(
+            router_cli=router_cli,
+            root=root,
+            env=env,
+            role_references=role_references,
+            result_filename="distribution-agent_result.md",
+            task="Create the generated TypeScript result through the shared facade",
         )
         entrypoint = project / "src" / "agent.ts"
         entrypoint.write_text(
@@ -693,6 +1016,21 @@ def isolated_typescript_distribution_validation(
             + "\n// Distribution update 1.1.0.\n",
             encoding="utf-8",
         )
+        version_update = parse_json_output(
+            run(
+                str(agent_cli),
+                "version",
+                "1.1.0",
+                "--project",
+                str(project),
+                cwd=root,
+                env=env,
+                label="set isolated TypeScript agent version 1.1.0",
+            ),
+            label="set isolated TypeScript agent version 1.1.0",
+        )
+        if version_update.get("version") != "1.1.0":
+            raise SystemExit(f"TypeScript version update failed: {version_update}")
         second_publication = parse_json_output(
             run(
                 str(agent_cli),
@@ -806,6 +1144,266 @@ def isolated_typescript_distribution_validation(
         )
 
 
+def isolated_kiro_distribution_validation(
+    uv: str,
+    npm: str,
+    node: str,
+    core_wheel: Path,
+    adapter_wheel: Path,
+    launcher_package: Path,
+    power_archive: Path,
+) -> None:
+    """Prove the packaged Kiro facade has every clean-install dependency."""
+
+    with tempfile.TemporaryDirectory(prefix="baldr-kiro-distribution-") as temp:
+        root = Path(temp)
+        power_root = root / "power"
+        with zipfile.ZipFile(power_archive) as archive:
+            archive.extractall(power_root)
+        power_config_path = power_root / "baldr-orchestrator" / "mcp.json"
+        power_config = json.loads(power_config_path.read_text(encoding="utf-8"))
+        server = ((power_config.get("mcpServers") or {}).get("baldr-router") or {})
+        server_env = server.get("env") or {}
+        if (
+            server.get("command") != "baldr-router-launcher"
+            or server.get("args") != ["mcp"]
+            or server_env.get("BALDR_CLIENT_ID") != "kiro-power"
+            or server_env.get("BALDR_CLIENT_VERSION") != VERSION
+        ):
+            raise SystemExit(
+                "Packaged Kiro Power does not reference the versioned launcher "
+                f"contract: {server}"
+            )
+
+        npm_prefix = root / "npm-prefix"
+        npm_env = {
+            **os.environ,
+            "npm_config_cache": str(root / "npm-cache"),
+        }
+        run(
+            npm,
+            "install",
+            "--global",
+            "--prefix",
+            str(npm_prefix),
+            "--ignore-scripts",
+            "--no-audit",
+            "--no-fund",
+            str(launcher_package),
+            cwd=root,
+            env=npm_env,
+            label="isolated Kiro launcher install",
+        )
+
+        venv = root / "venv"
+        run(uv, "venv", str(venv), label="isolated Kiro Python environment")
+        python = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+        scripts = python.parent
+        run(
+            uv,
+            "pip",
+            "install",
+            "--python",
+            str(python),
+            str(core_wheel),
+            str(adapter_wheel),
+            label="isolated Kiro core and adapter install",
+        )
+
+        npm_bin = npm_prefix if os.name == "nt" else npm_prefix / "bin"
+        launcher = npm_bin / (
+            "baldr-router-launcher.cmd" if os.name == "nt" else "baldr-router-launcher"
+        )
+        adapter = scripts / (
+            "baldr-kiro-adapter.exe" if os.name == "nt" else "baldr-kiro-adapter"
+        )
+        path_parts = (
+            str(npm_bin),
+            str(scripts),
+            str(Path(node).resolve().parent),
+            str(Path(executable("git")).resolve().parent),
+        )
+        env = {
+            **{
+                key: value
+                for key, value in os.environ.items()
+                if not key.upper().startswith("BALDR_")
+            },
+            "PATH": os.pathsep.join(dict.fromkeys(path_parts)),
+            "XDG_CONFIG_HOME": str(root / "config"),
+            "XDG_CACHE_HOME": str(root / "cache"),
+            "XDG_STATE_HOME": str(root / "state"),
+            "XDG_DATA_HOME": str(root / "data"),
+            # The distribution smoke runs on the build host. Real Windows ->
+            # WSL fallback remains a real-environment qualification gate.
+            "BALDR_ROUTER_LAUNCHER_MODE": "host",
+        }
+        launcher_version = run(
+            str(launcher),
+            "--version",
+            cwd=root,
+            env=env,
+            label="isolated Kiro launcher version",
+        ).strip()
+        if launcher_version != VERSION:
+            raise SystemExit(
+                f"Installed Kiro launcher version mismatch: {launcher_version!r}"
+            )
+
+        definitions = parse_json_output(
+            run(
+                str(launcher),
+                "qualification",
+                "definitions",
+                cwd=root,
+                env=env,
+                label="isolated Kiro launcher to Router execution",
+            ),
+            label="isolated Kiro launcher to Router execution",
+        )
+        profiles = ((definitions.get("profiles") or {}).get("profiles") or {})
+        if definitions.get("ok") is not True or "kiro-windows-wsl" not in profiles:
+            raise SystemExit(
+                "Packaged launcher did not execute the installed Router: "
+                f"{definitions}"
+            )
+
+        handshake_code = """
+import asyncio, json, os, sys
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+
+async def main():
+    child_env = os.environ.copy()
+    child_env["BALDR_VERIFY_DISABLE"] = "1"
+    params = StdioServerParameters(
+        command=sys.argv[1],
+        args=["mcp"],
+        env=child_env,
+    )
+    async with asyncio.timeout(20):
+        async with stdio_client(params) as streams:
+            async with ClientSession(*streams) as session:
+                initialized = await session.initialize()
+                tools = await session.list_tools()
+                prompts = await session.list_prompts()
+    print(json.dumps({
+        "ok": True,
+        "server": initialized.serverInfo.name,
+        "tool_count": len(tools.tools),
+        "prompt_count": len(prompts.prompts),
+    }))
+
+asyncio.run(main())
+"""
+        handshake = parse_json_output(
+            run(
+                str(python),
+                "-c",
+                handshake_code,
+                str(launcher),
+                cwd=root,
+                env=env,
+                label="packaged Kiro launcher MCP handshake",
+            ),
+            label="packaged Kiro launcher MCP handshake",
+        )
+        if (
+            handshake.get("ok") is not True
+            or int(handshake.get("tool_count") or 0) < 1
+            or int(handshake.get("prompt_count") or 0) < 1
+        ):
+            raise SystemExit(
+                f"Packaged Kiro launcher MCP handshake failed: {handshake}"
+            )
+
+        workspace = root / "workspace"
+        workspace.mkdir()
+        run(
+            executable("git"),
+            "init",
+            "-q",
+            str(workspace),
+            cwd=root,
+            env=env,
+            label="initialize isolated Kiro workspace",
+        )
+        cli_installation = parse_json_output(
+            run(
+                str(adapter),
+                "install-workspace",
+                str(workspace),
+                cwd=root,
+                env=env,
+                label="isolated Kiro adapter onboarding",
+            ),
+            label="isolated Kiro adapter onboarding",
+        )
+        extension_code = (
+            "import json, sys; "
+            "from baldr_kiro_adapter.extension import kiro_install_workspace; "
+            "print(json.dumps(kiro_install_workspace(sys.argv[1])))"
+        )
+        installation = parse_json_output(
+            run(
+                str(python),
+                "-c",
+                extension_code,
+                str(workspace),
+                cwd=root,
+                env=env,
+                label="isolated Kiro MCP adapter integration",
+            ),
+            label="isolated Kiro MCP adapter integration",
+        )
+        receipt = installation.get("client_receipt") or {}
+        receipt_facts = receipt.get("facts") or {}
+        if (
+            cli_installation.get("ok") is not True
+            or installation.get("ok") is not True
+            or installation.get("action") != "unchanged"
+            or not (workspace / ".kiro" / "hooks" / "baldr-router.generated.kiro.hook").is_file()
+            or receipt.get("baldr_version") != VERSION
+            or receipt_facts.get("workspace_hooks_installed") is not True
+        ):
+            raise SystemExit(
+                f"Packaged Kiro adapter onboarding failed: {installation}"
+            )
+
+        write_json(
+            VALIDATION_DIR / "kiro-distribution.json",
+            {
+                "ok": True,
+                "status": "synthetic",
+                "real_environment_qualified": False,
+                "packages": {
+                    "core": core_wheel.name,
+                    "adapter": adapter_wheel.name,
+                    "launcher": launcher_package.name,
+                    "power": power_archive.name,
+                },
+                "power_command": server.get("command"),
+                "launcher_version": launcher_version,
+                "router_invocation": {
+                    "ok": definitions.get("ok"),
+                    "kiro_profile_available": "kiro-windows-wsl" in profiles,
+                },
+                "mcp_handshake": handshake,
+                "adapter_onboarding": {
+                    "ok": installation.get("ok"),
+                    "hook_installed": True,
+                    "second_install_action": installation.get("action"),
+                    "receipt_baldr_version": receipt.get("baldr_version"),
+                },
+                "qualification_note": (
+                    "This clean-install smoke proves packaging only. Windows/WSL "
+                    "fallback and Kiro UI behavior still require a real receipt."
+                ),
+            },
+            replacements={str(root): "<isolated-kiro>"},
+        )
+
+
 def write_json(path: Path, value: Any, *, replacements: dict[str, str] | None = None) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -816,6 +1414,7 @@ def write_json(path: Path, value: Any, *, replacements: dict[str, str] | None = 
 
 
 def build_validation_report() -> Path:
+    policy = promotion_policy()
     report = {
         "release": VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -824,8 +1423,10 @@ def build_validation_report() -> Path:
         "live_environment_qualified": False,
         "live_environment_note": (
             "Build and synthetic validation cannot qualify a real client environment. "
-            "Run `baldr-router qualification run` from the target VS Code/Kiro machine."
+            "Promotion requires a qualified VS Code Remote WSL receipt with the Codex "
+            "provider smoke. Kiro remains supported but is deferred from this gate."
         ),
+        "promotion": policy,
         "automated_steps": VALIDATION,
         "ok": all(bool(item.get("ok")) for item in VALIDATION),
     }
@@ -841,6 +1442,7 @@ def write_release_manifest(bundles: dict[str, Path]) -> Path:
     files += [path for path in sorted(METADATA_DIR.rglob("*")) if path.is_file()]
     files += [path for path in sorted(VALIDATION_DIR.rglob("*")) if path.is_file()]
     files += list(bundles.values())
+    policy = promotion_policy()
     manifest = {
         "schema_version": 1,
         "version": VERSION,
@@ -848,6 +1450,7 @@ def write_release_manifest(bundles: dict[str, Path]) -> Path:
         "feature_freeze": True,
         "primary_vscode_experience": "baldr-console",
         "qualification_required_for_promotion": True,
+        "promotion": policy,
         "bundles": {name: path.relative_to(DIST).as_posix() for name, path in bundles.items()},
         "artifacts": [
             {
@@ -1110,16 +1713,33 @@ def main() -> int:
         env=npm_env,
         label="package TypeScript Builder driver",
     )
+    run(
+        npm,
+        "pack",
+        "--pack-destination",
+        str(NODE_DIST),
+        str(ROOT / "launcher"),
+        env=npm_env,
+        label="package Kiro cross-platform launcher",
+    )
     typescript_sdk_packages = sorted(
         NODE_DIST.glob(f"baldr-agent-sdk-{VERSION}.tgz")
     )
     typescript_driver_packages = sorted(
         NODE_DIST.glob(f"baldr-agent-builder-typescript-{VERSION}.tgz")
     )
-    if len(typescript_sdk_packages) != 1 or len(typescript_driver_packages) != 1:
+    launcher_packages = sorted(
+        NODE_DIST.glob(f"baldr-router-launcher-{VERSION}.tgz")
+    )
+    if (
+        len(typescript_sdk_packages) != 1
+        or len(typescript_driver_packages) != 1
+        or len(launcher_packages) != 1
+    ):
         raise SystemExit(
-            "Expected one TypeScript SDK and Builder driver package: "
-            f"{typescript_sdk_packages=} {typescript_driver_packages=}"
+            "Expected one TypeScript SDK, Builder driver, and Kiro launcher package: "
+            f"{typescript_sdk_packages=} {typescript_driver_packages=} "
+            f"{launcher_packages=}"
         )
     require_tar_members(
         typescript_sdk_packages[0],
@@ -1143,6 +1763,17 @@ def main() -> int:
             "package/dist/driver.js",
         },
         label="TypeScript Builder driver package",
+    )
+    require_tar_members(
+        launcher_packages[0],
+        {
+            "package/LICENSE",
+            "package/package.json",
+            "package/README.md",
+            "package/bin/baldr-router-launcher.mjs",
+            "package/lib/runtime-bootstrap.mjs",
+        },
+        label="Kiro launcher package",
     )
     isolated_typescript_distribution_validation(
         uv,
@@ -1201,10 +1832,20 @@ def main() -> int:
         label="packaged release consistency",
     )
 
+    kiro_power_archive = ARTIFACTS / f"baldr-orchestrator-kiro-{VERSION}.zip"
     zip_directory(
         ROOT / "facades" / "kiro" / "baldr-orchestrator",
-        ARTIFACTS / f"baldr-orchestrator-kiro-{VERSION}.zip",
+        kiro_power_archive,
         root_name="baldr-orchestrator",
+    )
+    isolated_kiro_distribution_validation(
+        uv,
+        npm,
+        node,
+        core_wheel,
+        adapter_wheel,
+        launcher_packages[0],
+        kiro_power_archive,
     )
     zip_directory(
         ROOT / "facades" / "vscode-agent-plugin",

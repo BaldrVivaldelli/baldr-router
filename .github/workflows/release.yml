@@ -1,11 +1,12 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - 'v0.20.*'
   workflow_dispatch:
     inputs:
+      qualification_run_id:
+        description: Run id of the qualified VS Code Remote WSL + Codex workflow
+        required: true
+        type: string
       publish_pypi:
         description: Publish the validated Python control-plane and agent packages to PyPI
         required: true
@@ -19,6 +20,7 @@ on:
 
 permissions:
   contents: write
+  actions: read
   id-token: write
   attestations: write
   artifact-metadata: write
@@ -31,6 +33,12 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
+      - name: Require dispatch from the v0.20.0 tag
+        run: >-
+          python -c "import os; expected='v0.20.0'; actual=os.environ['GITHUB_REF_NAME'];
+          kind=os.environ['GITHUB_REF_TYPE'];
+          raise SystemExit(0 if kind == 'tag' and actual == expected else
+          f'Dispatch this workflow from tag {expected}; got {kind} {actual}')"
       - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
@@ -41,16 +49,37 @@ jobs:
           cache-dependency-path: |
             package-lock.json
             facades/vscode-extension/package-lock.json
+      - name: Download the real promotion receipt
+        uses: actions/download-artifact@v8
+        with:
+          name: baldr-real-environment-qualification-vscode-remote-wsl
+          path: qualification-input
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.qualification_run_id }}
+      - name: Verify qualification workflow provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          QUALIFICATION_RUN_ID: ${{ inputs.qualification_run_id }}
+        run: |
+          run_api="repos/${GITHUB_REPOSITORY}/actions/runs/${QUALIFICATION_RUN_ID}"
+          test "$(gh api "$run_api" --jq .conclusion)" = "success"
+          test "$(gh api "$run_api" --jq .head_sha)" = "$GITHUB_SHA"
+          test "$(gh api "$run_api" --jq .path)" = ".github/workflows/real-environment-qualification.yml"
+      - name: Enforce VS Code Remote WSL + Codex promotion qualification
+        run: >-
+          uv run --project router baldr-router qualification promotion-status
+          --receipt qualification-input
+          --release-version 0.20.0
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm ci --ignore-scripts --no-audit --no-fund
         working-directory: facades/vscode-extension
       - run: python scripts/dev.py build
       - run: python scripts/dev.py verify-release
       - name: Publish Python packages to PyPI
-        if: github.event_name == 'workflow_dispatch' && inputs.publish_pypi
+        if: inputs.publish_pypi
         run: uv publish --trusted-publishing always dist/artifacts/python/*
       - name: Publish TypeScript agent packages to npm
-        if: github.event_name == 'workflow_dispatch' && inputs.publish_npm
+        if: inputs.publish_npm
         run: |
           npm publish --workspace @baldr/agent-sdk --access public --provenance
           npm publish --workspace @baldr/agent-builder-typescript --access public --provenance
@@ -70,6 +99,7 @@ jobs:
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ github.ref_name }}
           files: |
             dist/baldr-router-*-source.zip
             dist/baldr-router-*-artifacts.zip

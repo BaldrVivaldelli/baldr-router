@@ -90,8 +90,44 @@ _ACTION_COPY: dict[str, tuple[str, str]] = {
         "Cerrá la sesión sin aplicar más cambios.",
     ),
     "start": ("Volver a intentar", "Iniciá nuevamente la sesión."),
+    "continue": (
+        "Indicar correcciones",
+        "Escribí qué debe ajustar Baldr antes de continuar la conversación.",
+    ),
     "cancel": ("Cancelar", "Pedile a Baldr que detenga el trabajo."),
     "archive": ("Archivar", "Guardá la sesión fuera de la lista principal."),
+}
+
+_TECHNICAL_ERROR_COPY: dict[str, tuple[str, str]] = {
+    "codex_not_found": (
+        "Codex no está disponible",
+        "Instalá Codex CLI en el entorno que usa Baldr y luego volvé a intentar.",
+    ),
+    "codex_not_authenticated": (
+        "Codex necesita iniciar sesión",
+        "Ejecutá codex login en el entorno que usa Baldr y luego volvé a intentar.",
+    ),
+    "codex_timeout": (
+        "Codex superó el tiempo disponible",
+        "Baldr detuvo el árbol de procesos y conservó el último estado confirmado. "
+        "Revisá el alcance de la tarea y volvé a intentar.",
+    ),
+    "codex_process_aborted": (
+        "Codex se interrumpió",
+        "Baldr conservó el último estado confirmado. Volvé a intentar la sesión guardada.",
+    ),
+    "codex_process_failed": (
+        "Codex no pudo completar la etapa",
+        "Abrí los detalles técnicos, corregí la causa indicada y volvé a intentar.",
+    ),
+    "codex_invalid_structured_output": (
+        "La respuesta de Codex no se pudo validar",
+        "La sesión quedó guardada. Volvé a intentar y, si se repite, revisá los detalles de validación.",
+    ),
+    "provider_unexpected_exception": (
+        "El proveedor se detuvo de forma inesperada",
+        "La sesión quedó guardada. Abrí los detalles técnicos y volvé a intentar.",
+    ),
 }
 
 _ACTIVITY_COPY = {
@@ -509,6 +545,141 @@ def normalize_public_report(value: Any) -> tuple[dict[str, Any] | None, dict[str
         "alternatives_rejected": _safe_string_list(report.get("alternatives_rejected")),
     }
     return public, technical
+
+
+def _is_obsolete_write_authorization_narrative(value: Any) -> bool:
+    """Recognize planner prose that contradicts persisted direct consent."""
+
+    text = str(value or "").strip().lower()
+    if not text:
+        return False
+    authorization_markers = (
+        "authoriz",
+        "autoriz",
+        "permission",
+        "permiso",
+        "consent",
+        "approval",
+        "aprobación",
+        "aprobacion",
+    )
+    write_markers = (
+        "write",
+        "writ",
+        "edit",
+        "chang",
+        "creat",
+        "updat",
+        "modif",
+        "escri",
+        "cambi",
+        "crea",
+        "actualiz",
+        "file",
+        "archivo",
+        "report",
+        "informe",
+        "workspace",
+        "repositorio",
+    )
+    return any(marker in text for marker in authorization_markers) and any(
+        marker in text for marker in write_markers
+    )
+
+
+def _without_obsolete_write_authorization(
+    report_value: Mapping[str, Any] | None,
+    technical_value: Mapping[str, Any] | None = None,
+    *,
+    planning: bool = False,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Remove stale per-task permission prose from a direct-work projection.
+
+    Older provider reports could ask for permission even though the durable
+    item already selected ``current`` or ``non-git``. The workflow correctly
+    continued, but replaying that historical narration made a completed task
+    look blocked. Raw durable evidence remains untouched; only the public view
+    is corrected to match the authoritative workspace policy.
+    """
+
+    report = dict(report_value) if report_value is not None else None
+    technical = dict(technical_value) if technical_value is not None else None
+    removed = False
+    if report is not None:
+        decisions: list[dict[str, str]] = []
+        for raw in _items(report.get("decisions")):
+            decision = _record(raw)
+            key = _token(decision.get("key"))
+            if key in {"write_authorization", "write_request"}:
+                removed = True
+                continue
+            decisions.append(decision)
+        report["decisions"] = decisions
+
+        for field in (
+            "scope",
+            "approach",
+            "plan_steps",
+            "work_completed",
+            "work_next",
+            "findings",
+            "corrections",
+            "verification_evidence",
+            "changes_added",
+            "changes_modified",
+            "changes_removed",
+            "acceptance_criteria",
+            "assumptions",
+            "tests_run",
+            "verification_needed",
+            "risks",
+            "follow_up",
+            "blockers",
+        ):
+            values = _items(report.get(field))
+            retained = [
+                value
+                for value in values
+                if not _is_obsolete_write_authorization_narrative(value)
+            ]
+            removed = removed or len(retained) != len(values)
+            report[field] = retained
+
+        for field in ("summary", "interpretation"):
+            value = report.get(field)
+            if not _is_obsolete_write_authorization_narrative(value):
+                continue
+            removed = True
+            if field == "summary" and planning:
+                raw = str(value or "").lower()
+                report[field] = (
+                    "La planificación está completa y la implementación puede continuar."
+                    if any(
+                        marker in raw
+                        for marker in ("autoriz", "permiso", "archivo", "informe")
+                    )
+                    else "Planning is complete and implementation can proceed."
+                )
+            else:
+                report[field] = ""
+
+        if (
+            removed
+            and planning
+            and _token(report.get("status")) in _ATTENTION_REPORT_STATUSES
+            and not _items(report.get("blockers"))
+        ):
+            report["status"] = "planned"
+
+    if technical is not None:
+        for field in ("commands_run", "constraints", "alternatives_rejected"):
+            values = _items(technical.get(field))
+            technical[field] = [
+                value
+                for value in values
+                if not _is_obsolete_write_authorization_narrative(value)
+            ]
+    return report, technical
 
 
 def _stage_for_step(step: Mapping[str, Any]) -> str | None:
@@ -1158,6 +1329,18 @@ def _attention(
         kind = "failed"
         fallback = "Baldr no pudo completar la sesión."
     error_code = _token(run.get("error_code") or item.get("error_code"))
+    technical_error_codes = {
+        code
+        for stage in stages.values()
+        for raw in _items(_record(stage.get("technical")).get("error_codes"))
+        if (code := _token(raw))
+    }
+    if error_code:
+        technical_error_codes.add(error_code)
+    technical_error_code = next(
+        (code for code in _TECHNICAL_ERROR_COPY if code in technical_error_codes),
+        None,
+    )
     stage_name = {
         "planning": "La planificación",
         "execution": "La etapa de cambios",
@@ -1186,6 +1369,8 @@ def _attention(
             "Tus archivos cambiaron mientras Baldr trabajaba; no los sobrescribimos."
         )
         title = "Tus archivos cambiaron durante el trabajo"
+    elif technical_error_code:
+        title, summary = _TECHNICAL_ERROR_COPY[technical_error_code]
     elif (
         error_code
         in {
@@ -1265,6 +1450,10 @@ def _attention(
             # failed operation is safe or useful.  Offer retry only when the
             # recorded provider/attempt error explicitly says it is retryable.
             continue
+        if action == "continue" and kind != "changes_requested":
+            # Continuation is safe user-authored input for review changes. It
+            # is not a substitute for explicit reconciliation or retryability.
+            continue
         label, description = _ACTION_COPY[action]
         actions.append({"id": action, "label": label, "description": description})
     action_label = "Elegir cómo continuar"
@@ -1274,6 +1463,10 @@ def _attention(
         action_label = "Cerrar esta sesión"
     elif kind == "reconciliation":
         action_label = "Revisar opciones"
+    elif kind == "changes_requested" and any(
+        action["id"] == "continue" for action in actions
+    ):
+        action_label = "Indicar correcciones"
     elif retryable is True and any(action["id"] == "start" for action in actions):
         action_label = "Volver a intentar"
     return {
@@ -1518,6 +1711,33 @@ def project_work_item_progress(
         stage_id: _stage_projection(stage_id, grouped[stage_id])
         for stage_id in _STAGE_IDS
     }
+    direct_write_consent = _token(item.get("safety_mode")) in {"current", "non-git"}
+    if direct_write_consent:
+        for stage_id, stage in stage_map.items():
+            stage["report"], stage["technical"] = (
+                _without_obsolete_write_authorization(
+                    _record(stage.get("report")) or None,
+                    _record(stage.get("technical")) or None,
+                    planning=stage_id == "planning",
+                )
+            )
+            if (
+                stage_id == "planning"
+                and _token(_record(stage.get("report")).get("status")) == "planned"
+                and _token(stage.get("outcome")) in _ATTENTION_REPORT_STATUSES
+            ):
+                stage["state"] = "complete"
+                stage["outcome"] = "planned"
+            for history_entry in _items(stage.get("history")):
+                if not isinstance(history_entry, dict):
+                    continue
+                history_entry["report"], history_entry["technical"] = (
+                    _without_obsolete_write_authorization(
+                        _record(history_entry.get("report")) or None,
+                        _record(history_entry.get("technical")) or None,
+                        planning=stage_id == "planning",
+                    )
+                )
     overall = _overall_state(item, run)
     run_status = _token(run.get("status"))
 
@@ -1609,6 +1829,10 @@ def project_work_item_progress(
         retryable = True
     attention = _attention(item, run, stage_map, active_stage, retryable)
     final_report = _final_report(snapshot, stage_map)
+    if direct_write_consent:
+        final_report, _unused_technical = _without_obsolete_write_authorization(
+            final_report
+        )
     error_codes = sorted(
         {
             code

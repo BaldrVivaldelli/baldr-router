@@ -125,10 +125,10 @@ publish the same manifests through Agent Manager.
 Exact versions are immutable: the portable project definition is included in
 the artifact digest, republishing an identical release is idempotent, and
 changed source, roles, capabilities, ownership, effects or manifest metadata
-under an installed version are rejected. Increment `version` in
-`baldr-agent.toml`, publish again, and use `baldr-agent rollback VERSION` if the
-team must reactivate a previous local release. Baldr stores identity, digest
-and stable location; it still does not own the agent source.
+under an installed version are rejected. Run `baldr-agent version VERSION`,
+publish again, and use `baldr-agent rollback VERSION` if the team must
+reactivate a previous local release. Baldr stores identity, digest and stable
+location; it still does not own the agent source.
 
 ## Author an external Python agent
 

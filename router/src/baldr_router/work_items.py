@@ -9,6 +9,7 @@ from typing import Any
 
 from .config import ExecutionProfileConfig, load_config, save_config
 from .durability.identity import workspace_identity
+from .durability.recovery import recover_stale_runs
 from .durability.store import DurableStore, utc_now_iso
 from .execution_profiles import resolve_role_profiles
 from .phase_deliverables import (
@@ -18,6 +19,9 @@ from .phase_deliverables import (
     list_phase_deliverables,
     phase_deliverable_index_metadata,
 )
+from .process_control import validate_process_cleanup
+from .provider_errors import provider_error
+from .redaction import redact_text
 from .platforming import normalize_path_for_runtime
 from .team_resolution import normalize_agent_overrides, normalize_team_mode
 from .work_item_progress import (
@@ -316,9 +320,9 @@ def _allowed_actions(
         actions.append("start")
     if status in {"running", "cancelling"}:
         actions.append("cancel")
-    run_status = str(((snapshot or {}).get("run") or {}).get("status") or "")
+    run = ((snapshot or {}).get("run") or item.get("run") or {})
+    run_status = str(run.get("status") or "")
     if run_status == "awaiting_reconciliation":
-        run = (snapshot or {}).get("run") or {}
         reconciliation = run.get("reconciliation") or {}
         raw_actions = reconciliation.get("allowed_actions")
         if isinstance(raw_actions, list):
@@ -348,6 +352,70 @@ def _allowed_actions(
     if status not in {"running", "cancelling", "archived"}:
         actions.append("archive")
     return list(dict.fromkeys(actions))
+
+
+def _automatic_resolution(
+    item: dict[str, Any], snapshot: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Return the one recovery action that is safe without a user choice."""
+    run = ((snapshot or {}).get("run") or item.get("run") or {})
+    run_status = str(run.get("status") or "")
+    reconciliation = dict(run.get("reconciliation") or {})
+    allowed = [
+        str(value)
+        for value in (reconciliation.get("allowed_actions") or [])
+        if str(value)
+    ]
+    cause = str(
+        run.get("error_code")
+        or reconciliation.get("reason")
+        or run_status
+        or "no-recovery-required"
+    )
+    action: str | None = None
+    reconciliation_action: str | None = None
+    if run_status in {"interrupted", "recovering"}:
+        action = "resume"
+    elif run_status == "cancelling":
+        action = "finalize_cancel"
+    elif run_status == "awaiting_reconciliation":
+        reason = str(reconciliation.get("reason") or "")
+        allowed_set = set(allowed)
+        if (
+            reason == "shadow-publication-conflict"
+            and "apply_shadow_changes" in allowed_set
+            and not allowed_set.intersection(
+                {
+                    "accept_existing_changes",
+                    "continue_from_shadow",
+                    "discard_shadow",
+                    "discard_worktree",
+                    "resume_from_checkpoint",
+                }
+            )
+        ):
+            action = "reconcile"
+            reconciliation_action = "apply_shadow_changes"
+        elif allowed_set == {"mark_failed"}:
+            action = "reconcile"
+            reconciliation_action = "mark_failed"
+    requires_user = bool(run_status == "awaiting_reconciliation" and not action)
+    return {
+        "cause": cause,
+        "run_status": run_status or None,
+        "action": action,
+        "performed_action": None,
+        "reconciliation_action": reconciliation_action,
+        "requires_user": requires_user,
+        "needs_input_reason": "multiple_valid_effects" if requires_user else None,
+        "permission_boundary": {
+            "basis": "persisted_authorization",
+            "workspace_id": item.get("workspace_id"),
+            "mode": item.get("safety_mode"),
+            "expands_permissions": False,
+        },
+        "allowed_actions": allowed,
+    }
 
 
 def _legacy_write_policy_failure(snapshot: dict[str, Any] | None) -> bool:
@@ -426,16 +494,16 @@ def workbench_options() -> dict[str, Any]:
         ],
         "team_modes": [
             {
-                "id": "automatic",
-                "label": "Automático",
-                "description": "Elige por etapa un agente compatible y listo; si no hay uno, usa la configuración normal.",
+                "id": "configured",
+                "label": "Codex o Kiro normal",
+                "description": "Usa de forma predeterminada las configuraciones elegidas para cada etapa.",
                 "recommended": True,
                 "default": True,
             },
             {
-                "id": "configured",
-                "label": "Codex o Kiro normal",
-                "description": "Conserva las configuraciones elegidas para cada etapa.",
+                "id": "automatic",
+                "label": "Automático",
+                "description": "Elige por etapa un agente compatible y listo; si no hay uno, usa la configuración normal.",
             },
         ],
         "slash_commands": [
@@ -649,7 +717,7 @@ class WorkItemService:
                 "preset": "balanced",
                 "context_mode": "auto",
                 "context7_policy": "auto",
-                "team_mode": "automatic",
+                "team_mode": "configured",
                 "agent_overrides": {},
                 "role_profiles": {
                     role: list(cfg.roles[role].profiles) for role in ROLE_NAMES
@@ -1406,6 +1474,7 @@ class WorkItemService:
                 include_internal=include_internal,
             )
             item["allowed_actions"] = _allowed_actions(item, None)
+            item["resolution"] = _automatic_resolution(item)
             item["progress_summary"] = progress_summary(item)
             items.append(item)
         return items
@@ -1441,6 +1510,7 @@ class WorkItemService:
                 snapshot = None
         item["phases"] = _phase_summary(snapshot)
         item["allowed_actions"] = _allowed_actions(item, snapshot)
+        item["resolution"] = _automatic_resolution(item, snapshot)
         item["deliverables"] = list_phase_deliverables(
             self.store,
             work_item_id=item_id,
@@ -1655,6 +1725,9 @@ class WorkItemService:
         dry_run: bool = False,
         context7_libraries: list[str] | None = None,
     ) -> dict[str, Any]:
+        current = self.get(item_id, include_timeline=False)
+        if not dry_run and (current.get("resolution") or {}).get("action"):
+            return self.settle(item_id, client_name=client_name)
         item = self._prepare_restart(item_id)
         if item["status"] in {"running", "cancelling"}:
             raise ValueError("The work item is already running.")
@@ -1739,6 +1812,167 @@ class WorkItemService:
         )
         result["work_item"] = self.record_result(item_id, result)
         return result
+
+    def settle(
+        self,
+        item_id: str,
+        *,
+        client_name: str = "baldr-auto-settle",
+    ) -> dict[str, Any]:
+        """Apply only a recovery decision that has no meaningful alternative."""
+        item = self.get(item_id, include_timeline=False)
+        decision = dict(item.get("resolution") or {})
+        action = str(decision.get("action") or "")
+        if not action:
+            return {
+                "ok": True,
+                "settled": False,
+                "resolution": decision,
+                "work_item": item,
+            }
+        run_id = str(item.get("current_run_id") or "")
+        if not run_id:
+            raise ValueError("The work item has no durable run to settle.")
+
+        if action == "finalize_cancel":
+            result = self.cancel(
+                item_id,
+                reason="Baldr completed a previously requested cancellation.",
+                client_name=client_name,
+            )
+        elif action == "reconcile":
+            reconciliation_action = str(decision.get("reconciliation_action") or "")
+            if not reconciliation_action:
+                raise ValueError("The automatic reconciliation action is missing.")
+            result = self.reconcile(
+                item_id,
+                action=reconciliation_action,
+                client_name=client_name,
+            )
+        elif action == "resume":
+            from .workflows import run_workflow_impl
+
+            result = run_workflow_impl(
+                workspace_root=str(item["workspace_root"]),
+                task=str(item["task"]),
+                resume_run_id=run_id,
+                client_name=client_name,
+                work_item_id=item_id,
+            )
+            result["work_item"] = self.record_result(item_id, result)
+        else:  # defensive: decisions are internal, never accept arbitrary actions
+            raise ValueError(f"Unsupported automatic settlement action: {action}")
+
+        process_validation = validate_process_cleanup(
+            run_id=run_id,
+            terminate_remaining=True,
+        )
+        result["process_validation"] = process_validation
+        if not process_validation["ok"]:
+            result.update(
+                provider_error(
+                    "orphan_processes_detected",
+                    (
+                        "Managed processes were still running after automatic "
+                        f"settlement of durable run {run_id}."
+                    ),
+                    retryable=False,
+                    details=process_validation,
+                )
+            )
+        result["settled"] = True
+        result["resolution"] = {
+            **decision,
+            "performed_action": action,
+            "result_status": result.get("status"),
+            "process_cleanup_ok": process_validation["ok"],
+            "orphan_processes": process_validation["orphan_processes"],
+        }
+        with self.store.transaction() as connection:
+            self._event(
+                connection,
+                item_id,
+                "work_item.auto_settled",
+                result["resolution"],
+            )
+        return result
+
+    def settle_workspace(
+        self,
+        workspace_root: str | Path,
+        *,
+        client_name: str = "baldr-auto-settle",
+        limit: int = 10,
+    ) -> dict[str, Any]:
+        """Recover stale runs and settle every unambiguous item in a workspace."""
+        recovery = recover_stale_runs(self.store)
+        items = self.list(workspace_root=workspace_root, limit=limit)
+        results: list[dict[str, Any]] = []
+        pending: list[dict[str, Any]] = []
+        for item in items:
+            decision = dict(item.get("resolution") or {})
+            if decision.get("action"):
+                try:
+                    result = self.settle(str(item["id"]), client_name=client_name)
+                    results.append(
+                        {
+                            "id": item["id"],
+                            "ok": result.get("ok") is not False,
+                            "status": result.get("status"),
+                            "resolution": result.get("resolution"),
+                        }
+                    )
+                except Exception as exc:
+                    failure = provider_error(
+                        "automatic_settlement_failed",
+                        redact_text(f"{type(exc).__name__}: {exc}"),
+                        retryable=True,
+                        details={
+                            "work_item_id": item["id"],
+                            "planned_action": decision.get("action"),
+                        },
+                    )
+                    results.append(
+                        {
+                            "id": item["id"],
+                            "status": "settle_failed",
+                            "resolution": decision,
+                            **failure,
+                        }
+                    )
+            elif decision.get("requires_user"):
+                pending.append(
+                    {
+                        "id": item["id"],
+                        "resolution": decision,
+                    }
+                )
+        orphan_processes = sum(
+            int((result.get("resolution") or {}).get("orphan_processes") or 0)
+            for result in results
+        )
+        process_validation = {
+            "ok": orphan_processes == 0,
+            "validated_runs": sum(
+                1
+                for result in results
+                if "process_cleanup_ok" in (result.get("resolution") or {})
+            ),
+            "orphan_processes": orphan_processes,
+        }
+        settled_count = sum(1 for result in results if result["ok"])
+        return {
+            "ok": all(result["ok"] for result in results)
+            and process_validation["ok"],
+            "recovery": recovery,
+            "attempted_count": len(results),
+            "settled_count": settled_count,
+            "failed_count": len(results) - settled_count,
+            "settled": results,
+            "requires_input_count": len(pending),
+            "requires_input": pending,
+            "process_validation": process_validation,
+        }
 
     def cancel(
         self,

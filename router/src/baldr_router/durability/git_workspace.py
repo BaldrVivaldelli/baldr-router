@@ -81,6 +81,31 @@ def _status_bytes(root: Path) -> bytes:
     return _run_git(root, "status", "--porcelain=v1", "-z").stdout
 
 
+def _porcelain_entries(value: bytes, *, limit: int = 100) -> tuple[list[dict[str, str]], int]:
+    """Return bounded, relative Git status entries without interpreting paths."""
+
+    entries: list[dict[str, str]] = []
+    total = 0
+    records = value.split(b"\0")
+    index = 0
+    while index < len(records):
+        record = records[index]
+        index += 1
+        if len(record) < 4 or record[2:3] != b" ":
+            continue
+        status = record[:2].decode("ascii", errors="replace")
+        path = record[3:].decode("utf-8", errors="replace")
+        if not path:
+            continue
+        total += 1
+        if len(entries) < limit:
+            entries.append({"status": status, "path": path[:1_024]})
+        if ("R" in status or "C" in status) and index < len(records):
+            # Porcelain v1 -z adds the source path as the following record.
+            index += 1
+    return entries, total
+
+
 def _head(root: Path) -> str | None:
     result = _run_git(root, "rev-parse", "HEAD", check=False)
     return _text(result) if result.returncode == 0 else None
@@ -726,6 +751,23 @@ class GitWorkspaceManager:
             # user. Git commands still discover the parent repository from
             # this cwd, but providers never receive the broader root.
             direct_identity = workspace_identity(selected_root)
+            try:
+                selected_scope = selected_root.relative_to(repository_root).as_posix()
+            except ValueError:
+                selected_scope = "."
+            scoped_status = _run_git(
+                repository_root,
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--untracked-files=all",
+                "--",
+                selected_scope,
+                check=False,
+            ).stdout
+            pre_existing_changes, pre_existing_change_count = _porcelain_entries(
+                scoped_status
+            )
             execution = WorkspaceExecution(
                 run_id=run_id,
                 original_root=selected_root,
@@ -741,6 +783,11 @@ class GitWorkspaceManager:
                     "dirty_policy": policy,
                     "dirty_at_start": not clean,
                     "git_root": str(repository_root),
+                    "pre_existing_changes": pre_existing_changes,
+                    "pre_existing_change_count": pre_existing_change_count,
+                    "pre_existing_changes_truncated": (
+                        pre_existing_change_count > len(pre_existing_changes)
+                    ),
                 },
             )
 

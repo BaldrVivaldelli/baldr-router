@@ -14,3 +14,6 @@ build/
 .kiro/hooks/baldr-*.generated.kiro.hook
 node_modules/
 npm-debug.log*
+
+# Downloaded VS Code binaries and user data from extension-host tests
+.vscode-test/

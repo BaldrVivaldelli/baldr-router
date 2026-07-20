@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import queue
 import subprocess
 import tempfile
@@ -22,6 +23,60 @@ from .redaction import redact_text, redact_value
 from .run import redact_command
 from .schemas import normalize_final_report, validate_final_report, write_schema
 from .telemetry import append_run, utc_now_iso
+
+
+_READ_ONLY_PERMISSION_PROFILE = "baldr-read-only-scratch"
+
+
+def _read_only_permission_command(
+    command: list[str], *, scratch: Path
+) -> tuple[list[str], bool]:
+    """Replace Codex's legacy read-only sandbox with a granular profile.
+
+    The legacy ``read-only`` sandbox also makes ``$TMPDIR`` read-only.  That
+    prevents otherwise read-only tools such as pytest, compilers, and linters
+    from running during planning or review.  Codex permission profiles let us
+    keep the repository (and the rest of the filesystem) read-only while
+    granting write access to one invocation-private scratch directory.
+
+    Permission profiles and ``--sandbox`` are mutually exclusive, so remove
+    only the exact read-only flag emitted by Baldr.  Write-capable invocations
+    continue to use the configured legacy sandbox unchanged.
+    """
+
+    prepared = list(command)
+    converted = False
+    index = 0
+    while index < len(prepared):
+        value = prepared[index]
+        if value in {"--sandbox", "-s"} and index + 1 < len(prepared):
+            if prepared[index + 1] == "read-only":
+                del prepared[index : index + 2]
+                converted = True
+                continue
+        if value == "--sandbox=read-only":
+            del prepared[index]
+            converted = True
+            continue
+        index += 1
+    if not converted:
+        return prepared, False
+
+    scratch_key = json.dumps(str(scratch), ensure_ascii=True)
+    filesystem_profile = (
+        f"permissions.{_READ_ONLY_PERMISSION_PROFILE}.filesystem="
+        f'{{":root"="read",{scratch_key}="write"}}'
+    )
+    prepared.extend(
+        [
+            "--ignore-user-config",
+            "-c",
+            f'default_permissions="{_READ_ONLY_PERMISSION_PROFILE}"',
+            "-c",
+            filesystem_profile,
+        ]
+    )
+    return prepared, True
 
 
 def _tail(text: str, limit: int) -> str:
@@ -95,9 +150,43 @@ def run_codex_exec_json(
         tmp = Path(tmpdir)
         schema_path = write_schema(tmp / "final-report.schema.json", kind=report_kind)
         final_path = tmp / "final-report.json"
+        tool_cache = tmp / "tool-cache"
+        scratch = tmp / "scratch"
+        scratch.mkdir(parents=True, exist_ok=True)
+        child_env = dict(env) if env is not None else os.environ.copy()
+        cache_directories = {
+            "UV_CACHE_DIR": tool_cache / "uv",
+            "PIP_CACHE_DIR": tool_cache / "pip",
+            "npm_config_cache": tool_cache / "npm",
+            "NPM_CONFIG_CACHE": tool_cache / "npm",
+        }
+        for name, directory in cache_directories.items():
+            directory.mkdir(parents=True, exist_ok=True)
+            # Respect an explicitly provided cache, but never inherit an
+            # unwritable default from a tool when the variable is absent.
+            child_env.setdefault(name, str(directory))
+        # Read-only Codex roles must not write to the repository, but build and
+        # test tools still require an ephemeral scratch directory. Bind exactly
+        # this private directory as writable and make the conventional temp
+        # variables point to it. The directory disappears with the invocation.
+        for name in ("TMPDIR", "TMP", "TEMP"):
+            child_env[name] = str(scratch)
 
-        full_cmd = list(cmd)
-        insertion = ["--json", "--output-schema", str(schema_path), "-o", str(final_path)]
+        full_cmd, granular_read_only = _read_only_permission_command(
+            list(cmd), scratch=scratch
+        )
+        insertion = []
+        if not granular_read_only:
+            insertion.extend(["--add-dir", str(scratch)])
+        insertion.extend(
+            [
+                "--json",
+                "--output-schema",
+                str(schema_path),
+                "-o",
+                str(final_path),
+            ]
+        )
         if full_cmd and full_cmd[-1] == "-":
             full_cmd = full_cmd[:-1] + insertion + ["-"]
         else:
@@ -126,7 +215,7 @@ def run_codex_exec_json(
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                env=env,
+                env=child_env,
                 bufsize=1,
             )
         except FileNotFoundError:
@@ -137,6 +226,7 @@ def run_codex_exec_json(
                 **provider_error(
                     "codex_not_found",
                     "Codex CLI was not found. Install Codex CLI and run `codex login`.",
+                    retryable=True,
                     provider="codex",
                     runner="exec-json",
                 ),
@@ -309,7 +399,8 @@ def run_codex_exec_json(
                 provider_error(
                     code,
                     message,
-                    retryable=code == "codex_process_failed",
+                    retryable=code
+                    in {"codex_not_authenticated", "codex_process_failed"},
                     provider="codex",
                     runner="exec-json",
                     details={"exit_code": exit_code},

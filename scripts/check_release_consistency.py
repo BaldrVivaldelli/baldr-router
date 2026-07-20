@@ -273,9 +273,21 @@ def check_source_consistency(root: Path = ROOT) -> str:
     )
     tag_pattern = f"v{major}.{minor}.*"
     if tag_pattern not in release_workflow:
-        raise ReleaseConsistencyError(
-            f"Release workflow must select tags matching {tag_pattern!r}"
+        manual_gate_markers = (
+            "workflow_dispatch:",
+            "qualification_run_id:",
+            f"expected='v{version}'",
+            "qualification promotion-status",
         )
+        missing_markers = [
+            marker for marker in manual_gate_markers if marker not in release_workflow
+        ]
+        if missing_markers:
+            raise ReleaseConsistencyError(
+                "Release workflow must either select tags matching "
+                f"{tag_pattern!r} or enforce the exact manual qualification gate; "
+                f"missing {missing_markers!r}"
+            )
 
     launcher_bootstrap = root / "launcher" / "lib" / "runtime-bootstrap.mjs"
     extension_bootstrap = (

@@ -13,6 +13,16 @@ SDK Python. La extensión VS Code instala su wheel privado en un runtime
 versionado separado, por lo que puede volver a `0.19.0` si la actualización no
 completa.
 
+El Power de Kiro 0.20 usa el launcher 0.20 incluido en el ZIP de artefactos.
+Instalalo en el host que inicia Kiro y comprobá que encuentre el Router
+actualizado antes de reconectar MCP:
+
+```bash
+npm install --global \
+  ./artifacts/node/baldr-router-launcher-0.20.0.tgz
+baldr-router-launcher detect
+```
+
 Para TypeScript, el driver requiere exactamente la misma versión del SDK:
 
 ```bash
@@ -65,15 +75,18 @@ capacidades `workspace.read` y `workspace.write` en el manifiesto.
 
 Las referencias publicadas siguen siendo inmutables. Una actualización debe
 cambiar la versión del agente; modificar contenido bajo un `AgentRef` existente
-es rechazado. Para reactivar una versión anterior:
+es rechazado. El recorrido no requiere editar TOML manualmente:
 
 ```bash
+baldr-agent version 1.1.0
+baldr-agent test
+baldr-agent publish
 baldr-agent rollback 1.0.0
 ```
 
 Antes de promover 0.20, ejecutá `python scripts/dev.py build` y
 `python scripts/dev.py verify-release`. La evidencia de distribución
-TypeScript registra conformidad, ejecución directa, ejecución por la fachada
-compartida de VS Code/Kiro, actualización y rollback. La publicación a PyPI o
-npm sólo ocurre mediante `workflow_dispatch` y el selector explícito del
-registry correspondiente.
+Python y TypeScript registran conformidad, ejecución directa, ejecución por las
+fachadas compartidas de VS Code/Kiro, actualización y rollback. La publicación
+a PyPI o npm sólo ocurre mediante `workflow_dispatch` y el selector explícito
+del registry correspondiente.

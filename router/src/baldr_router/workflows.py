@@ -160,7 +160,11 @@ def run_workflow_impl(
             }
         return engine.request_cancel(resume_run_id, reason=cancel_reason)
 
-    selected_workspace_mode = str(workspace_mode or "automatic").strip().lower()
+    # Direct work in the already trusted workspace is the product default used
+    # by the durable work-item path and every first-party facade.  Keep
+    # ``automatic`` only as an explicit opt-in for clients that want a
+    # per-task write authorization pause.
+    selected_workspace_mode = str(workspace_mode or "current").strip().lower()
     protected_non_git = selected_workspace_mode in {"auto", "automatic"}
     try:
         cwd = require_workspace(

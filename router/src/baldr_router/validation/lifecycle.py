@@ -34,6 +34,12 @@ from baldr_router.provider_registry import provider_status, run_provider_role
 from baldr_router.redaction import redact_text
 from baldr_router.telemetry import app_state_dir
 
+from .durability_contract import (
+    durable_state_contract,
+    profile_resolution_contract,
+    reconciliation_actions_contract,
+)
+
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -409,6 +415,12 @@ def run_lifecycle_verification(
             _scenario("mcp_start_restart", _mcp_restart_fixture),
             _scenario("transactional_update_rollback", lambda: _transaction_fixture(scratch)),
             _scenario("secret_redaction", lambda: _redaction_fixture(scratch)),
+            _scenario("durable_state_contract", lambda: durable_state_contract(scratch)),
+            _scenario(
+                "reconciliation_actions_contract",
+                lambda: reconciliation_actions_contract(scratch),
+            ),
+            _scenario("profile_resolution_contract", profile_resolution_contract),
         ]
         if mode == "full":
             scenarios.append(_scenario("fault_injection", lambda: _fault_fixture(scratch)))

@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       profile:
-        description: Qualification profile id
+        description: Qualification profile id (vscode-remote-wsl + Codex is the v0.20 promotion gate)
         required: true
         type: choice
         options:

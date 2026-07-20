@@ -10,3 +10,5 @@ baldr-agent publish
 
 Builder discovers `baldr.typescript`, embeds `@baldr/agent-sdk` into a
 self-contained `.cjs` artifact and publishes immutable role manifests.
+Run `baldr-agent version <next-version>` before publishing changed source and
+`baldr-agent rollback <version>` to reactivate an earlier local release.

@@ -23,11 +23,15 @@ facade clients, compares two byte-identical builds, publishes versions 1.0.0
 and 1.1.0, rejects replacement of 1.1.0 and rolls back to 1.0.0. Evidence is
 written to `dist/validation/typescript-distribution.json`.
 
-The release workflow always builds and attests every registry artifact. Actual
-registry promotion is explicit: `publish_pypi=true` publishes the five Python
-packages and `publish_npm=true` publishes the TypeScript SDK and driver. PyPI
-projects and the npm organization must first configure this repository as a
-trusted publisher; a tag alone never publishes packages.
+The release workflow is dispatched manually from the `v0.20.0` tag. Before it
+builds or publishes, it downloads the artifact from a successful real
+qualification run on the same commit and verifies a digest-valid
+`vscode-remote-wsl` receipt whose provider smoke identifies Codex. Kiro
+remains packaged and tested, but it is deferred from this promotion gate.
+Actual registry promotion is explicit: `publish_pypi=true` publishes the five
+Python packages and `publish_npm=true` publishes the TypeScript SDK and driver.
+PyPI projects and the npm organization must first configure this repository as
+a trusted publisher; a tag alone never publishes packages.
 
 ```text
 dist/baldr-router-0.20.0-source.zip

@@ -16,28 +16,34 @@ qualified
 ```
 
 A build machine can produce synthetic evidence, but it cannot mark VS Code,
-Kiro, WSL, authentication, UI cancellation, or a user's repositories as
-qualified.
+WSL, Codex authentication, UI cancellation, or a user's repositories as
+qualified. Kiro remains independently qualifiable, but it is outside the
+v0.20 promotion gate for this iteration.
 
 ## Profiles
 
-Mandatory release profiles:
+Mandatory v0.20 promotion profile:
+
+```text
+vscode-remote-wsl
+```
+
+Supported profiles that are deferred from this promotion gate:
 
 ```text
 vscode-windows-wsl
-vscode-remote-wsl
 vscode-linux-native
+vscode-windows-native
+vscode-macos-native
 kiro-windows-wsl
 ```
 
-Additional supported profiles:
-
-```text
-vscode-windows-native
-vscode-macos-native
-```
-
-The optional profiles can produce qualification receipts, but they do not replace the mandatory Windows/WSL, Remote WSL, Linux, and Kiro gates. Self-hosted GitHub runners used by the qualification workflow must be current enough to execute the Node runtime used by the selected GitHub Actions.
+The deferred profiles keep their implementation, packaging, tests, runbooks,
+and ability to produce qualification receipts. They neither block nor replace
+the mandatory VS Code Remote WSL + Codex receipt. Kiro real-client
+qualification will be completed in a later iteration. Self-hosted GitHub
+runners used by the qualification workflow must be current enough to execute
+the Node runtime used by the selected GitHub Actions.
 
 Inspect the frozen definitions:
 
@@ -49,7 +55,7 @@ baldr-router qualification definitions
 
 ```bash
 baldr-router qualification template \
-  --profile vscode-windows-wsl \
+  --profile vscode-remote-wsl \
   --output-dir ./qualification-input
 ```
 
@@ -62,6 +68,21 @@ qualification-input/canary-results.json
 
 The files contain no secrets. They are operator receipts: complete each item
 only after observing the result in the target client.
+
+The qualification runner fills only evidence it can prove in the same real
+run. The three-pass Lab automatically records installation integrity, MCP
+restart, ordered progress, process-tree cancellation, transactional rollback,
+secret redaction and a disposable local SQLite durability contract. That
+contract reopens the database, recovers interrupted read and write phases,
+rejects a stale lease and conflicting idempotency key, isolates provider
+sessions, runs maintenance and resolves the configured planning,
+implementation and review profiles. Each automatic assertion references the
+Lab evidence ID and all three run IDs.
+
+The Lab never auto-attests Workspace Trust blocking, uninstall/reinstall, UI
+behavior, accessibility, file/diff navigation or repository canaries. Those
+remain `pending` until they are observed in the exact VS Code client or real
+repository named by the receipt.
 
 ## 2. Complete the client assertions
 
@@ -98,15 +119,52 @@ orphan_processes = 0
 test/verification references
 ```
 
-The ten frozen canaries are five bounded code/documentation changes in a Python repository and five in a Node repository. Lifecycle, cancellation, recovery, upgrade, fencing, and secret-redaction behavior are proven separately by the three-pass Lab and the client assertions.
+`evidence_id` is not a free-form note. Use the `br-workflow-...` identifier
+returned in the technical result of that exact run. Qualification verifies the
+bundle on local disk, every artifact hash, its canonical durable-state
+fingerprint, privacy projection, Baldr version and matching `run_id`. Reusing
+one run or evidence bundle for multiple canaries is rejected. The run status
+must also match the canary: for example, `cancel-during-implementation`
+requires durable `cancelled`, while `publication-conflict` may be
+`awaiting_reconciliation` before its explicit resolution.
+
+Use a real Python repository for `repository-a` and a different real Node
+repository for `repository-b`. Work from disposable clones or a restorable
+snapshot because several canaries deliberately interrupt execution or create a
+conflict. The frozen tasks are:
+
+| Repository | Canary | Observation required |
+| --- | --- | --- |
+| Python | `normal-change` | A bounded Codex change reaches approved with a valid structured report. |
+| Python | `tested-change` | Codex changes code, runs relevant existing tests and reports commands that can be reproduced. |
+| Python | `cancel-during-implementation` | Cancellation is initiated while Codex is writing; the run reaches durable cancelled and has zero orphan processes. |
+| Python | `recover-read-only-step` | The client/runtime is interrupted during a read-only phase and continues without duplicating completed effects. |
+| Python | `reconcile-write-unknown` | A write interruption becomes `unknown` and is resolved through an explicit action, never a blind retry. |
+| Node | `publication-conflict` | A concurrent Git change produces a durable conflict or safe reconciliation instead of overwriting the original. |
+| Node | `upgrade-preserves-state` | The packaged runtime is upgraded and the existing configuration, SQLite run and rollback receipt remain usable. |
+| Node | `session-reuse` | A compatible Codex session is reused and a deliberately incompatible identity is not. |
+| Node | `lease-fencing` | A second worker takes over an expired lease and the stale epoch cannot persist a result. |
+| Node | `secret-redaction` | A synthetic marker shaped like a secret is absent from logs, telemetry and exported workflow evidence. |
+
+The three-pass Lab proves the underlying lifecycle contracts independently;
+the canaries prove that those same boundaries are operable in the exact VS
+Code + Codex profile and real repositories being promoted. A Lab scenario is
+therefore supporting evidence, not a substitute for the canary run ID.
 
 ## 4. Run qualification from the exact target environment
+
+From VS Code Remote WSL, the recommended path is **Baldr → + → Calificar VS
+Code + Codex**. It creates the evidence templates in extension global storage,
+runs the same command below with a real Codex provider smoke, renders the
+result, and offers to open either pending evidence file.
+
+The equivalent operator command is:
 
 ```bash
 baldr-router trust-workspace /path/to/repository
 
 baldr-router qualification run \
-  --profile vscode-windows-wsl \
+  --profile vscode-remote-wsl \
   --workspace-root /path/to/repository \
   --client-assertions ./qualification-input/client-assertions.json \
   --canary-results ./qualification-input/canary-results.json \
@@ -148,9 +206,22 @@ code, secrets, full home paths, and raw workspace paths.
 
 ## Promotion rule
 
-A v0.20.x build may be promoted only when all mandatory profiles have a
-`qualified` receipt and the receipts refer to the same release version.
-Synthetic CI evidence remains necessary, but never substitutes for this gate.
+A v0.20.x build may be promoted only with a `qualified` receipt for
+`vscode-remote-wsl`, for the same release version, whose provider smoke proves
+Codex. Synthetic CI evidence remains necessary, but never substitutes for
+this gate. A Kiro receipt is useful independent evidence, but cannot satisfy
+or block this iteration's promotion policy.
+
+Verify the release input explicitly:
+
+```bash
+baldr-router qualification promotion-status \
+  --receipt ./qualification-output \
+  --release-version 0.20.0
+```
+
+The release workflow is manual and must be dispatched from the `v0.20.0` tag
+with the run id of the successful `vscode-remote-wsl` qualification workflow.
 
 ## Self-hosted CI evaluation
 
@@ -159,7 +230,7 @@ workflow:
 
 ```bash
 uv run --project router python scripts/run_qualification_ci.py \
-  --profile vscode-windows-wsl \
+  --profile vscode-remote-wsl \
   --workspace-root /path/to/repository \
   --evidence-directory ./qualification-input \
   --output-directory ./qualification-output \

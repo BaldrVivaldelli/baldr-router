@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import re
+import tempfile
 import tomllib
+from contextlib import suppress
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -227,3 +229,71 @@ def load_project(path: str | Path = ".") -> ProjectSpec:
     ):
         raise ContractError("entrypoint must be included by sources.")
     return project
+
+
+def set_project_version(path: str | Path, version: str) -> dict[str, Any]:
+    """Atomically set the exact release version without rewriting project TOML."""
+
+    project = load_project(path)
+    selected = validate_exact_version(version)
+    config_path = project.root / PROJECT_FILE
+    original = config_path.read_text(encoding="utf-8")
+    pattern = re.compile(
+        r"^(version[ \t]*=[ \t]*)(?P<quote>['\"])[^'\"]*(?P=quote)"
+        r"([ \t]*(?:#.*)?)$",
+        re.MULTILINE,
+    )
+    matches = list(pattern.finditer(original))
+    if len(matches) != 1:
+        raise ContractError(
+            f"{PROJECT_FILE} must contain one quoted version assignment."
+        )
+    updated = pattern.sub(
+        lambda match: (
+            f"{match.group(1)}{match.group('quote')}{selected}"
+            f"{match.group('quote')}{match.group(3)}"
+        ),
+        original,
+        count=1,
+    )
+    if updated == original:
+        return {
+            "ok": True,
+            "project": str(project.root),
+            "config": str(config_path),
+            "previous_version": project.version,
+            "version": selected,
+            "changed": False,
+        }
+
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=config_path.parent,
+            prefix=f".{PROJECT_FILE}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            handle.write(updated)
+            temporary_path = Path(handle.name)
+        validated = load_project(temporary_path)
+        if validated.version != selected:
+            raise ContractError("The updated project version could not be validated.")
+        temporary_path.chmod(config_path.stat().st_mode & 0o7777)
+        temporary_path.replace(config_path)
+        temporary_path = None
+    finally:
+        if temporary_path is not None:
+            with suppress(FileNotFoundError):
+                temporary_path.unlink()
+
+    return {
+        "ok": True,
+        "project": str(project.root),
+        "config": str(config_path),
+        "previous_version": project.version,
+        "version": selected,
+        "changed": True,
+    }

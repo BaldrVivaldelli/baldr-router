@@ -57,7 +57,17 @@ function hostName(): string {
 }
 
 async function terminateChildTree(child: ChildProcess): Promise<void> {
-  if (!child.pid || child.exitCode !== null || child.killed) return;
+  if (!child.pid) return;
+  const waitForClose = async (milliseconds: number): Promise<void> => {
+    if (child.exitCode !== null) return;
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, milliseconds);
+      child.once('close', () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+  };
   if (process.platform === 'win32') {
     await new Promise<void>((resolve) => {
       const killer = spawn('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], {
@@ -70,6 +80,7 @@ async function terminateChildTree(child: ChildProcess): Promise<void> {
       });
       killer.once('close', () => resolve());
     });
+    await waitForClose(1_000);
     return;
   }
   try {
@@ -78,13 +89,19 @@ async function terminateChildTree(child: ChildProcess): Promise<void> {
     try { child.kill('SIGTERM'); } catch { /* best effort */ }
   }
   await new Promise((resolve) => setTimeout(resolve, 350));
-  if (child.exitCode === null) {
+  let groupAlive = false;
+  try {
+    process.kill(-child.pid, 0);
+    groupAlive = true;
+  } catch { /* the process group is already gone */ }
+  if (groupAlive) {
     try {
       process.kill(-child.pid, 'SIGKILL');
     } catch {
       try { child.kill('SIGKILL'); } catch { /* best effort */ }
     }
   }
+  await waitForClose(1_000);
 }
 
 function pushFlag(args: string[], flag: string, value: unknown): void {
@@ -92,7 +109,7 @@ function pushFlag(args: string[], flag: string, value: unknown): void {
   args.push(flag, String(value));
 }
 
-export class BaldrRuntime {
+export class BaldrRuntime implements vscode.Disposable {
   private readonly bootstrapPath: string;
   private readonly wheelPath: string;
   private readonly providerModelsCache = new Map<
@@ -100,10 +117,15 @@ export class BaldrRuntime {
     { expiresAt: number; value: JsonRecord }
   >();
   private readonly providerModelsRequests = new Map<string, Promise<JsonRecord>>();
+  private readonly activeChildren = new Set<ChildProcess>();
+  private ensuredRuntime: JsonRecord | undefined;
+  private ensureRequest: Promise<JsonRecord> | undefined;
+  private shutdownRequest: Promise<void> | undefined;
+  private disposed = false;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
-    private readonly output: vscode.OutputChannel,
+    private readonly output: vscode.LogOutputChannel,
   ) {
     this.bootstrapPath = context.asAbsolutePath(path.join('runtime', 'baldr-bootstrap.mjs'));
     this.wheelPath = this.findBundledWheel();
@@ -164,6 +186,7 @@ export class BaldrRuntime {
       BALDR_TRUSTED_WORKSPACE_ROOTS_JSON: JSON.stringify(this.workspaceRoots()),
       BALDR_CLIENT_ID: 'vscode-extension',
       BALDR_CLIENT_VERSION: EXTENSION_VERSION,
+      BALDR_INSTALL_SIGNAL_HANDLERS: '1',
     };
     if (distro) env.BALDR_ROUTER_WSL_DISTRO = distro;
     if (secret) env.CONTEXT7_API_KEY = secret;
@@ -201,7 +224,21 @@ export class BaldrRuntime {
   }
 
   async ensure(token?: vscode.CancellationToken): Promise<JsonRecord> {
-    return this.invokeBootstrapJson(['ensure'], token);
+    if (this.disposed) throw new Error('The Baldr runtime is shutting down.');
+    if (token?.isCancellationRequested) throw new vscode.CancellationError();
+    if (this.ensuredRuntime) return this.ensuredRuntime;
+    if (!this.ensureRequest) {
+      const request = this.invokeBootstrapJson(['ensure'])
+        .then((result) => {
+          if (result.ok === true) this.ensuredRuntime = result;
+          return result;
+        })
+        .finally(() => {
+          if (this.ensureRequest === request) this.ensureRequest = undefined;
+        });
+      this.ensureRequest = request;
+    }
+    return this.awaitSharedRequest(this.ensureRequest, token);
   }
 
   async detect(token?: vscode.CancellationToken): Promise<JsonRecord> {
@@ -215,6 +252,7 @@ export class BaldrRuntime {
     quiet = false,
     workspaceRoot?: string,
   ): Promise<JsonRecord> {
+    await this.ensure(token);
     return this.invokeBootstrapJson(
       ['exec', '--', ...routerArgs],
       token,
@@ -455,6 +493,16 @@ export class BaldrRuntime {
     }, token, true);
   }
 
+  async settleWorkItems(
+    workspaceRoot: string,
+    token?: vscode.CancellationToken,
+  ): Promise<JsonRecord> {
+    return this.runFacade('run', {
+      workspaceRoot,
+      workItemAction: 'settle-workspace',
+    }, token, true);
+  }
+
   async reconcileWorkItem(
     workspaceRoot: string,
     workItemId: string,
@@ -650,7 +698,11 @@ export class BaldrRuntime {
     return path.join(this.context.globalStorageUri.fsPath, 'qualification', profile);
   }
 
-  async recordClientReceipt(token?: vscode.CancellationToken): Promise<JsonRecord> {
+  async recordClientReceipt(
+    token?: vscode.CancellationToken,
+    qualificationFacts: JsonRecord = {},
+  ): Promise<JsonRecord> {
+    await this.ensure(token);
     const detection = await this.detect(token);
     const target = record(detection.target);
     const configuration = vscode.workspace.getConfiguration('baldr');
@@ -666,6 +718,7 @@ export class BaldrRuntime {
       private_runtime: true,
       mcp_definition_provider: 'baldr.router',
       console_view: 'baldr.console',
+      ...qualificationFacts,
     };
     return this.runRouterJson([
       'qualification', 'client-receipt',
@@ -673,6 +726,15 @@ export class BaldrRuntime {
       '--client-version', EXTENSION_VERSION,
       '--facts-json', JSON.stringify(facts),
     ], token);
+  }
+
+  async runExtensionHostCancellationCanary(
+    token?: vscode.CancellationToken,
+  ): Promise<JsonRecord> {
+    return this.runRouterJson([
+      'qualification', 'extension-host-cancel-canary',
+      '--client', 'vscode-extension',
+    ], token, true);
   }
 
   async runQualification(
@@ -685,9 +747,13 @@ export class BaldrRuntime {
     token?: vscode.CancellationToken,
   ): Promise<JsonRecord> {
     this.requireTrustedWorkspace(workspaceRoot);
+    await this.ensure(token);
     const detection = await this.detect(token);
     const profile = this.qualificationProfile(detection);
-    await this.recordClientReceipt(token);
+    const extensionHostCancellation = await this.runExtensionHostCancellationCanary(token);
+    await this.recordClientReceipt(token, {
+      extension_host_cancellation: extensionHostCancellation,
+    });
     const templateDir = this.qualificationDirectory(profile);
     await fs.promises.mkdir(templateDir, { recursive: true });
     const assertionsPath = options.clientAssertions
@@ -712,7 +778,10 @@ export class BaldrRuntime {
       '--client', 'vscode-extension',
     ];
     if (!options.includeProviderSmoke) args.push('--no-provider-smoke');
-    const result = await this.runRouterJson(args, token);
+    // `qualification run` returns exit code 2 for an honest provisional receipt.
+    // That is a valid product result: the UI must render the missing assertions
+    // and canaries instead of reporting it as a runtime failure.
+    const result = await this.runRouterJson(args, token, true);
     result.template_dir = templateDir;
     result.client_assertions_path = assertionsPath;
     result.canary_results_path = canariesPath;
@@ -757,15 +826,52 @@ export class BaldrRuntime {
       throw new Error(`Baldr returned invalid JSON: ${error instanceof Error ? error.message : String(error)}`);
     }
     if (result.code !== 0 && !allowFailure) {
-      throw new Error(
-        text(parsed.reason)
-        || text(record(parsed.error).message)
+      const error = record(parsed.error);
+      const code = text(error.code, 'router_command_failed');
+      const technical = text(error.message)
+        || text(parsed.reason)
         || result.stderr.trim()
-        || `Baldr exited with code ${result.code}.`,
+        || `Baldr exited with code ${result.code}.`;
+      this.output.error(`[${code}] ${technical}`);
+      const summary = text(error.summary, 'Baldr no pudo completar la operación.');
+      const action = text(error.action, 'Abrí los detalles técnicos y revisá la causa indicada.');
+      throw new Error(
+        `${summary} ${action}`.trim(),
       );
     }
     parsed.process_exit_code = result.code;
     return parsed;
+  }
+
+  private async awaitSharedRequest(
+    request: Promise<JsonRecord>,
+    token?: vscode.CancellationToken,
+  ): Promise<JsonRecord> {
+    if (!token) return request;
+    if (token.isCancellationRequested) throw new vscode.CancellationError();
+    return new Promise<JsonRecord>((resolve, reject) => {
+      let settled = false;
+      const cancellation = token.onCancellationRequested(() => {
+        if (settled) return;
+        settled = true;
+        cancellation.dispose();
+        reject(new vscode.CancellationError());
+      });
+      request.then(
+        (result) => {
+          if (settled) return;
+          settled = true;
+          cancellation.dispose();
+          resolve(result);
+        },
+        (error: unknown) => {
+          if (settled) return;
+          settled = true;
+          cancellation.dispose();
+          reject(error);
+        },
+      );
+    });
   }
 
   private async spawnCapture(
@@ -774,8 +880,10 @@ export class BaldrRuntime {
     quiet = false,
     workspaceRoot?: string,
   ): Promise<{ stdout: string; stderr: string; code: number }> {
+    if (this.disposed) throw new Error('The Baldr runtime is shutting down.');
     const env = await this.processEnvironment(workspaceRoot);
     const secrets = await this.knownSecrets();
+    if (this.disposed) throw new Error('The Baldr runtime is shutting down.');
     if (!quiet) this.output.appendLine(describeRuntimeInvocation(bootstrapArgs));
 
     return new Promise((resolve, reject) => {
@@ -786,6 +894,7 @@ export class BaldrRuntime {
         cwd: this.context.globalStorageUri.fsPath,
         stdio: ['ignore', 'pipe', 'pipe'],
       });
+      this.activeChildren.add(child);
       let stdout = '';
       let stderr = '';
       let settled = false;
@@ -803,12 +912,14 @@ export class BaldrRuntime {
         this.output.append(redactSensitive(chunk, secrets));
       });
       child.on('error', (error) => {
+        this.activeChildren.delete(child);
         if (settled) return;
         settled = true;
         cancellation?.dispose();
         reject(new Error(redactSensitive(error.message, secrets)));
       });
       child.on('close', (code) => {
+        this.activeChildren.delete(child);
         if (settled) return;
         settled = true;
         cancellation?.dispose();
@@ -821,6 +932,20 @@ export class BaldrRuntime {
         resolve({ stdout, stderr, code: code ?? -1 });
       });
     });
+  }
+
+  async shutdown(): Promise<void> {
+    if (this.shutdownRequest) return this.shutdownRequest;
+    this.disposed = true;
+    const children = [...this.activeChildren];
+    this.shutdownRequest = Promise.allSettled(
+      children.map((child) => terminateChildTree(child)),
+    ).then(() => undefined);
+    return this.shutdownRequest;
+  }
+
+  dispose(): void {
+    void this.shutdown();
   }
 }
 

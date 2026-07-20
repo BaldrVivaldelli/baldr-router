@@ -100,6 +100,14 @@ test('work items narrate current activity, canonical stages, outcome, and attent
   assert.doesNotMatch(section(source, 'function stageHtml(', 'function stageStripHtml('), /participant|model|provider/);
 });
 
+test('review changes focus the continuation composer without a blind retry', () => {
+  const primary = section(source, 'function attentionPrimaryAction(', 'function attentionHtml(');
+  assert.match(primary, /attention\.kind==='changes_requested'/);
+  assert.match(primary, /includes\('continue'\)/);
+  assert.match(primary, /id:'continue'/);
+  assert.match(source, /action==='continue'\)els\.input\.focus\(\)/);
+});
+
 test('final results render a Codex-style file change card with line totals', () => {
   assert.match(source, /function fileChangesHtml\(changes\)/);
   assert.match(source, /file-changes-title/);
@@ -168,6 +176,18 @@ test('P2 preserves workspace, supports keyboard history, and constrains comforta
   assert.match(source, /\.content-background\s*\{[^}]*max-width:\s*var\(--baldr-content-width\)/);
   assert.match(source, /\.input-shell\s*\{[^}]*max-width:\s*var\(--baldr-content-width\)/);
   assert.match(source, /\(event\.ctrlKey\|\|event\.metaKey\).*key\)\.toLowerCase\(\)===['"]f['"]/);
+});
+
+test('real VS Code qualification is reachable without expanding the command palette contract', () => {
+  assert.match(source, /data-plus-action="qualification"/);
+  const handler = section(source, '  private async runQualification(', '  private async openChip(');
+  const runtimeQualification = section(runtimeSource, '  async runQualification(', '  async configureContext7FromSecret(');
+  assert.match(handler, /this\.runtime\.runQualification/);
+  assert.match(handler, /includeProviderSmoke:\s*true/);
+  assert.match(handler, /renderQualification\(result\)/);
+  assert.match(handler, /Abrir assertions/);
+  assert.match(handler, /Abrir canarios/);
+  assert.match(runtimeQualification, /runRouterJson\(args,\s*token,\s*true\)/);
 });
 
 test('phase deliverables are fetched only after explicit open or pagination actions', () => {
@@ -243,6 +263,15 @@ test('starting or retrying a saved task refreshes its frozen team from current p
   assert.match(profiles, /for \(const role of BALDR_ROLES\)/);
   assert.match(action, /roleProfiles: this\.currentRoleProfiles\(\)/);
   assert.match(runtimeStart, /roleProfiles: options\.roleProfiles/);
+});
+
+test('extension-host cancellation uses the same durable runtime action as the console', () => {
+  const action = section(source, '  private async itemAction(', '  private async inspectDeliverable(');
+  const runtimeCancel = section(runtimeSource, '  async cancelWorkItem(', '  async reconcileWorkItem(');
+  assert.match(action, /action === 'cancel'/);
+  assert.match(action, /this\.runtime\.cancelWorkItem\(root, itemId\)/);
+  assert.match(runtimeCancel, /workItemAction: 'cancel-item'/);
+  assert.match(runtimeCancel, /cancelReason: reason/);
 });
 
 test('stage disclosure is accessible and survives polling refreshes', () => {
@@ -427,13 +456,13 @@ test('catalog failure and selection cancellation leave the current team untouche
   assert.doesNotMatch(fallback, /upsertExecutionProfile|setWorkspacePreferences/);
 });
 
-test('team menu keeps automatic selection first and only two explicit alternatives', () => {
+test('team menu recommends configured providers and keeps automatic selection explicit', () => {
   const mainMenu = section(source, '  private async chooseRoleProfiles(', '  private async chooseExternalAgent(');
 
   assert.match(mainMenu, /id: 'automatic'/);
-  assert.match(mainMenu, /Automático \(recomendado\)/);
+  assert.doesNotMatch(mainMenu, /Automático \(recomendado\)/);
   assert.match(mainMenu, /id: 'per-stage'/);
-  assert.match(mainMenu, /Codex o Kiro normal/);
+  assert.match(mainMenu, /Codex o Kiro normal \(recomendado\)/);
   assert.match(mainMenu, /teamMode: 'automatic'/);
   assert.match(mainMenu, /agentOverrides: \{\}/);
   assert.doesNotMatch(mainMenu, /codex-models|saved|external-agents|restore-provider|advanced|Administrar agentes|Configurar equipo/);

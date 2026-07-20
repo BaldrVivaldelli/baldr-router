@@ -2,52 +2,62 @@
   "schema_version": 1,
   "repositories": {
     "repository-a": {
-      "language": "project-dependent",
+      "language": "python",
       "tasks": [
         {
           "id": "normal-change",
-          "task": "Complete a normal bounded code change and verify the structured report."
+          "task": "Complete a normal bounded code change and verify the structured report.",
+          "accepted_run_statuses": ["approved"]
         },
         {
           "id": "tested-change",
-          "task": "Complete a change with relevant tests and verify the reported commands exist."
+          "task": "Complete a change with relevant tests and verify the reported commands exist.",
+          "accepted_run_statuses": ["approved"]
         },
         {
           "id": "cancel-during-implementation",
-          "task": "Cancel during implementation and verify durable cancellation with zero orphan processes."
+          "task": "Cancel during implementation and verify durable cancellation with zero orphan processes.",
+          "accepted_run_statuses": ["cancelled"]
         },
         {
           "id": "recover-read-only-step",
-          "task": "Crash and recover a read-only phase without duplicating a completed effect."
+          "task": "Crash and recover a read-only phase without duplicating a completed effect.",
+          "accepted_run_statuses": ["approved"]
         },
         {
           "id": "reconcile-write-unknown",
-          "task": "Reconcile a write phase left in unknown state without a blind retry."
+          "task": "Reconcile a write phase left in unknown state without a blind retry.",
+          "accepted_run_statuses": ["approved", "failed"]
         }
       ]
     },
     "repository-b": {
-      "language": "project-dependent",
+      "language": "node",
       "tasks": [
         {
           "id": "publication-conflict",
-          "task": "Create a Git publication conflict and verify Baldr blocks or reconciles it safely."
+          "task": "Create a Git publication conflict and verify Baldr blocks or reconciles it safely.",
+          "accepted_run_statuses": ["awaiting_reconciliation", "approved", "failed"]
         },
         {
           "id": "upgrade-preserves-state",
-          "task": "Upgrade Baldr and verify configuration, SQLite state, and rollback availability."
+          "task": "Upgrade Baldr and verify configuration, SQLite state, and rollback availability.",
+          "accepted_run_statuses": ["approved"]
         },
         {
           "id": "session-reuse",
-          "task": "Reuse a compatible provider session and invalidate an incompatible session."
+          "task": "Reuse a compatible provider session and invalidate an incompatible session.",
+          "accepted_run_statuses": ["approved"]
         },
         {
           "id": "lease-fencing",
-          "task": "Run competing workers and verify the stale lease holder cannot persist results."
+          "task": "Run competing workers and verify the stale lease holder cannot persist results.",
+          "accepted_run_statuses": ["approved"]
         },
         {
           "id": "secret-redaction",
-          "task": "Complete a run and verify secrets are absent from logs, telemetry, and evidence."
+          "task": "Complete a run and verify secrets are absent from logs, telemetry, and evidence.",
+          "accepted_run_statuses": ["approved"]
         }
       ]
     }

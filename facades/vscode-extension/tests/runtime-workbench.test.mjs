@@ -15,6 +15,23 @@ test('console polling requests the lightweight durable workbench view', () => {
   assert.match(source, /if \(!quiet\) this\.output\.appendLine/);
 });
 
+test('runtime initialization is shared before any router command is dispatched', () => {
+  assert.match(source, /private ensureRequest: Promise<JsonRecord> \| undefined/);
+  assert.match(source, /if \(this\.ensuredRuntime\) return this\.ensuredRuntime/);
+  assert.match(source, /return this\.awaitSharedRequest\(this\.ensureRequest, token\)/);
+  assert.match(source, /async runRouterJson\([\s\S]*?await this\.ensure\(token\)/);
+  assert.match(source, /async recordClientReceipt\([\s\S]*?await this\.ensure\(token\)/);
+  assert.match(source, /async runQualification\([\s\S]*?await this\.ensure\(token\)/);
+});
+
+test('router failures keep technical detail in logs and throw actionable copy', () => {
+  assert.match(source, /const code = text\(error\.code, 'router_command_failed'\)/);
+  assert.match(source, /this\.output\.error\(`\[\$\{code\}\] \$\{technical\}`\)/);
+  assert.match(source, /const summary = text\(error\.summary/);
+  assert.match(source, /const action = text\(error\.action/);
+  assert.match(source, /throw new Error\(\s*`\$\{summary\} \$\{action\}`\.trim\(\)/);
+});
+
 test('phase deliverable inspection sends every selector through the frozen facade CLI', () => {
   assert.match(source, /workItemAction:\s*'inspect-item-phase'/);
   assert.match(source, /phaseStage:\s*stage/);

@@ -8,7 +8,14 @@ from pathlib import Path
 
 import pytest
 
-from baldr_router.process_control import active_processes, managed_popen, terminate_process_tree
+from baldr_router.process_control import (
+    active_processes,
+    managed_popen,
+    register_process,
+    terminate_process_tree,
+    unregister_process,
+    validate_process_cleanup,
+)
 from baldr_router.run import run_command
 
 
@@ -80,3 +87,53 @@ def test_run_command_timeout_returns_structured_cleanup():
     assert result["error"]["code"] == "timeout"
     assert result["cleanup"]["terminated"] is True
     assert active_processes() == []
+
+
+def test_cleanup_validation_terminates_and_counts_remaining_processes():
+    proc = managed_popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    validation = validate_process_cleanup(terminate_remaining=True, grace_seconds=0.2)
+
+    assert validation["ok"] is True
+    assert validation["observed_processes"] == 1
+    assert validation["orphan_processes"] == 0
+    assert validation["cleanup_attempts"][0]["pid"] == proc.pid
+
+
+def test_failed_termination_remains_registered_for_orphan_detection():
+    class UnresponsiveProcess:
+        pid = 987_654_321
+        returncode = None
+
+        @staticmethod
+        def poll():
+            return None
+
+        @staticmethod
+        def wait(timeout: float):
+            raise subprocess.TimeoutExpired(["synthetic"], timeout)
+
+        @staticmethod
+        def terminate():
+            return None
+
+        @staticmethod
+        def kill():
+            return None
+
+    proc = UnresponsiveProcess()
+    register_process(proc, run_id="run-unresponsive", command=["synthetic"])  # type: ignore[arg-type]
+    try:
+        cleanup = terminate_process_tree(proc, grace_seconds=0.05)  # type: ignore[arg-type]
+        validation = validate_process_cleanup(run_id="run-unresponsive")
+
+        assert cleanup["terminated"] is False
+        assert validation["ok"] is False
+        assert validation["orphan_processes"] == 1
+        assert validation["orphan_pids"] == [proc.pid]
+    finally:
+        unregister_process(proc)  # type: ignore[arg-type]

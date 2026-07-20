@@ -352,7 +352,7 @@ shadow_conflict_retention_days = 90
 
 Maintenance valida ownership y estado terminal antes de eliminar una copia; nunca borra un shadow todavía recuperable por inferencia de edad solamente. `cleanup_successful_shadow_workspaces=false` conserva también los aprobados, independientemente de la retención de éxito.
 
-Los work items nuevos usan `automatic`, que se resuelve a escritura `in-place` sólo después de la autorización por tarea. Los valores guardados existentes conservan su semántica: `worktree` sigue siendo el modo Git aislado legado; un snapshot histórico con `write_isolation = "auto"` puede resolver a worktree o shadow; `current` trabaja directamente sobre un repositorio Git y `non-git` es la opción explícita **Sin protección**, con confirmación y sin rollback automático.
+Los work items nuevos usan `current` y trabajan directamente sobre el workspace Git ya confiado, sin una autorización adicional por tarea. `automatic` queda como opt-in para pedir permiso antes de la primera escritura. Los valores guardados existentes conservan su semántica: `worktree` sigue siendo el modo Git aislado legado; un snapshot histórico con `write_isolation = "auto"` puede resolver a worktree o shadow; `non-git` es la opción explícita **Sin protección**, con confirmación y sin rollback automático.
 
 ## Idempotencia
 

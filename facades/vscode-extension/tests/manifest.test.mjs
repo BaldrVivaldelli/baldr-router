@@ -50,6 +50,13 @@ test('contributes one Baldr Activity Bar webview', () => {
   assert.ok(manifest.activationEvents.includes('onView:baldr.console'));
 });
 
+test('warms the trusted workspace runtime after startup', () => {
+  assert.ok(manifest.activationEvents.includes('onStartupFinished'));
+  assert.equal(manifest.capabilities.untrustedWorkspaces.supported, false);
+  assert.match(extensionSource, /void warmRuntime\(context, runtime, output, changed, consoleProvider\)/);
+  assert.match(extensionSource, /await runtime\.recordClientReceipt\(\)/);
+});
+
 test('ships the form-free Baldr Console and Activity Bar icon', () => {
   const source = fs.readFileSync(path.join(root, 'src', 'console.ts'), 'utf8');
   assert.match(source, /\/profile/);

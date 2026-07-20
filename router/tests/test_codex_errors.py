@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -31,6 +32,19 @@ if args == ["--version"]:
     raise SystemExit(0)
 
 mode = os.environ.get("FAKE_CODEX_MODE", "valid")
+if os.environ.get("FAKE_CODEX_ENV_OUTPUT"):
+    Path(os.environ["FAKE_CODEX_ENV_OUTPUT"]).write_text(json.dumps({
+        name: os.environ.get(name)
+        for name in (
+            "UV_CACHE_DIR",
+            "PIP_CACHE_DIR",
+            "npm_config_cache",
+            "NPM_CONFIG_CACHE",
+            "TMPDIR",
+            "TMP",
+            "TEMP",
+        )
+    }), encoding="utf-8")
 if mode == "timeout":
     time.sleep(30)
 if mode == "abort":
@@ -86,11 +100,18 @@ def _fake_codex(tmp_path: Path) -> Path:
     return script
 
 
-def _run_direct(tmp_path: Path, mode: str, *, timeout: int = 3):
+def _run_direct(
+    tmp_path: Path,
+    mode: str,
+    *,
+    timeout: int = 3,
+    extra_env: dict[str, str] | None = None,
+):
     binary = _fake_codex(tmp_path)
     env = os.environ.copy()
     env["PATH"] = f"{tmp_path}{os.pathsep}{env.get('PATH', '')}"
     env["FAKE_CODEX_MODE"] = mode
+    env.update(extra_env or {})
     return run_codex_exec_json(
         [sys.executable, str(binary), "exec", "-"],
         cwd=tmp_path,
@@ -115,6 +136,90 @@ def test_codex_exec_json_success_and_malformed_event_accounting(tmp_path: Path):
     assert result["usage"]["input_tokens"] == 10
 
 
+def test_codex_exec_json_supplies_sandbox_writable_tool_caches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    for name in (
+        "UV_CACHE_DIR",
+        "PIP_CACHE_DIR",
+        "npm_config_cache",
+        "NPM_CONFIG_CACHE",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    observed_path = tmp_path / "tool-cache-env.json"
+
+    result = _run_direct(
+        tmp_path,
+        "valid",
+        extra_env={"FAKE_CODEX_ENV_OUTPUT": str(observed_path)},
+    )
+    observed = json.loads(observed_path.read_text(encoding="utf-8"))
+
+    assert result["ok"] is True
+    assert "--add-dir" in result["command"]
+    assert all(observed.values())
+    assert observed["npm_config_cache"] == observed["NPM_CONFIG_CACHE"]
+    assert observed["TMPDIR"] == observed["TMP"] == observed["TEMP"]
+    assert all("baldr-router-codex-" in value for value in observed.values())
+    assert all(not value.startswith(str(Path.home())) for value in observed.values())
+
+
+def test_codex_exec_json_preserves_explicit_tool_cache(tmp_path: Path):
+    observed_path = tmp_path / "explicit-tool-cache-env.json"
+    explicit = tmp_path / "operator-cache"
+
+    result = _run_direct(
+        tmp_path,
+        "valid",
+        extra_env={
+            "FAKE_CODEX_ENV_OUTPUT": str(observed_path),
+            "UV_CACHE_DIR": str(explicit),
+        },
+    )
+    observed = json.loads(observed_path.read_text(encoding="utf-8"))
+
+    assert result["ok"] is True
+    assert observed["UV_CACHE_DIR"] == str(explicit)
+
+
+def test_codex_read_only_uses_granular_scratch_permission(tmp_path: Path):
+    binary = _fake_codex(tmp_path)
+    result = run_codex_exec_json(
+        [
+            sys.executable,
+            str(binary),
+            "exec",
+            "--sandbox",
+            "read-only",
+            "-",
+        ],
+        cwd=tmp_path,
+        stdin="test prompt",
+        env=os.environ.copy(),
+        timeout=10,
+        report_kind="implementation",
+        telemetry_enabled=False,
+        keep_raw_events=False,
+        max_events_returned=20,
+    )
+
+    command = result["command"]
+    assert result["ok"] is True
+    assert "--sandbox" not in command
+    assert "--add-dir" not in command
+    assert "--ignore-user-config" in command
+    assert 'default_permissions="baldr-read-only-scratch"' in command
+    assert any(
+        value.startswith("permissions.baldr-read-only-scratch.filesystem=")
+        and '":root"="read"' in value
+        and '="write"' in value
+        for value in command
+    )
+
+
 @pytest.mark.parametrize("mode", ["invalid-json", "invalid-schema"])
 def test_codex_invalid_structured_output_is_classified(tmp_path: Path, mode: str):
     result = _run_direct(tmp_path, mode)
@@ -130,6 +235,8 @@ def test_codex_timeout_terminates_process_tree(tmp_path: Path):
     assert result["ok"] is False
     assert result["exit_code"] == 124
     assert result["error"]["code"] == "codex_timeout"
+    assert "process tree" in result["error"]["summary"].lower()
+    assert "retry" in result["error"]["action"].lower()
     assert result["cleanup"]["terminated"] is True
 
 
@@ -257,4 +364,6 @@ def test_missing_codex_login_is_caught_before_work(tmp_path: Path, monkeypatch):
 
     assert result["ok"] is False
     assert result["error"]["code"] == "codex_not_authenticated"
+    assert result["error"]["retryable"] is True
+    assert "codex login" in result["error"]["action"].lower()
     assert "codex login" in result["reason"].lower()
