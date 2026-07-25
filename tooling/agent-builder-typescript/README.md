@@ -37,7 +37,8 @@ BALDR_BUILDER_DRIVER_PATHS="$PWD/tooling/agent-builder-typescript/baldr-builder-
   baldr-agent driver doctor baldr.typescript
 ```
 
-The driver verifies Builder's neutral source inventory, transpiles declared
-TypeScript modules, embeds the public SDK runtime and rejects undeclared
-external packages. Tests run against the built artifact path; builds are
-deterministic and return `media_type`, launcher, size and SHA-256 evidence.
+The driver verifies Builder's neutral source inventory, compiles declared
+TypeScript modules with the packaged native TypeScript 7 compiler, embeds the
+public SDK runtime and rejects undeclared external packages. Tests run against
+the built artifact path; builds are deterministic and return `media_type`,
+launcher, size, compiler version and SHA-256 evidence.

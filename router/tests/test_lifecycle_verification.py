@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import stat
 from pathlib import Path
 
 import baldr_router.validation.lifecycle as lifecycle_module
@@ -73,16 +74,48 @@ def test_verification_cleanup_retries_a_transient_directory_lock(
     remove_tree = lifecycle_module.shutil.rmtree
     attempts = 0
 
-    def transient_lock(path: Path) -> None:
+    def transient_lock(path: Path, *, onerror=None) -> None:
         nonlocal attempts
         attempts += 1
         if attempts == 1:
             raise PermissionError("synthetic Windows sharing violation")
-        remove_tree(path)
+        remove_tree(path, onerror=onerror)
 
     monkeypatch.setattr(lifecycle_module.shutil, "rmtree", transient_lock)
 
     lifecycle_module._remove_verification_tree(root)
 
     assert attempts == 2
+    assert not root.exists()
+
+
+def test_verification_cleanup_clears_read_only_entries(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = tmp_path / "verification"
+    root.mkdir()
+    locked = root / "git-object"
+    locked.write_text("fixture\n", encoding="utf-8")
+    locked.chmod(stat.S_IREAD)
+    retried = False
+
+    def read_only_tree(path: Path, *, onerror=None) -> None:
+        nonlocal retried
+        assert onerror is not None
+
+        def remove_after_attribute_reset(value: str) -> None:
+            nonlocal retried
+            assert Path(value).stat().st_mode & stat.S_IWRITE
+            Path(value).unlink()
+            retried = True
+
+        error = PermissionError("synthetic read-only Git object")
+        onerror(remove_after_attribute_reset, str(locked), (PermissionError, error, None))
+        Path(path).rmdir()
+
+    monkeypatch.setattr(lifecycle_module.shutil, "rmtree", read_only_tree)
+
+    lifecycle_module._remove_verification_tree(root)
+
+    assert retried is True
     assert not root.exists()

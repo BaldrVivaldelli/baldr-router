@@ -25,7 +25,7 @@ from baldr_router.agent_manager_service import (
     build_agent_manager_server,
 )
 
-TOKEN = "route-fixture-credential"
+TOKEN = "synthetic-route-fixture-credential"
 TOKEN_ENV = "BALDR_ROUTE_FIXTURE_TOKEN"
 
 

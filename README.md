@@ -224,6 +224,8 @@ make check
 - Python y TypeScript comparten configuración y contratos neutrales.
 - El driver Python está incorporado; el driver TypeScript se descubre como un
   proceso externo JSONL.
+- El SDK, el driver y la extensión se validan con TypeScript 7; el driver usa
+  el compilador nativo empaquetado y registra su versión en cada build.
 - La selección de drivers fija exactamente `id + version + digest`.
 - Los artefactos publicados son inmutables por versión y digest.
 - El primer artefacto TypeScript es CommonJS autocontenido y requiere Node 20+.

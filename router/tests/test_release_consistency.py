@@ -153,6 +153,7 @@ def test_current_release_surfaces_are_consistent() -> None:
     values = release_consistency.source_version_values(ROOT)
     assert len(values) >= 15
     assert set(values.values()) == {"0.20.0"}
+    assert release_consistency.TYPESCRIPT_TOOLCHAIN_RANGE == "^7.0.2"
     assert release_consistency.check_source_consistency(ROOT) == "0.20.0"
 
 

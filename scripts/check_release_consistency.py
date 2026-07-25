@@ -10,6 +10,7 @@ from typing import Any, Mapping
 
 
 ROOT = Path(__file__).resolve().parents[1]
+TYPESCRIPT_TOOLCHAIN_RANGE = "^7.0.2"
 
 
 class ReleaseConsistencyError(ValueError):
@@ -228,6 +229,21 @@ def check_source_consistency(root: Path = ROOT) -> str:
             f"@baldr/agent-sdk ({version}); got {typescript_dependencies!r}"
         )
     typescript_sdk = _json(root / "sdks" / "typescript" / "package.json")
+    extension = _json(root / "facades" / "vscode-extension" / "package.json")
+    typescript_toolchains = {
+        "TypeScript SDK": (
+            typescript_sdk.get("devDependencies", {}).get("typescript")
+        ),
+        "TypeScript Builder driver": typescript_dependencies.get("typescript"),
+        "VS Code extension": (
+            extension.get("devDependencies", {}).get("typescript")
+        ),
+    }
+    if set(typescript_toolchains.values()) != {TYPESCRIPT_TOOLCHAIN_RANGE}:
+        raise ReleaseConsistencyError(
+            "Every TypeScript surface must use the native "
+            f"{TYPESCRIPT_TOOLCHAIN_RANGE} toolchain; got {typescript_toolchains!r}"
+        )
     for label, package in (
         ("TypeScript SDK", typescript_sdk),
         ("TypeScript Builder driver", typescript_builder),

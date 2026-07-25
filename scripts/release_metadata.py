@@ -5,7 +5,6 @@ import json
 import os
 import platform
 import re
-import sys
 import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,7 +20,17 @@ SECRET_PATTERNS = {
     ),
     "private_key": re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
 }
-SKIP_PARTS = {".git", "node_modules", ".venv", "dist", "__pycache__", ".pytest_cache"}
+SKIP_PARTS = {
+    ".git",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".venv",
+    ".vscode-test",
+    "__pycache__",
+    "dist",
+    "node_modules",
+}
 
 
 def sha256(path: Path) -> str:

@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   lstatSync,
@@ -22,13 +22,14 @@ import {
   sep,
 } from "node:path";
 import { fileURLToPath } from "node:url";
-import ts from "typescript";
 
 const DRIVER_CONTRACT = "baldr-builder-driver";
 const PROTOCOL_VERSION = 1;
 const DRIVER_ID = "baldr.typescript";
 const DRIVER_VERSION = "0.20.0";
 const TARGET_PROTOCOL = "agent-execution-v1";
+const SDK_MODULE_ID = "@baldr/agent-sdk";
+const SDK_SOURCE_ID = "__baldr_internal__/sdk/index.ts";
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
 const IGNORED = new Set([
   ".git",
@@ -65,6 +66,11 @@ interface DriverRequest extends JsonObject {
 interface InventoryEntry {
   name: string;
   content: Buffer;
+}
+
+interface TypeScriptCompiler {
+  script: string;
+  version: string;
 }
 
 function sha256(value: Buffer | string): string {
@@ -165,6 +171,25 @@ function sdkSourcePath(): string {
   return resolve(dirname(compiled), "../src/index.ts");
 }
 
+function typescriptCompiler(): TypeScriptCompiler {
+  const packagePath = fileURLToPath(import.meta.resolve("typescript/package.json"));
+  const packageDocument = JSON.parse(
+    readFileSync(packagePath, "utf8"),
+  ) as JsonObject;
+  const packageRoot = dirname(packagePath);
+  const script = resolve(packageRoot, "bin", "tsc");
+  const scriptInfo = lstatSync(script, { throwIfNoEntry: false });
+  if (scriptInfo === undefined || !scriptInfo.isFile()) {
+    throw new Error("The packaged TypeScript compiler entrypoint is unavailable.");
+  }
+  return {
+    script,
+    version: boundedText(packageDocument.version, "typescript.version", 64),
+  };
+}
+
+const TYPESCRIPT_COMPILER = typescriptCompiler();
+
 function driverDigest(): string {
   const digest = createHash("sha256");
   const inputs = [
@@ -175,7 +200,7 @@ function driverDigest(): string {
     digest.update(name);
     digest.update(createHash("sha256").update(readFileSync(path)).digest());
   }
-  digest.update(ts.version);
+  digest.update(TYPESCRIPT_COMPILER.version);
   return `sha256:${digest.digest("hex")}`;
 }
 
@@ -188,34 +213,6 @@ export function descriptor(): JsonObject {
     operations: ["test", "build"],
     targets: [TARGET_PROTOCOL],
   };
-}
-
-function transpile(source: string, fileName: string): string {
-  const result = ts.transpileModule(source, {
-    fileName,
-    reportDiagnostics: true,
-    compilerOptions: {
-      target: ts.ScriptTarget.ES2022,
-      module: ts.ModuleKind.CommonJS,
-      strict: true,
-      esModuleInterop: true,
-      sourceMap: false,
-      inlineSourceMap: false,
-    },
-  });
-  const errors = (result.diagnostics ?? []).filter(
-    (diagnostic) => diagnostic.category === ts.DiagnosticCategory.Error,
-  );
-  if (errors.length > 0) {
-    throw new Error(
-      ts.formatDiagnosticsWithColorAndContext(errors, {
-        getCanonicalFileName: (name) => name,
-        getCurrentDirectory: () => process.cwd(),
-        getNewLine: () => "\n",
-      }),
-    );
-  }
-  return result.outputText.trimEnd();
 }
 
 function validateImports(
@@ -240,26 +237,108 @@ function validateImports(
   }
 }
 
+function compileModules(entries: readonly InventoryEntry[]): Map<string, string> {
+  if (entries.some((entry) => entry.name === SDK_SOURCE_ID)) {
+    throw new Error(`Project source uses reserved path ${SDK_SOURCE_ID}.`);
+  }
+  const temporary = mkdtempSync(join(tmpdir(), "baldr-typescript-compile-"));
+  const sourceRoot = resolve(temporary, "src");
+  const outputRoot = resolve(temporary, "out");
+  const configPath = resolve(temporary, "tsconfig.json");
+  const modules = new Map<string, string>();
+
+  try {
+    const compilerInputs = [
+      {
+        name: SDK_SOURCE_ID,
+        content: readFileSync(sdkSourcePath()),
+        moduleId: SDK_MODULE_ID,
+      },
+      ...entries
+        .filter(
+          (entry) => entry.name.endsWith(".ts") && !entry.name.endsWith(".d.ts"),
+        )
+        .map((entry) => ({
+          ...entry,
+          moduleId: entry.name.replace(/\.ts$/u, ".js"),
+        })),
+    ];
+    for (const input of compilerInputs) {
+      const sourcePath = resolve(sourceRoot, ...input.name.split("/"));
+      if (!inside(sourceRoot, sourcePath)) {
+        throw new Error(`Compiler input escapes its temporary root: ${input.name}.`);
+      }
+      mkdirSync(dirname(sourcePath), { recursive: true, mode: 0o700 });
+      writeFileSync(sourcePath, input.content, { mode: 0o600 });
+    }
+
+    writeFileSync(
+      configPath,
+      `${JSON.stringify(
+        {
+          compilerOptions: {
+            target: "ES2022",
+            module: "CommonJS",
+            rootDir: "src",
+            outDir: "out",
+            noCheck: true,
+            noEmitOnError: true,
+            esModuleInterop: true,
+            skipLibCheck: true,
+            declaration: false,
+            sourceMap: false,
+            newLine: "lf",
+            types: [],
+            pretty: false,
+          },
+          include: ["src/**/*.ts"],
+        },
+        null,
+        2,
+      )}\n`,
+      { encoding: "utf8", mode: 0o600 },
+    );
+
+    const compilation = spawnSync(
+      process.execPath,
+      [TYPESCRIPT_COMPILER.script, "--project", configPath],
+      {
+        cwd: temporary,
+        encoding: "utf8",
+        maxBuffer: 2_000_000,
+        windowsHide: true,
+      },
+    );
+    if (compilation.error !== undefined) {
+      throw compilation.error;
+    }
+    if (compilation.status !== 0) {
+      const detail = `${compilation.stdout ?? ""}${compilation.stderr ?? ""}`
+        .trim()
+        .slice(-4096);
+      throw new Error(
+        `TypeScript ${TYPESCRIPT_COMPILER.version} compilation failed. ${detail}`.trim(),
+      );
+    }
+
+    for (const input of compilerInputs) {
+      const outputId = input.name.replace(/\.ts$/u, ".js");
+      const outputPath = resolve(outputRoot, ...outputId.split("/"));
+      const outputInfo = lstatSync(outputPath, { throwIfNoEntry: false });
+      if (outputInfo === undefined || !outputInfo.isFile()) {
+        throw new Error(`TypeScript did not emit configured source ${input.name}.`);
+      }
+      modules.set(input.moduleId, readFileSync(outputPath, "utf8").trimEnd());
+    }
+    return modules;
+  } finally {
+    rmSync(temporary, { recursive: true, force: true });
+  }
+}
+
 function bundle(entries: readonly InventoryEntry[], entrypointValue: string): string {
   const entrypoint = safeRelative(entrypointValue, "entrypoint");
-  const modules = new Map<string, string>();
-  modules.set(
-    "@baldr/agent-sdk",
-    transpile(
-      readFileSync(sdkSourcePath(), "utf8"),
-      "@baldr/agent-sdk/index.ts",
-    ),
-  );
-  for (const entry of entries) {
-    if (!entry.name.endsWith(".ts") || entry.name.endsWith(".d.ts")) {
-      continue;
-    }
-    const moduleId = entry.name.replace(/\.ts$/u, ".js");
-    modules.set(
-      moduleId,
-      transpile(entry.content.toString("utf8"), entry.name),
-    );
-  }
+  const modules = compileModules(entries);
   const entryId = entrypoint.replace(/\.ts$/u, ".js");
   if (!modules.has(entryId)) {
     throw new Error("TypeScript entrypoint is not present in configured sources.");
@@ -426,7 +505,7 @@ function buildArtifact(request: DriverRequest, outputRoot: string): JsonObject {
     entrypoint: request.entrypoint,
     builder_driver: DRIVER_ID,
     driver_version: DRIVER_VERSION,
-    typescript_version: ts.version,
+    typescript_version: TYPESCRIPT_COMPILER.version,
     source_digest: actualDigest,
   };
   writeFileSync(

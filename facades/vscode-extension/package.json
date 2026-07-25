@@ -139,7 +139,7 @@
     "@types/vscode": "^1.125.0",
     "@vscode/test-electron": "^3.0.0",
     "@vscode/vsce": "^3.9.2",
-    "typescript": "^5.8.3"
+    "typescript": "^7.0.2"
   },
   "capabilities": {
     "untrustedWorkspaces": {

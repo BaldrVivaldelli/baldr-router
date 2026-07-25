@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -237,12 +238,30 @@ def _cancel_fixture(scratch: Path) -> dict[str, Any]:
 
 
 def _remove_verification_tree(root: Path) -> None:
-    """Remove a verification tree after transient Windows handle release."""
+    """Remove a verification tree after Windows attributes and handles settle."""
+
+    def make_writable_and_retry(
+        function: Callable[[str], Any],
+        path: str,
+        error_info: tuple[type[BaseException], BaseException, Any],
+    ) -> None:
+        error = error_info[1]
+        if not isinstance(error, PermissionError):
+            raise error
+        try:
+            current_mode = os.stat(path, follow_symlinks=False).st_mode
+            os.chmod(path, current_mode | stat.S_IWRITE)
+        except OSError:
+            pass
+        function(path)
 
     deadline = time.monotonic() + 5.0
     while root.exists():
         try:
-            shutil.rmtree(root)
+            # Git can create read-only object files on Windows.  Clearing that
+            # attribute is distinct from retrying a transient sharing lock;
+            # the outer loop continues to handle the latter.
+            shutil.rmtree(root, onerror=make_writable_and_retry)
             return
         except PermissionError:
             if time.monotonic() >= deadline:

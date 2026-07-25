@@ -7,6 +7,7 @@ import sys
 import tempfile
 import threading
 import time
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
@@ -70,6 +71,11 @@ def _pid_alive(pid: int) -> bool:
         return False
     except PermissionError:
         return True
+    except OSError:
+        # Windows reports an already-terminated PID as WinError 87 rather
+        # than ProcessLookupError.  It is still the same observable state:
+        # no live process remains for this identifier.
+        return False
     if os.name != "nt":
         stat = Path(f"/proc/{pid}/stat")
         try:
@@ -123,10 +129,16 @@ def run_extension_host_cancellation_canary(
             "reason": "The extension-host cancellation canary requires a VS Code client.",
         }
 
-    with tempfile.TemporaryDirectory(prefix="baldr-vscode-cancel-") as temporary:
+    with (
+        tempfile.TemporaryDirectory(prefix="baldr-vscode-cancel-") as temporary,
+        ExitStack() as cleanup,
+    ):
         root = Path(temporary)
         workspace = _git_repository(root / "workspace")
         store = DurableStore(path=root / "cancellation.sqlite3")
+        # ExitStack closes SQLite before TemporaryDirectory removes the tree,
+        # including exceptional and early-return paths.
+        cleanup.callback(store.close)
         implementation_started = threading.Event()
         pid_file = root / "fixture-pids.json"
         provider_error: list[str] = []
@@ -240,7 +252,7 @@ def run_extension_host_cancellation_canary(
             and not registered
             and not provider_error
         )
-        return {
+        result = {
             "ok": ok,
             "status": "passed" if ok else "failed",
             "source": "vscode-extension-host",
@@ -254,3 +266,4 @@ def run_extension_host_cancellation_canary(
             "worker_stopped": not worker.is_alive(),
             "errors": provider_error,
         }
+        return result

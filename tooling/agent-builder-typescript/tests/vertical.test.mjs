@@ -83,7 +83,7 @@ test("driver tests and reproducibly builds a TypeScript agent", async () => {
   const { root, digest } = fixture();
   try {
     const tested = await handle(request("test-request", root, digest));
-    assert.equal(tested.status, "succeeded");
+    assert.equal(tested.status, "succeeded", JSON.stringify(tested, null, 2));
     assert.equal(tested.tests.status, "passed");
 
     const first = await handle(
@@ -92,7 +92,8 @@ test("driver tests and reproducibly builds a TypeScript agent", async () => {
     const second = await handle(
       request("build-request", root, digest, join(root, "dist-two")),
     );
-    assert.equal(first.status, "succeeded");
+    assert.equal(first.status, "succeeded", JSON.stringify(first, null, 2));
+    assert.match(first.metadata.typescript_version, /^7\./);
     assert.equal(first.artifact.digest, second.artifact.digest);
     assert.deepEqual(
       readFileSync(first.artifact.path),

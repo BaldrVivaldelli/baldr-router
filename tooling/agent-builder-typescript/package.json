@@ -40,7 +40,7 @@
   },
   "dependencies": {
     "@baldr/agent-sdk": "0.20.0",
-    "typescript": "^5.9.3"
+    "typescript": "^7.0.2"
   },
   "devDependencies": {
     "@types/node": "^26.1.1"
