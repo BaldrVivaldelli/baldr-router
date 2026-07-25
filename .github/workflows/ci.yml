@@ -41,6 +41,49 @@ jobs:
       - name: Lint and contract conformance
         run: python scripts/dev.py lint
 
+  quality:
+    name: Static analysis and coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - name: Type check border modules and ratchet the core baseline
+        run: python scripts/dev.py typecheck
+      - name: Coverage against the recorded floor
+        run: python scripts/dev.py coverage
+
+  dependency-audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    # Advisories appear independently of any change here, so a new finding
+    # reports without blocking unrelated work.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            facades/vscode-extension/package-lock.json
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+        working-directory: facades/vscode-extension
+      - name: Scan Python and Node dependency trees
+        run: python scripts/dev.py audit
+
   release-hygiene:
     name: Release hygiene
     runs-on: ubuntu-latest

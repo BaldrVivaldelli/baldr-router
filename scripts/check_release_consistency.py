@@ -268,15 +268,35 @@ def check_source_consistency(root: Path = ROOT) -> str:
             f"Feature-freeze line {freeze_line!r} does not match release {version!r}"
         )
 
+    # CONTRIBUTING.md silently described the v0.16 freeze while the code
+    # declared v0.20. The title of each policy document is what a contributor
+    # reads first, so it must name the current line.
+    for document in ("FEATURE_FREEZE.md", "CONTRIBUTING.md"):
+        title = _extract(
+            root / document,
+            r"^#\s+(.+)$",
+            label=f"{document} title",
+        )
+        declared = re.findall(r"v(\d+\.\d+)", title)
+        if declared != [freeze_line]:
+            raise ReleaseConsistencyError(
+                f"{document} title must state exactly the current freeze line "
+                f"v{freeze_line}; got {title!r}"
+            )
+
     release_workflow = (root / ".github" / "workflows" / "release.yml").read_text(
         encoding="utf-8"
     )
     tag_pattern = f"v{major}.{minor}.*"
     if tag_pattern not in release_workflow:
+        # The gate must stay manual and tag-bound, but the version itself must
+        # be derived from this repository instead of being pasted into the
+        # workflow on every release.
         manual_gate_markers = (
             "workflow_dispatch:",
             "qualification_run_id:",
-            f"expected='v{version}'",
+            "check_release_consistency.py --print-version",
+            'expected="v${RELEASE_VERSION}"',
             "qualification promotion-status",
         )
         missing_markers = [
@@ -285,8 +305,13 @@ def check_source_consistency(root: Path = ROOT) -> str:
         if missing_markers:
             raise ReleaseConsistencyError(
                 "Release workflow must either select tags matching "
-                f"{tag_pattern!r} or enforce the exact manual qualification gate; "
-                f"missing {missing_markers!r}"
+                f"{tag_pattern!r} or enforce the repository-derived manual "
+                f"qualification gate; missing {missing_markers!r}"
+            )
+        if re.search(r"v\d+\.\d+\.\d+", release_workflow):
+            raise ReleaseConsistencyError(
+                "Release workflow must not hardcode a release version; derive it "
+                "from scripts/check_release_consistency.py --print-version"
             )
 
     launcher_bootstrap = root / "launcher" / "lib" / "runtime-bootstrap.mjs"
@@ -553,9 +578,18 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--core-wheel", type=Path)
     parser.add_argument("--vsix", type=Path)
+    parser.add_argument(
+        "--print-version",
+        action="store_true",
+        help="Print the uniform release version so automation never hardcodes it",
+    )
     args = parser.parse_args(argv)
     if bool(args.core_wheel) != bool(args.vsix):
         parser.error("--core-wheel and --vsix must be provided together")
+
+    if args.print_version:
+        print(assert_uniform_versions(source_version_values()))
+        return 0
 
     version = check_source_consistency()
     checked = ["source versions", "dependency range", "bootstraps", "contract schemas"]

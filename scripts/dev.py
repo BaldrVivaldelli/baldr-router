@@ -202,6 +202,137 @@ def lint_all() -> None:
     _run(npm, "run", "check", cwd=EXTENSION)
 
 
+def _baselines() -> dict:
+    return json.loads((ROOT / "quality-baselines.json").read_text(encoding="utf-8"))
+
+
+def _capture(
+    *args: str,
+    cwd: Path = ROOT,
+    env: dict[str, str] | None = None,
+) -> tuple[str, int]:
+    print("+", " ".join(args), f"[{cwd.relative_to(ROOT) if cwd != ROOT else '.'}]")
+    completed = subprocess.run(
+        args,
+        cwd=cwd,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    output = completed.stdout + completed.stderr
+    print(output, end="" if output.endswith("\n") else "\n")
+    return output, completed.returncode
+
+
+def typecheck_all() -> None:
+    """Enforce strict typing on border modules and ratchet the rest.
+
+    Ruff cannot see the class of defect that shows up when JSON from outside
+    Baldr is treated as a known shape. Requiring a clean full tree today would
+    mean either a huge unreviewable change or no checking at all, so the border
+    is strict and the remainder may only improve.
+    """
+    uv = _tool("uv")
+    baselines = _baselines()["mypy"]
+    env = {
+        **_clean_test_environment(),
+        "UV_CACHE_DIR": os.environ.get("UV_CACHE_DIR")
+        or str(Path(tempfile.gettempdir()) / "baldr-router-uv-cache"),
+    }
+    _run(
+        uv,
+        "run",
+        "--extra",
+        "dev",
+        "mypy",
+        *[str(item) for item in baselines["strict_modules"]],
+        cwd=ROUTER,
+        env=env,
+    )
+    output, _ = _capture(uv, "run", "--extra", "dev", "mypy", cwd=ROUTER, env=env)
+    errors = len([line for line in output.splitlines() if ": error:" in line])
+    allowed = int(baselines["max_errors"])
+    if errors > allowed:
+        raise SystemExit(
+            f"mypy reported {errors} errors, above the {allowed} baseline. "
+            "Fix the new findings or justify a baseline change."
+        )
+    if errors < allowed:
+        print(
+            f"mypy reported {errors} errors, below the {allowed} baseline. "
+            "Lower quality-baselines.json to lock in the improvement."
+        )
+    print(json.dumps({"ok": True, "mypy_errors": errors, "baseline": allowed}))
+
+
+def coverage_all() -> None:
+    """Measure router coverage and hold it at or above the recorded floor."""
+    uv = _tool("uv")
+    minimum = float(_baselines()["coverage"]["min_percent"])
+    with tempfile.TemporaryDirectory(prefix="baldr-coverage-state-") as temp:
+        root = Path(temp)
+        env = {
+            **_clean_test_environment(),
+            "XDG_CONFIG_HOME": str(root / "config"),
+            "XDG_CACHE_HOME": str(root / "cache"),
+            "XDG_STATE_HOME": str(root / "state"),
+            "GIT_CONFIG_NOSYSTEM": "1",
+        }
+        _run(
+            uv,
+            "run",
+            "--extra",
+            "dev",
+            "pytest",
+            "-q",
+            "--cov",
+            "--cov-report=term-missing:skip-covered",
+            f"--cov-fail-under={minimum}",
+            cwd=ROUTER,
+            env=env,
+        )
+
+
+def audit_all() -> None:
+    """Scan published dependency trees for known advisories."""
+    uv = _tool("uv")
+    npm = _tool("npm")
+    failures: list[str] = []
+    for project in (ROUTER, ADAPTER, AGENT_SDK, AGENT_BUILDER, AGENT_RUNNER):
+        _, status = _capture(
+            uv,
+            "run",
+            "--with",
+            "pip-audit",
+            "pip-audit",
+            "--progress-spinner",
+            "off",
+            # Baldr's own workspace packages are not on PyPI while unreleased,
+            # and auditing them against the index only produces noise.
+            "--skip-editable",
+            cwd=project,
+        )
+        if status != 0:
+            failures.append(str(project.relative_to(ROOT)))
+    for workspace in (ROOT, LAUNCHER, EXTENSION):
+        if not (workspace / "package-lock.json").exists():
+            print(f"- skipping npm audit, no lockfile: {workspace.relative_to(ROOT)}")
+            continue
+        # npm exits non-zero only at or above the requested severity, so the
+        # exit code is the signal instead of parsing human output.
+        _, status = _capture(npm, "audit", "--audit-level=high", cwd=workspace)
+        if status != 0:
+            failures.append(
+                str(workspace.relative_to(ROOT)) if workspace != ROOT else "."
+            )
+    if failures:
+        raise SystemExit(
+            "Dependency audit reported findings in: " + ", ".join(sorted(set(failures)))
+        )
+    print(json.dumps({"ok": True, "audited": "python and node manifests"}))
+
+
 def build_release(skip_tests: bool = False) -> None:
     args = [sys.executable, "scripts/build_release.py"]
     if skip_tests:
@@ -294,6 +425,11 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("test", help="Run all Python and Node suites")
     sub.add_parser("lint", help="Run Ruff, compileall, facade conformance, and TypeScript checks")
+    sub.add_parser(
+        "typecheck", help="Type check strict border modules and ratchet the core baseline"
+    )
+    sub.add_parser("coverage", help="Measure router coverage against the recorded floor")
+    sub.add_parser("audit", help="Scan Python and Node dependencies for advisories")
     build = sub.add_parser("build", help="Build the split source/artifact/evidence release")
     build.add_argument("--skip-tests", action="store_true")
     sub.add_parser("verify-release", help="Verify checksums, bundle hygiene, and path redaction")
@@ -305,6 +441,12 @@ def main(argv: list[str] | None = None) -> int:
         test_all()
     elif args.command == "lint":
         lint_all()
+    elif args.command == "typecheck":
+        typecheck_all()
+    elif args.command == "coverage":
+        coverage_all()
+    elif args.command == "audit":
+        audit_all()
     elif args.command == "build":
         build_release(skip_tests=args.skip_tests)
     elif args.command == "verify-release":

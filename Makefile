@@ -25,7 +25,7 @@ QUALIFICATION_REPEAT ?= 3
 QUALIFICATION_CLIENT ?=
 
 .PHONY: \
-	all help deps test lint check build build-no-tests release verify-release \
+	all help deps test lint typecheck coverage audit check build build-no-tests release verify-release \
 	facades facades-check router-test router-lint adapter-test adapter-lint agent-sdk-test agent-sdk-typescript-test agent-builder-test agent-builder-typescript-test agent-runner-test \
 	launcher-test extension-install extension-check extension-test extension-package extension-clean \
 	install-kiro install-agent-runtime install-launcher cli mcp qualification-definitions qualification-template qualification-ci
@@ -38,6 +38,7 @@ help:
 		'  make deps                         Instala dependencias de desarrollo locales' \
 		'    (usa PyPI público; UV_DEFAULT_INDEX=<url> permite reemplazarlo)' \
 		'  make test | lint | check           Ejecuta validación completa' \
+		'  make typecheck | coverage | audit  Análisis estático, cobertura y advisories' \
 		'  make facades | facades-check       Genera o valida fachadas desde el contrato' \
 		'  make build | build-no-tests        Construye la release completa' \
 		'  make verify-release | release      Verifica artefactos o construye la release' \
@@ -64,6 +65,15 @@ test:
 
 lint:
 	$(PYTHON) scripts/dev.py lint
+
+typecheck:
+	$(PYTHON) scripts/dev.py typecheck
+
+coverage:
+	$(PYTHON) scripts/dev.py coverage
+
+audit:
+	$(PYTHON) scripts/dev.py audit
 
 check: test lint
 

@@ -692,4 +692,15 @@ python scripts/dev.py build
 python scripts/dev.py verify-release
 ```
 
+Análisis estático, cobertura y advisories de dependencias:
+
+```bash
+python scripts/dev.py typecheck
+python scripts/dev.py coverage
+python scripts/dev.py audit
+```
+
+`typecheck` exige tipado estricto en los módulos de borde y seguridad, y mantiene
+el resto del core bajo el ratchet declarado en `quality-baselines.json`.
+
 Detalle: [`docs/release-packaging.md`](docs/release-packaging.md)

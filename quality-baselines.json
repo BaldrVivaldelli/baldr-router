@@ -1,0 +1,22 @@
+{
+  "comment": [
+    "Ratchets for checks that cannot be clean on an existing 40k-line core in one step.",
+    "Numbers may only move in the improving direction. scripts/dev.py enforces them."
+  ],
+  "mypy": {
+    "strict_modules": [
+      "src/baldr_router/agent_api.py",
+      "src/baldr_router/agent_http.py",
+      "src/baldr_router/contract_schemas.py",
+      "src/baldr_router/provider_errors.py",
+      "src/baldr_router/redaction.py",
+      "src/baldr_router/release_policy.py",
+      "src/baldr_router/secrets.py"
+    ],
+    "max_errors": 53
+  },
+  "coverage": {
+    "comment": "Measured router branch coverage is 77%. Raise this floor as it improves.",
+    "min_percent": 76.0
+  }
+}

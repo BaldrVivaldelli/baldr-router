@@ -1,7 +1,29 @@
 version: 2
 updates:
+  # Every published manifest needs coverage. Watching only a subset leaves
+  # released packages without dependency alerts.
   - package-ecosystem: pip
     directory: /router
+    schedule:
+      interval: weekly
+  - package-ecosystem: pip
+    directory: /sdks/python
+    schedule:
+      interval: weekly
+  - package-ecosystem: pip
+    directory: /tooling/agent-builder
+    schedule:
+      interval: weekly
+  - package-ecosystem: pip
+    directory: /runtimes/agent-runner
+    schedule:
+      interval: weekly
+  - package-ecosystem: pip
+    directory: /facades/kiro/adapter
+    schedule:
+      interval: weekly
+  - package-ecosystem: npm
+    directory: /
     schedule:
       interval: weekly
   - package-ecosystem: npm

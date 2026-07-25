@@ -33,12 +33,24 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
-      - name: Require dispatch from the v0.20.0 tag
-        run: >-
-          python -c "import os; expected='v0.20.0'; actual=os.environ['GITHUB_REF_NAME'];
-          kind=os.environ['GITHUB_REF_TYPE'];
-          raise SystemExit(0 if kind == 'tag' and actual == expected else
-          f'Dispatch this workflow from tag {expected}; got {kind} {actual}')"
+      # The release version has a single source of truth in the repository.
+      # Hardcoding it here made every release require a workflow edit, which is
+      # the least reviewed place for a version to drift.
+      - name: Resolve the release version from the repository
+        run: |
+          version="$(python scripts/check_release_consistency.py --print-version)"
+          echo "RELEASE_VERSION=${version}" >> "$GITHUB_ENV"
+          echo "Release version resolved from the repository: ${version}"
+      - name: Require dispatch from the matching release tag
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          expected="v${RELEASE_VERSION}"
+          if [ "$REF_TYPE" != tag ] || [ "$REF_NAME" != "$expected" ]; then
+            echo "Dispatch this workflow from tag ${expected}; got ${REF_TYPE} ${REF_NAME}" >&2
+            exit 1
+          fi
       - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
@@ -69,7 +81,7 @@ jobs:
         run: >-
           uv run --project router baldr-router qualification promotion-status
           --receipt qualification-input
-          --release-version 0.20.0
+          --release-version "${RELEASE_VERSION}"
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm ci --ignore-scripts --no-audit --no-fund
         working-directory: facades/vscode-extension

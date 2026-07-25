@@ -42,8 +42,12 @@ real pertenece a una iteración posterior y no bloquea v0.20.
   de observar instalación, recarga, progreso, privacidad, la acción **Indicar
   correcciones** y la navegación desde la tarjeta de cambios al archivo exacto,
   el receipt registró 30 de 35 assertions aprobadas. La evidencia sigue siendo
-  `provisional`: faltan cinco observaciones reales y un nuevo receipt antes de
-  aprobar la fila de promoción.
+  `provisional`: faltan observaciones reales y un nuevo receipt antes de aprobar
+  la fila de promoción. Las assertions pendientes no se cuentan a mano en este
+  documento; se leen por nombre del propio receipt con
+  `baldr-router qualification promotion-status --receipt <dir>`, cuya sección
+  `blocking.<profile>.pending.assertions.pending` enumera exactamente qué queda
+  por observar y `next_steps` sugiere el orden.
 - El launcher Windows 0.20 completó el handshake MCP hacia el Router en WSL con
   27 tools y 3 prompts. El cliente Kiro de este entorno no puede consumirlo
   porque una política empresarial `registry-only` excluye Powers locales; el
