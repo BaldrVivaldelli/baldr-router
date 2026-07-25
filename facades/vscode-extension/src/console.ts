@@ -1,3 +1,4 @@
+import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
@@ -15,6 +16,15 @@ import {
   buildWorkItemPresentation,
 } from './workItemPresentation.js';
 import { renderQualification } from './render.js';
+import {
+  contextModeLabel,
+  plusMenuHtml,
+  plusQuickPickItems,
+  presetModeLabel,
+  roleLabel,
+  safetyModeLabel,
+  webviewCopyPayload,
+} from './consoleActions.js';
 import {
   captureWorkspaceContext,
   contextualWorkspaceRoot,
@@ -87,14 +97,6 @@ interface CodexTeamChoice {
 }
 
 type SafetyMode = 'automatic' | 'worktree' | 'current' | 'non-git';
-
-function roleLabel(role: BaldrRole): string {
-  return ({
-    architect: 'planificación',
-    implementer: 'ejecución',
-    reviewer: 'revisión',
-  } as Record<BaldrRole, string>)[role];
-}
 
 function isPathInsideRoot(root: string, target: string): boolean {
   const relative = path.relative(root, target);
@@ -178,25 +180,6 @@ function normalizeContext(value: string): 'auto' | 'on' | 'off' | undefined {
   if (normalized === 'on' || normalized === 'yes' || normalized === 'enabled') return 'on';
   if (normalized === 'off' || normalized === 'no' || normalized === 'disabled') return 'off';
   return undefined;
-}
-
-function safetyModeLabel(value: string): string {
-  return ({
-    automatic: 'Pedir autorización',
-    worktree: 'Copia aislada',
-    current: 'Trabajar directamente',
-    'non-git': 'Sin protección',
-  } as Record<string, string>)[value] ?? 'Trabajar directamente';
-}
-
-function presetModeLabel(value: string): string {
-  return ({ fast: 'Rápido', balanced: 'Estándar', deep: 'Detallado', custom: 'A medida' } as Record<string, string>)[value]
-    ?? 'Estándar';
-}
-
-function contextModeLabel(value: string): string {
-  return ({ auto: 'Automática', on: 'Siempre activa', off: 'Desactivada' } as Record<string, string>)[value]
-    ?? 'Automática';
 }
 
 export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.Disposable {
@@ -488,7 +471,15 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
     if (
       this.operationCount > 0
       && ['submit', 'plusAction', 'chip', 'itemAction'].includes(String(message.type ?? ''))
-    ) return;
+    ) {
+      // Dropping the interaction in silence looked like a broken button. Tell
+      // the user why nothing happened instead.
+      await this.post({
+        type: 'notice',
+        message: 'Baldr está trabajando en la operación anterior. Esperá a que termine.',
+      });
+      return;
+    }
     switch (message.type) {
       case 'ready':
       case 'refresh':
@@ -1040,22 +1031,9 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
   }
 
   private async openPlusMenu(): Promise<void> {
-    const choice = await vscode.window.showQuickPick([
-      { id: 'draft', label: '$(add) Guardar para después', description: 'Crear una sesión sin empezarla' },
-      { id: 'file', label: '$(file) Agregar el archivo abierto', description: 'Usarlo como referencia para el pedido' },
-      { id: 'selection', label: '$(selection) Agregar el texto seleccionado', description: 'Usar solamente la parte marcada' },
-      { id: 'path', label: '$(folder-opened) Agregar archivos o carpetas', description: 'Sumar material útil para el pedido' },
-      { id: 'workspace', label: '$(root-folder) Carpeta de trabajo', description: 'Elegir el proyecto activo en un workspace con varias carpetas' },
-      { id: 'git', label: '$(shield) Protección de cambios', description: 'Elegir cómo guardar y recuperar el trabajo' },
-      { id: 'preset', label: '$(dashboard) Nivel de detalle', description: 'Rápido, estándar, detallado o a medida' },
-      { id: 'roles', label: '$(organization) Equipo de Baldr', description: 'Elegir cómo se reparte el trabajo' },
-      { id: 'agents', label: '$(remote-explorer) Agentes externos', description: 'Consultar y asignar agentes registrados de forma segura' },
-      { id: 'profile-create', label: '$(tools) Crear una configuración avanzada', description: 'Elegir proveedor y modelo paso a paso' },
-      { id: 'context', label: '$(sparkle) Ayuda adicional', description: 'Buscar información útil cuando haga falta' },
-      { id: 'qualification', label: '$(verified-filled) Calificar VS Code + Codex', description: 'Ejecutar los gates reales y abrir la evidencia pendiente' },
-      { id: 'status', label: '$(refresh) Actualizar', description: 'Volver a cargar las sesiones y su estado' },
-      { id: 'logs', label: '$(output) Ver detalles técnicos', description: 'Abrir el registro de Baldr' },
-    ], {
+    // Same catalog as the inline "+" menu, so the gear can never offer a
+    // different set of actions than the composer.
+    const choice = await vscode.window.showQuickPick(plusQuickPickItems(), {
       title: 'Baldr',
       placeHolder: 'Agregar información o cambiar una opción',
       ignoreFocusOut: true,
@@ -2001,7 +1979,9 @@ export class BaldrConsoleProvider implements vscode.WebviewViewProvider, vscode.
   }
 
   private html(webview: vscode.Webview): string {
-    const nonce = Math.random().toString(36).slice(2);
+    // A CSP nonce is a security control, so it comes from the crypto source
+    // rather than Math.random().
+    const nonce = crypto.randomUUID().replace(/-/g, '');
     return `<!DOCTYPE html>
 <html lang="es">
 <head>
@@ -2235,8 +2215,10 @@ textarea::placeholder { color: var(--vscode-input-placeholderForeground); opacit
 .plus-option-label { display: block; }
 .plus-option-detail { display: block; margin-top: 1px; color: var(--vscode-descriptionForeground); font-size: 11px; }
 .plus-empty { padding: 13px 8px 5px; color: var(--vscode-descriptionForeground); text-align: center; font-size: 11px; }
-.plus-filter { width: 100%; margin-top: 10px; border: 1px solid var(--vscode-input-border, transparent); border-radius: 6px; outline: 0; padding: 7px 9px; color: var(--vscode-input-foreground); background: var(--vscode-input-background); }
+.plus-filter { width: 100%; margin-bottom: 10px; border: 1px solid var(--vscode-input-border, transparent); border-radius: 6px; outline: 0; padding: 7px 9px; color: var(--vscode-input-foreground); background: var(--vscode-input-background); }
 .plus-filter:focus { border-color: var(--vscode-focusBorder); }
+.composer-notice { margin: 6px 0 0; padding: 6px 9px; border-radius: 6px; border: 1px solid var(--vscode-inputValidation-infoBorder, var(--vscode-widget-border)); background: var(--vscode-inputValidation-infoBackground, var(--vscode-editorWidget-background)); color: var(--vscode-foreground); }
+.composer-notice[hidden] { display: none; }
 .slash { position: absolute; left: 50%; right: auto; width: calc(100% - 32px); max-width: var(--baldr-content-width); transform: translateX(-50%); bottom: 77px; max-height: 220px; overflow: auto; border: 1px solid var(--vscode-widget-border); background: var(--vscode-quickInput-background); box-shadow: 0 5px 18px var(--vscode-widget-shadow); border-radius: 7px; z-index: 10; display: none; }
 .slash.visible { display: block; }
 .slash-item { padding: 7px 9px; cursor: pointer; display: flex; gap: 8px; }
@@ -2317,33 +2299,21 @@ textarea::placeholder { color: var(--vscode-input-placeholderForeground); opacit
         <button type="button" class="send" id="send" title="Enviar pedido" aria-label="Enviar pedido" disabled><svg class="button-icon" viewBox="0 0 16 16" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" d="M8 12.8V3.2M4.4 6.8 8 3.2l3.6 3.6"/></svg></button>
       </div>
     </div>
+    <div class="composer-notice" id="notice" role="status" aria-live="polite" hidden></div>
     <div class="slash" id="slash"></div>
-    <div class="plus-menu" id="plusMenu" role="dialog" aria-label="Agregar detalles u opciones de Baldr" aria-hidden="true">
-      <div class="plus-menu-heading" data-plus-heading="add">Agregar</div>
-      <button type="button" class="plus-option" data-plus-action="path" data-plus-group="add"><span class="plus-option-icon">⌕</span><span><span class="plus-option-label">Archivos y carpetas</span><span class="plus-option-detail">Sumá material útil para el pedido</span></span></button>
-      <button type="button" class="plus-option" data-plus-action="workspace" data-plus-group="add"><span class="plus-option-icon">◇</span><span><span class="plus-option-label">Carpeta de trabajo</span><span class="plus-option-detail">Elegí el proyecto activo</span></span></button>
-      <button type="button" class="plus-option" data-plus-action="file" data-plus-group="add"><span class="plus-option-icon">▣</span><span><span class="plus-option-label">Archivo abierto</span><span class="plus-option-detail">Usalo como referencia</span></span></button>
-      <button type="button" class="plus-option" data-plus-action="selection" data-plus-group="add"><span class="plus-option-icon">≡</span><span><span class="plus-option-label">Texto seleccionado</span><span class="plus-option-detail">Sumá solo la parte marcada</span></span></button>
-      <button type="button" class="plus-option" data-plus-action="draft" data-plus-group="add"><span class="plus-option-icon">＋</span><span><span class="plus-option-label">Guardar para después</span><span class="plus-option-detail">Creá una sesión sin empezarla todavía</span></span></button>
-      <div class="plus-menu-group" data-plus-heading="preferences">Preferencias</div>
-      <button type="button" class="plus-option" data-plus-action="git" data-plus-group="preferences"><span class="plus-option-icon">⌘</span><span><span class="plus-option-label">Protección de cambios</span><span class="plus-option-detail">Elegí cómo guardar y recuperar el trabajo</span></span></button>
-      <button type="button" class="plus-option" data-plus-action="preset" data-plus-group="preferences"><span class="plus-option-icon">◈</span><span><span class="plus-option-label">Nivel de detalle</span><span class="plus-option-detail">Rápido, estándar o detallado</span></span></button>
-      <button type="button" class="plus-option" data-plus-action="roles" data-plus-group="preferences"><span class="plus-option-icon">◌</span><span><span class="plus-option-label">Equipo de Baldr</span><span class="plus-option-detail">Elegí modelos y cómo se reparte el trabajo</span></span></button>
-      <button type="button" class="plus-option" data-plus-action="context" data-plus-group="preferences"><span class="plus-option-icon">?</span><span><span class="plus-option-label">Ayuda adicional</span><span class="plus-option-detail">Buscá información útil cuando haga falta</span></span></button>
-      <button type="button" class="plus-option" data-plus-action="qualification" data-plus-group="preferences"><span class="plus-option-icon">✓</span><span><span class="plus-option-label">Calificar VS Code + Codex</span><span class="plus-option-detail">Ejecutá los gates reales y abrí la evidencia pendiente</span></span></button>
-      <div class="plus-empty" id="plusEmpty" hidden>No encontramos una opción con ese nombre.</div>
-      <input class="plus-filter" id="plusFilter" type="search" placeholder="Buscar opciones" aria-label="Buscar opciones de Baldr">
+    <div class="plus-menu" id="plusMenu" role="dialog" aria-modal="true" aria-label="Agregar detalles u opciones de Baldr" aria-hidden="true">
+      ${plusMenuHtml()}
     </div>
   </section>
 </div>
 <script nonce="${nonce}">
 const vscode = acquireVsCodeApi();
-const els = Object.fromEntries(['header','historyPanel','historyToggle','historyStatus','tasks','content','composer','input','send','plus','configure','refresh','gitChip','gitChipLabel','presetChip','presetChipLabel','rolesChip','rolesChipLabel','contextChip','contextChipLabel','attachments','activeContext','slash','plusMenu','plusFilter','plusEmpty','historySearch','loading','liveStatus'].map(id => [id, document.getElementById(id)]));
+const els = Object.fromEntries(['header','historyPanel','historyToggle','historyStatus','tasks','content','composer','input','send','plus','configure','refresh','gitChip','gitChipLabel','presetChip','presetChipLabel','rolesChip','rolesChipLabel','contextChip','contextChipLabel','attachments','activeContext','slash','plusMenu','plusFilter','plusEmpty','historySearch','loading','liveStatus','notice'].map(id => [id, document.getElementById(id)]));
 const persistedView = vscode.getState() || {};
 let expandedByItem = persistedView.expandedByItem || {};
 let activeStageByItem = persistedView.activeStageByItem || {};
 let openDisclosuresByItem = persistedView.openDisclosuresByItem || {};
-let historyFilter=['active','completed','archived'].includes(persistedView.historyFilter)?persistedView.historyFilter:'active';let historySearch=String(persistedView.historySearch||'');let historyExpanded=persistedView.historyExpanded!==false;let draftText=String(persistedView.draftText||'');let openTaskMenuId='';let state = {}; let slashIndex = 0; let plusMenuOpen = false; let lastContentKey = ''; let lastTasksKey = ''; let lastPendingKey = ''; let lastAnnouncement = '';let deliverableView={open:false,loading:false,error:'',descriptor:null,data:null,itemId:'',descriptorDigest:'',requestId:0};let deliverableRequestSequence=0;let deliverableIndexView={itemId:'',initialized:false,loading:false,error:'',sourceCursor:'',nextCursor:'',requestCursor:'',requestId:0,items:[]};let deliverableIndexRequestSequence=0;let pendingFocusKey='';let deliverableReturnFocusKey='';let deliverableScrollTop=0;let deliverableTechnicalOpen=false;
+let historyFilter=['active','completed','archived'].includes(persistedView.historyFilter)?persistedView.historyFilter:'active';let historySearch=String(persistedView.historySearch||'');let historyExpanded=persistedView.historyExpanded!==false;let draftText=String(persistedView.draftText||'');let openTaskMenuId='';let state = {}; let slashIndex = 0; let plusMenuOpen = false; let lastContentKey = ''; let lastTasksKey = ''; let lastPendingKey = ''; let lastAnnouncement = '';let deliverableView={open:false,loading:false,error:'',descriptor:null,data:null,itemId:'',descriptorDigest:'',requestId:0};let deliverableRequestSequence=0;let noticeTimer=undefined;let deliverableIndexView={itemId:'',initialized:false,loading:false,error:'',sourceCursor:'',nextCursor:'',requestCursor:'',requestId:0,items:[]};let deliverableIndexRequestSequence=0;let pendingFocusKey='';let deliverableReturnFocusKey='';let deliverableScrollTop=0;let deliverableTechnicalOpen=false;
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 const post = message => vscode.postMessage(message);
 const workbench = () => state.workbench || {};
@@ -2351,13 +2321,14 @@ const selected = () => workbench().selected || null;
 const commands = () => ((workbench().options || {}).slash_commands || [
  {id:'setup',usage:'/setup',description:'Abrir las opciones de Baldr.'},{id:'new',usage:'/new <tarea>',description:'Guardar una sesión para después.'},{id:'run',usage:'/run [tarea]',description:'Empezar la sesión seleccionada.'},{id:'status',usage:'/status',description:'Actualizar el estado.'},{id:'profile',usage:'/profile <nivel>',description:'Cambiar el nivel de detalle.'},{id:'git',usage:'/git <modo>',description:'Cambiar la protección de cambios.'},{id:'context',usage:'/context <modo>',description:'Configurar la ayuda adicional.'},{id:'roles',usage:'/roles',description:'Configurar el equipo de Baldr.'},{id:'cancel',usage:'/cancel',description:'Cancelar la sesión seleccionada.'},{id:'resume',usage:'/resume',description:'Continuar una sesión interrumpida.'},{id:'archive',usage:'/archive',description:'Archivar la sesión seleccionada.'},{id:'restore',usage:'/restore',description:'Restaurar la sesión archivada seleccionada.'},{id:'delete',usage:'/delete',description:'Eliminar permanentemente la sesión archivada seleccionada.'},{id:'help',usage:'/help',description:'Ver los comandos disponibles.'}
 ]);
+const COPY = ${webviewCopyPayload()};
 function statusClass(status){ return String(status || 'draft').replace(/[^a-z_]/g,'_'); }
-function statusLabel(status){ const labels={draft:'Pendiente',queued:'En espera',running:'En curso',cancelling:'Cancelando',completed:'Lista',archived:'Archivada',failed:'Necesita atención',cancelled:'Cancelada',needs_attention:'Necesita atención'}; return labels[String(status || 'draft')] || String(status || 'Pendiente'); }
-function presetLabel(value){ return ({fast:'Rápido',balanced:'Estándar',deep:'Detallado',custom:'A medida'}[value]||'Estándar'); }
-function safetyLabel(value){ return ({automatic:'Pedir autorización',worktree:'Copia aislada',current:'Trabajar directamente','non-git':'Sin protección'}[value]||'Trabajar directamente'); }
-function contextLabel(value){ return ({auto:'Ayuda automática',on:'Ayuda activa',off:'Ayuda desactivada'}[value]||'Ayuda automática'); }
-function itemErrorMessage(item){ if(item.error_code==='workspace_reconciliation_required'&&item.safety_mode==='non-git')return 'La sesión se detuvo al intentar crear un respaldo Git que esta carpeta no usa. Tus archivos siguen en la carpeta: revisá las opciones para continuar con ellos.'; return item.error_reason||item.error_code||''; }
-function phaseLabel(value){ return ({architecture:'Planificación',architect:'Planificación',implementation:'Ejecución',implementer:'Ejecución',review:'Revisión',reviewer:'Revisión'}[String(value||'').toLowerCase()]||String(value||'Etapa')); }
+function statusLabel(status){ return COPY.labels.status[String(status || 'draft')] || String(status || COPY.fallbacks.status); }
+function presetLabel(value){ return COPY.labels.preset[value] || COPY.fallbacks.preset; }
+function safetyLabel(value){ return COPY.labels.safety[value] || COPY.fallbacks.safety; }
+function contextLabel(value){ return COPY.labels.context[value] || COPY.fallbacks.context; }
+function itemErrorMessage(item){ const code=String(item.error_code||'');const reason=String(item.error_reason||'').trim(); if(code==='workspace_reconciliation_required'&&item.safety_mode==='non-git')return 'La sesión se detuvo al intentar crear un respaldo Git que esta carpeta no usa. Tus archivos siguen en la carpeta: revisá las opciones para continuar con ellos.'; if(COPY.errors[code])return COPY.errors[code]; if(reason&&reason!==code)return reason; return code?COPY.genericError:''; }
+function phaseLabel(value){ return COPY.labels.phase[String(value||'').toLowerCase()]||String(value||COPY.fallbacks.phase); }
 function emptyMark(){ return '<div class="empty-mark"><svg class="empty-logo" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 20V5.5h6.1c3 0 5 1.5 5 4 0 1.8-1 3-2.5 3.6 2 .5 3.4 1.8 3.4 3.8 0 2.4-2 3.1-5.4 3.1H6Z"/><path d="M9.3 8.5h2.8c1.2 0 1.8.4 1.8 1.2s-.6 1.3-1.8 1.3H9.3V8.5Zm0 5.5h3.3c1.4 0 2.1.5 2.1 1.4 0 1-.7 1.5-2.1 1.5H9.3V14Z"/></svg></div>'; }
 function historyGroup(item){const status=String(item?.status||'draft');if(status==='archived')return 'archived';if(['completed','failed','cancelled'].includes(status))return 'completed';return 'active';}
 function isHistoryItem(item){return historyGroup(item)===historyFilter;}
@@ -2483,7 +2454,7 @@ function sessionProgressHtml(stages,presentation,expanded){if(!stages.length)ret
 function shortModelLabel(value){ const raw=String(value||'').trim(); const named=raw.match(/^gpt-[0-9]+(?:[.][0-9]+)*-(sol|terra|luna|spark)$/i); if(named)return named[1].charAt(0).toUpperCase()+named[1].slice(1).toLowerCase(); const version=raw.match(/^gpt-([0-9]+(?:[.][0-9]+)*)(?:-(mini))?$/i); if(version)return 'GPT-'+version[1]+(version[2]?' Mini':''); return raw||''; }
 function effortChipLabel(value){ return ({minimal:'Mínimo',low:'Bajo',medium:'Medio',high:'Alto',xhigh:'Muy alto',max:'Máximo',ultra:'Ultra'}[String(value||'').toLowerCase()]||String(value||'')); }
 function configuredRole(role){ const wb=workbench(); const pref=wb.preferences||{}; const profiles=wb.profiles||{}; const selected=(((pref.role_profiles||{})[role]||[])[0]); if(selected&&profiles.execution_profiles&&profiles.execution_profiles[selected])return profiles.execution_profiles[selected]; return (((profiles.resolved_roles||{})[role]||[])[0])||{}; }
-function renderChips(){ const pref=workbench().preferences||{}; const safety=safetyLabel(pref.safety_mode); const preset=presetLabel(pref.preset); const context=contextLabel(pref.context_mode); const roleNames={architect:'Planificación',implementer:'Ejecución',reviewer:'Revisión'}; const roleConfigurations=['architect','implementer','reviewer'].map(role=>{const config=configuredRole(role);const raw=config.agent_ref||config.model||config.agent||config.provider||'';return {role,label:shortModelLabel(raw),effort:effortChipLabel(config.reasoning_effort||config.effort)};}); const modelNames=[...new Set(roleConfigurations.map(item=>item.label).filter(Boolean))]; const configuredTeam=modelNames.length?modelNames.join(' · '):'Equipo estándar'; const automatic=String(pref.team_mode||'')==='automatic'; const fixedCount=Object.keys(pref.agent_overrides||{}).length; const team=automatic?(fixedCount?'Automático · '+fixedCount+' fijo'+(fixedCount===1?'':'s'):'Automático'):configuredTeam; const configuredDetail=roleConfigurations.filter(item=>item.label).map(item=>roleNames[item.role]+': '+item.label+(item.effort?' ('+item.effort+')':'')).join(' · '); const teamDetail=automatic?(fixedCount?'Selección automática con '+fixedCount+' etapa'+(fixedCount===1?' fija':'s fijas'):'Selección automática por compatibilidad y disponibilidad'):configuredDetail; els.gitChipLabel.textContent=safety; els.gitChip.title='Uso de Git y protección: '+safety; els.gitChip.setAttribute('aria-label',els.gitChip.title); els.presetChipLabel.textContent=preset; els.presetChip.title='Nivel de detalle: '+preset; els.presetChip.setAttribute('aria-label',els.presetChip.title); els.rolesChipLabel.textContent=team; els.rolesChip.title='Equipo de Baldr: '+(teamDetail||team); els.rolesChip.setAttribute('aria-label',els.rolesChip.title); els.contextChipLabel.textContent=context; els.contextChip.title='Ayuda adicional: '+context; els.contextChip.setAttribute('aria-label',els.contextChip.title); }
+function renderChips(){ const pref=workbench().preferences||{}; const safety=safetyLabel(pref.safety_mode); const preset=presetLabel(pref.preset); const context=contextLabel(pref.context_mode); const roleNames=COPY.labels.role; const roleConfigurations=['architect','implementer','reviewer'].map(role=>{const config=configuredRole(role);const raw=config.agent_ref||config.model||config.agent||config.provider||'';return {role,label:shortModelLabel(raw),effort:effortChipLabel(config.reasoning_effort||config.effort)};}); const modelNames=[...new Set(roleConfigurations.map(item=>item.label).filter(Boolean))]; const configuredTeam=modelNames.length?modelNames.join(' · '):'Equipo estándar'; const automatic=String(pref.team_mode||'')==='automatic'; const fixedCount=Object.keys(pref.agent_overrides||{}).length; const team=automatic?(fixedCount?'Automático · '+fixedCount+' fijo'+(fixedCount===1?'':'s'):'Automático'):configuredTeam; const configuredDetail=roleConfigurations.filter(item=>item.label).map(item=>roleNames[item.role]+': '+item.label+(item.effort?' ('+item.effort+')':'')).join(' · '); const teamDetail=automatic?(fixedCount?'Selección automática con '+fixedCount+' etapa'+(fixedCount===1?' fija':'s fijas'):'Selección automática por compatibilidad y disponibilidad'):configuredDetail; els.gitChipLabel.textContent=safety; els.gitChip.title='Uso de Git y protección: '+safety; els.gitChip.setAttribute('aria-label',els.gitChip.title); els.presetChipLabel.textContent=preset; els.presetChip.title='Nivel de detalle: '+preset; els.presetChip.setAttribute('aria-label',els.presetChip.title); els.rolesChipLabel.textContent=team; els.rolesChip.title='Equipo de Baldr: '+(teamDetail||team); els.rolesChip.setAttribute('aria-label',els.rolesChip.title); els.contextChipLabel.textContent=context; els.contextChip.title='Ayuda adicional: '+context; els.contextChip.setAttribute('aria-label',els.contextChip.title); }
 function renderPending(){ const items=(state.pending||{}).attachments||[];const key=items.map(item=>[item.kind,item.label].join(':')).join('|');if(key===lastPendingKey)return;lastPendingKey=key;const focusedIndex=els.attachments.contains(document.activeElement)?String(document.activeElement?.dataset?.removePending||''):''; const kindLabels={file:'Archivo',folder:'Carpeta',selection:'Selección'}; els.attachments.innerHTML=items.map((item,index)=>'<div class="attachment"><div class="attachment-icon" aria-hidden="true">'+({file:'▤',folder:'◇',selection:'≡'}[item.kind]||'▤')+'</div><div><div class="attachment-label" title="'+escapeHtml(item.label||'Archivo')+'">'+escapeHtml(item.label||'Archivo')+'</div><div class="attachment-kind">'+escapeHtml(kindLabels[item.kind]||'Archivo')+'</div></div><button type="button" class="remove-attachment" data-remove-pending="'+index+'" title="Quitar" aria-label="Quitar '+escapeHtml(item.label||'archivo')+'">×</button></div>').join(''); els.attachments.querySelectorAll('[data-remove-pending]').forEach(node=>node.addEventListener('click',()=>post({type:'removePending',index:Number(node.dataset.removePending)})));if(focusedIndex){const focusTarget=[...els.attachments.querySelectorAll('[data-remove-pending]')].find(node=>node.dataset.removePending===focusedIndex);focusTarget?.focus({preventScroll:true});} }
 function renderComposerContext(){const item=selected();const continuing=Boolean(item&&(item.allowed_actions||[]).includes('continue'));els.input.placeholder=continuing?'Continuar esta conversación…':'Escribí qué necesitás…';els.input.setAttribute('aria-label',continuing?'Continuar conversación con Baldr':'Nuevo pedido para Baldr');const active=String(state.activeContext||'');els.activeContext.textContent=active?'Contexto actual: '+active:'';els.activeContext.title=active?'Baldr incluirá este archivo o selección al enviar':'';}
 function updateDurations(){ const stages=selected()?.presentation?.stages||[];stages.forEach(stage=>{const node=els.content.querySelector('[data-stage-duration="'+stage.id+'"]');if(node)node.textContent=stage.durationLabel||'';}); }
@@ -2491,18 +2462,20 @@ function resizeComposer(){els.input.style.height='auto';els.input.style.height=M
 function updateSendState(){ const blocked=Boolean(state.busy)||Boolean(deliverableView.open);els.send.disabled=blocked||!els.input.value.trim();for(const control of [els.plus,els.configure,els.refresh,els.gitChip,els.presetChip,els.rolesChip,els.contextChip])control.disabled=blocked; }
 function render(){ renderHistoryVisibility();renderTasks(); renderContent(); updateDurations(); renderChips(); renderPending();renderComposerContext(); syncDeliverableModality(); updateSendState(); }
 function updateState(next){const incoming={...(next||{}),error:''};const incomingItemId=String(incoming?.workbench?.selected?.id||'');if(deliverableView.open&&incomingItemId!==deliverableView.itemId){++deliverableRequestSequence;deliverableView=blankDeliverableView();deliverableReturnFocusKey='';deliverableScrollTop=0;deliverableTechnicalOpen=false;pendingFocusKey='';lastContentKey='';}state=incoming;syncDeliverableIndexForItem(selected());render(); }
-function setPlusMenu(open){ plusMenuOpen=open; els.plusMenu.classList.toggle('visible',open); els.plusMenu.setAttribute('aria-hidden',String(!open)); els.plus.setAttribute('aria-expanded',String(open)); if(open){els.plusFilter.value='';filterPlusActions();els.plusMenu.scrollTop=0;} }
+function setPlusMenu(open){ plusMenuOpen=open; els.plusMenu.classList.toggle('visible',open); els.plusMenu.setAttribute('aria-hidden',String(!open)); els.plus.setAttribute('aria-expanded',String(open)); if(open){els.plusFilter.value='';filterPlusActions();els.plusMenu.scrollTop=0;els.plusFilter.focus?.({preventScroll:true});} }
+function trapPlusFocus(event){ if(event.key!=='Tab'||!plusMenuOpen)return; const focusable=[els.plusFilter,...visiblePlusActions()].filter(Boolean); if(!focusable.length)return; const first=focusable[0]; const last=focusable[focusable.length-1]; if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus?.({preventScroll:true});}else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus?.({preventScroll:true});} }
 function normalizeSearch(value){ return String(value||'').normalize('NFD').replace(/[̀-ͯ]/g,'').toLowerCase(); }
 function visiblePlusActions(){ return [...els.plusMenu.querySelectorAll('[data-plus-action]')].filter(node=>!node.hidden); }
 function filterPlusActions(){ const query=normalizeSearch(els.plusFilter.value.trim()); const actions=[...els.plusMenu.querySelectorAll('[data-plus-action]')]; actions.forEach(node=>{node.hidden=Boolean(query)&&!normalizeSearch(node.textContent).includes(query);}); els.plusMenu.querySelectorAll('[data-plus-heading]').forEach(heading=>{const group=heading.dataset.plusHeading;heading.hidden=!actions.some(node=>node.dataset.plusGroup===group&&!node.hidden);}); els.plusEmpty.hidden=actions.some(node=>!node.hidden); }
 function renderSlash(){ const value=els.input.value.trim(); if(!value.startsWith('/')){els.slash.classList.remove('visible');return;} const query=value.slice(1).toLowerCase(); const list=commands().filter(c=>c.id.startsWith(query.split(/\s/)[0])).slice(0,8); if(!list.length){els.slash.classList.remove('visible');return;} slashIndex=Math.min(slashIndex,list.length-1); els.slash.innerHTML=list.map((c,i)=>'<div class="slash-item '+(i===slashIndex?'active':'')+'" data-command="'+escapeHtml(c.id)+'"><span class="slash-command">/'+escapeHtml(c.id)+'</span><span class="slash-description">'+escapeHtml(c.description)+'</span></div>').join(''); els.slash.classList.add('visible'); els.slash.querySelectorAll('[data-command]').forEach(n=>n.addEventListener('click',()=>{els.input.value='/'+n.dataset.command+' ';els.input.focus();els.slash.classList.remove('visible');})); }
+function showNotice(message){ const text=String(message||''); if(!els.notice)return; if(noticeTimer){clearTimeout(noticeTimer);noticeTimer=undefined;} els.notice.textContent=text; els.notice.hidden=!text; if(text)noticeTimer=setTimeout(()=>{els.notice.textContent='';els.notice.hidden=true;noticeTimer=undefined;},6000); }
 function submit(){ const value=els.input.value; if(!value.trim()||state.busy||deliverableView.open)return; setPlusMenu(false); post({type:'submit',value}); }
-els.send.addEventListener('click',submit); els.plus.addEventListener('click',()=>setPlusMenu(!plusMenuOpen));els.historyToggle.addEventListener('click',()=>setHistoryExpanded(!historyExpanded)); els.configure.addEventListener('click',()=>post({type:'configure'})); els.refresh.addEventListener('click',()=>post({type:'refresh'})); els.plusMenu.querySelectorAll('[data-plus-action]').forEach(node=>{node.addEventListener('click',()=>{setPlusMenu(false);post({type:'plusAction',action:node.dataset.plusAction});});node.addEventListener('keydown',event=>{if(event.key!=='ArrowDown'&&event.key!=='ArrowUp')return;event.preventDefault();const actions=visiblePlusActions();const index=actions.indexOf(node);const next=(index+(event.key==='ArrowDown'?1:-1)+actions.length)%actions.length;actions[next]?.focus();});}); els.plusFilter.addEventListener('input',filterPlusActions); els.plusFilter.addEventListener('keydown',event=>{if(event.key!=='Enter'&&event.key!=='ArrowDown'&&event.key!=='ArrowUp')return;const actions=visiblePlusActions();if(!actions.length)return;event.preventDefault();if(event.key==='Enter')actions[0].click();else if(event.key==='ArrowDown')actions[0].focus();else actions[actions.length-1].focus();}); document.querySelectorAll('[data-chip]').forEach(n=>n.addEventListener('click',()=>post({type:'chip',value:n.dataset.chip})));document.querySelectorAll('[data-history-filter]').forEach(node=>node.addEventListener('click',()=>{historyFilter=['active','completed','archived'].includes(node.dataset.historyFilter)?node.dataset.historyFilter:'active';openTaskMenuId='';saveViewState();renderTasks();}));els.historySearch?.addEventListener('input',()=>{historySearch=els.historySearch.value;openTaskMenuId='';saveViewState();renderTasks();});els.historySearch?.addEventListener('keydown',event=>{if(event.key==='ArrowDown'){const first=historyItemNodes()[0];if(first){event.preventDefault();first.focus();}}else if(event.key==='Escape'&&historySearch){event.preventDefault();historySearch='';saveViewState();renderTasks();}});
+els.send.addEventListener('click',submit); els.plus.addEventListener('click',()=>setPlusMenu(!plusMenuOpen));els.historyToggle.addEventListener('click',()=>setHistoryExpanded(!historyExpanded)); els.configure.addEventListener('click',()=>post({type:'configure'})); els.refresh.addEventListener('click',()=>post({type:'refresh'})); els.plusMenu.querySelectorAll('[data-plus-action]').forEach(node=>{node.addEventListener('click',()=>{setPlusMenu(false);post({type:'plusAction',action:node.dataset.plusAction});});node.addEventListener('keydown',event=>{if(event.key!=='ArrowDown'&&event.key!=='ArrowUp')return;event.preventDefault();const actions=visiblePlusActions();const index=actions.indexOf(node);const next=(index+(event.key==='ArrowDown'?1:-1)+actions.length)%actions.length;actions[next]?.focus();});}); els.plusMenu.addEventListener('keydown',trapPlusFocus); els.plusFilter.addEventListener('input',filterPlusActions); els.plusFilter.addEventListener('keydown',event=>{if(event.key!=='Enter'&&event.key!=='ArrowDown'&&event.key!=='ArrowUp')return;const actions=visiblePlusActions();if(!actions.length)return;event.preventDefault();if(event.key==='Enter')actions[0].click();else if(event.key==='ArrowDown')actions[0].focus();else actions[actions.length-1].focus();}); document.querySelectorAll('[data-chip]').forEach(n=>n.addEventListener('click',()=>post({type:'chip',value:n.dataset.chip})));document.querySelectorAll('[data-history-filter]').forEach(node=>node.addEventListener('click',()=>{historyFilter=['active','completed','archived'].includes(node.dataset.historyFilter)?node.dataset.historyFilter:'active';openTaskMenuId='';saveViewState();renderTasks();}));els.historySearch?.addEventListener('input',()=>{historySearch=els.historySearch.value;openTaskMenuId='';saveViewState();renderTasks();});els.historySearch?.addEventListener('keydown',event=>{if(event.key==='ArrowDown'){const first=historyItemNodes()[0];if(first){event.preventDefault();first.focus();}}else if(event.key==='Escape'&&historySearch){event.preventDefault();historySearch='';saveViewState();renderTasks();}});
 els.input.addEventListener('input',()=>{draftText=els.input.value;resizeComposer();slashIndex=0;saveViewState();renderSlash();updateSendState();});
 els.input.addEventListener('keydown',event=>{if(event.key==='Enter'&&!event.shiftKey&&!els.slash.classList.contains('visible')){event.preventDefault();submit();}else if(els.slash.classList.contains('visible')&&(event.key==='ArrowDown'||event.key==='ArrowUp')){event.preventDefault();slashIndex=Math.max(0,slashIndex+(event.key==='ArrowDown'?1:-1));renderSlash();}else if(els.slash.classList.contains('visible')&&event.key==='Tab'){event.preventDefault();const active=els.slash.querySelector('.active');if(active){els.input.value='/'+active.dataset.command+' ';els.slash.classList.remove('visible');}}});
 document.addEventListener('keydown',event=>{if((event.ctrlKey||event.metaKey)&&String(event.key).toLowerCase()==='f'&&!deliverableView.open){event.preventDefault();focusHistorySearch();return;}if(event.key!=='Escape')return;if(deliverableView.open){event.preventDefault();closeDeliverable(true);return;}if(openTaskMenuId){event.preventDefault();openTaskMenuId='';renderTasks();return;}if(plusMenuOpen){event.preventDefault();setPlusMenu(false);els.plus.focus();}});
 document.addEventListener('pointerdown',event=>{if(plusMenuOpen&&!els.plusMenu.contains(event.target)&&!els.plus.contains(event.target))setPlusMenu(false);});
-window.addEventListener('message',event=>{const msg=event.data||{};if(msg.type==='state')updateState(msg.state);else if(msg.type==='loading')document.getElementById('loading')?.classList.toggle('visible',Boolean(msg.value));else if(msg.type==='operation'){state.busy=Boolean(msg.busy);state.operationLabel=msg.label||'';render();}else if(msg.type==='pending'){state.pending=msg.pending;renderPending();}else if(msg.type==='historyFilter'){historyFilter=['active','completed','archived'].includes(msg.filter)?msg.filter:'active';historySearch='';historyExpanded=true;openTaskMenuId='';saveViewState();renderHistoryVisibility();renderTasks();}else if(msg.type==='clearInput'){els.input.value='';draftText='';resizeComposer();saveViewState();renderSlash();updateSendState();}else if(msg.type==='prefill'){els.input.value=msg.value||'';draftText=els.input.value;resizeComposer();saveViewState();els.input.focus();renderSlash();updateSendState();}else if(msg.type==='showHelp'){els.input.value='/';draftText='/';resizeComposer();saveViewState();els.input.focus();renderSlash();updateSendState();}else if(msg.type==='deliverableResult'){applyDeliverableResult(msg);}else if(msg.type==='deliverableError'){applyDeliverableError(msg);}else if(msg.type==='deliverableIndexResult'){applyDeliverableIndexResult(msg);}else if(msg.type==='deliverableIndexError'){applyDeliverableIndexError(msg);}else if(msg.type==='error'){state.error=msg.message;render();}});
+window.addEventListener('message',event=>{const msg=event.data||{};if(msg.type==='state')updateState(msg.state);else if(msg.type==='loading')document.getElementById('loading')?.classList.toggle('visible',Boolean(msg.value));else if(msg.type==='operation'){state.busy=Boolean(msg.busy);state.operationLabel=msg.label||'';render();}else if(msg.type==='pending'){state.pending=msg.pending;renderPending();}else if(msg.type==='historyFilter'){historyFilter=['active','completed','archived'].includes(msg.filter)?msg.filter:'active';historySearch='';historyExpanded=true;openTaskMenuId='';saveViewState();renderHistoryVisibility();renderTasks();}else if(msg.type==='clearInput'){els.input.value='';draftText='';resizeComposer();saveViewState();renderSlash();updateSendState();}else if(msg.type==='prefill'){els.input.value=msg.value||'';draftText=els.input.value;resizeComposer();saveViewState();els.input.focus();renderSlash();updateSendState();}else if(msg.type==='showHelp'){els.input.value='/';draftText='/';resizeComposer();saveViewState();els.input.focus();renderSlash();updateSendState();}else if(msg.type==='deliverableResult'){applyDeliverableResult(msg);}else if(msg.type==='deliverableError'){applyDeliverableError(msg);}else if(msg.type==='deliverableIndexResult'){applyDeliverableIndexResult(msg);}else if(msg.type==='deliverableIndexError'){applyDeliverableIndexError(msg);}else if(msg.type==='notice'){showNotice(msg.message);}else if(msg.type==='error'){state.error=msg.message;render();}});
 els.input.value=draftText;resizeComposer();renderHistoryVisibility();renderHistoryControls();updateSendState();
 post({type:'ready'});
 </script>

@@ -4,10 +4,17 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { plusMenuHtml, webviewCopyPayload } from '../dist/consoleActions.js';
+
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const source = fs.readFileSync(path.join(root, 'src', 'console.ts'), 'utf8');
 const runtimeSource = fs.readFileSync(path.join(root, 'src', 'runtime.ts'), 'utf8');
 const presentationSource = fs.readFileSync(path.join(root, 'src', 'workItemPresentation.ts'), 'utf8');
+const actionsSource = fs.readFileSync(path.join(root, 'src', 'consoleActions.ts'), 'utf8');
+// The rendered UI surface is the host file plus the shared copy module and the
+// markup it generates. Menu options and preference wording live in one place
+// now, so assertions about what the user sees must look at all three.
+const uiSource = [source, actionsSource, plusMenuHtml()].join('\n');
 
 function section(contents, start, end) {
   const startIndex = contents.indexOf(start);
@@ -23,7 +30,10 @@ test('embedded console script remains valid JavaScript', () => {
   const endIndex = source.indexOf('</script>', startIndex + marker.length);
   assert.notEqual(startIndex, -1);
   assert.notEqual(endIndex, -1);
-  assert.doesNotThrow(() => new Function(source.slice(startIndex + marker.length, endIndex)));
+  const script = source
+    .slice(startIndex + marker.length, endIndex)
+    .replace('${webviewCopyPayload()}', webviewCopyPayload());
+  assert.doesNotThrow(() => new Function(script));
 });
 
 test('console keeps the frozen setup/status/run facade contract', () => {
@@ -35,7 +45,7 @@ test('console keeps the frozen setup/status/run facade contract', () => {
 
 test('console exposes session history, composer, inline plus menu, chips, and slash commands', () => {
   for (const marker of ['Tus sesiones', 'Escribí qué necesitás…', '¿Qué querés hacer?', 'Activas', 'Finalizadas', 'Archivadas', 'id="historySearch"', 'data-chip="git"', 'data-chip="preset"', 'data-chip="context"', 'id="plusMenu"', "type:'plusAction'", 'Archivos y carpetas', "case 'setup'", "case 'cancel'", "case 'resume'", "case 'archive'", "case 'restore'", "case 'delete'"]) {
-    assert.ok(source.includes(marker), `missing console marker: ${marker}`);
+    assert.ok(uiSource.includes(marker), `missing console marker: ${marker}`);
   }
 });
 
@@ -59,20 +69,20 @@ test('composer uses stable SVG icons, focus states, and a disabled empty submit'
 
 test('primary and secondary UI use plain Spanish wording', () => {
   for (const wording of ['Todavía no hay sesiones', 'Baldr lo organiza y te muestra el avance.', 'Protección de cambios', 'Nivel de detalle', 'Equipo de Baldr', 'Ayuda adicional', 'Pedir autorización', 'Trabajar directamente', 'Sin protección']) {
-    assert.ok(source.includes(wording), `missing plain-language wording: ${wording}`);
+    assert.ok(uiSource.includes(wording), `missing plain-language wording: ${wording}`);
   }
   for (const stale of ['No items yet', 'Git worktree', 'Context7 Auto', 'Baldr execution preset', 'durable draft', 'Con Git y respaldo', 'Con Git, en esta carpeta']) {
-    assert.ok(!source.includes(stale), `stale technical wording remains: ${stale}`);
+    assert.ok(!uiSource.includes(stale), `stale technical wording remains: ${stale}`);
   }
 });
 
 test('direct work is the visible default while permission-gated and legacy modes remain available', () => {
   assert.match(source, /type SafetyMode = 'automatic' \| 'worktree' \| 'current' \| 'non-git'/);
   assert.match(source, /normalized === 'automatic' \|\| normalized === 'auto'/);
-  assert.match(source, /automatic:\s*'Pedir autorización'/);
-  assert.match(source, /worktree:\s*'Copia aislada'/);
-  assert.match(source, /current:\s*'Trabajar directamente'/);
-  assert.match(source, /'non-git':\s*'Sin protección'/);
+  assert.match(uiSource, /automatic:\s*'Pedir autorización'/);
+  assert.match(uiSource, /worktree:\s*'Copia aislada'/);
+  assert.match(uiSource, /current:\s*'Trabajar directamente'/);
+  assert.match(uiSource, /'non-git':\s*'Sin protección'/);
   assert.match(source, /text\(preference\.safety_mode, 'current'\)/);
   assert.match(source, /id: 'current', label: '\$\(shield\) Trabajar directamente'/);
 });
@@ -153,7 +163,7 @@ test('completed sessions continue as durable conversation turns with automatic e
   assert.match(source, /captureWorkspaceContext\(root\)/);
   assert.match(source, /Continuar esta conversación…/);
   assert.match(source, /Conversación \('/);
-  assert.match(source, /data-plus-action="workspace"/);
+  assert.match(uiSource, /data-plus-action="workspace"/);
   assert.match(source, /workspaceChoiceRequired/);
   assert.doesNotMatch(source, /workspaceFolders\?\.\[0\]\?\.uri\.fsPath/);
 });
@@ -179,7 +189,7 @@ test('P2 preserves workspace, supports keyboard history, and constrains comforta
 });
 
 test('real VS Code qualification is reachable without expanding the command palette contract', () => {
-  assert.match(source, /data-plus-action="qualification"/);
+  assert.match(uiSource, /data-plus-action="qualification"/);
   const handler = section(source, '  private async runQualification(', '  private async openChip(');
   const runtimeQualification = section(runtimeSource, '  async runQualification(', '  async configureContext7FromSecret(');
   assert.match(handler, /this\.runtime\.runQualification/);
@@ -531,12 +541,12 @@ test('team chip resolves actual named or inline role models and exposes role det
 
 test('plus-menu search hides unmatched rows, folds accents, groups results, and reports no matches', () => {
   assert.match(source, /\.plus-option\[hidden\][^{]*\{\s*display:\s*none;/);
-  assert.match(source, /data-plus-heading="add"/);
-  assert.match(source, /data-plus-heading="preferences"/);
-  assert.match(source, /data-plus-group="add"/);
-  assert.match(source, /data-plus-group="preferences"/);
-  assert.match(source, /id="plusEmpty" hidden/);
-  assert.match(source, /No encontramos una opción con ese nombre/);
+  assert.match(uiSource, /data-plus-heading="add"/);
+  assert.match(uiSource, /data-plus-heading="preferences"/);
+  assert.match(uiSource, /data-plus-group="add"/);
+  assert.match(uiSource, /data-plus-group="preferences"/);
+  assert.match(uiSource, /id="plusEmpty" hidden/);
+  assert.match(uiSource, /No encontramos una opción con ese nombre/);
   assert.match(source, /function normalizeSearch\(value\)\{[^}]*normalize\('NFD'\)\.replace\(/);
 
   const filter = section(source, 'function filterPlusActions()', 'function renderSlash()');

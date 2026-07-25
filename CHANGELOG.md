@@ -1,5 +1,79 @@
 # Changelog
 
+## Unreleased
+
+- Lifted the Agent Manager request handler out of its factory. The 509-line
+  `build_agent_manager_server` closure became a module-level
+  `AgentManagerHTTPServer` plus `AgentManagerRequestHandler`, with GET routes
+  declared as data and POST split into publish and lifecycle handlers. The
+  factory is now 26 lines and the handler can be inspected without starting a
+  server.
+- Fixed an audit defect found while splitting that handler: the lifecycle
+  suffix loop reused the `action` variable as its loop target, so a failed
+  enable/disable recorded the audit action as `"/disable"` instead of
+  `"lifecycle"`.
+- Added raw-HTTP characterization tests for every Agent Manager route,
+  covering probes, authentication, authorization, malformed requests and the
+  audit trail, independent of the typed client library.
+- Reduced `DurableWorkflowEngine.run` from 708 to 549 lines by extracting the
+  cancellation shortcut, start-up recovery policy, resume validation, lease
+  floor and the four terminal exception handlers, with no change to the durable
+  results. Pinned the entry contract with new tests for cancellation without a
+  run id, unknown resume targets, the lease floor and idempotency conflicts.
+- Split the 806-line `build_parser` into ten command registrars plus shared
+  option helpers, removing the triplicated agent publication options and the
+  duplicated workflow execution flags. `router/tests/test_cli_surface.py`
+  snapshots the entire CLI surface, including handler bindings and help order,
+  so the split is provably behavior-preserving.
+- Gave the VS Code console one source of truth for its "+" actions. The gear
+  quick pick offered four actions the inline composer menu did not
+  (`agents`, `profile-create`, `status`, `logs`); both surfaces now render from
+  the same catalog and cannot diverge.
+- Unified preference wording across the host and the webview. The same setting
+  was named differently depending on the surface (`Automática` in a quick pick,
+  `Ayuda automática` in a chip); the wording is now injected into the webview
+  from one module.
+- Stopped showing raw failure identifiers in the console. A stopped session
+  used to fall back to codes like `workspace_reconciliation_required`; known
+  codes now have actionable copy and unknown ones point at the technical log.
+- Interactions rejected while an operation is running now say so instead of
+  being dropped in silence, announced through a polite live region.
+- Made the "+" menu keyboard-complete: focus moves into it on open, Tab is
+  trapped inside it, and the search field precedes the options so tab order
+  matches reading order.
+- Derived the console CSP nonce from `crypto.randomUUID()` instead of
+  `Math.random()`.
+- Enforced the packaged versioned contracts at runtime instead of only in
+  tests. External agent HTTP transport messages and every `agent-execution-v1`
+  message are now validated against the schemas shipped in the wheel, failing
+  closed on unknown fields. Violation messages report location and rule only,
+  never instance values, so an external payload cannot leak a credential into
+  logs through a validation error.
+- Fixed silent credential loss in the local secrets file. The writer emitted
+  only `[context7].api_key` and discarded every other section on each write; it
+  now round-trips the whole document and rejects unsupported value types.
+- Made `qualification promotion-status` name the remaining work. Its `blocking`
+  section lists the client assertions still pending by id, in profile order,
+  with next steps, replacing hand-written counts in documentation.
+- Removed the hardcoded release version from the release workflow. The tag gate
+  and the promotion check now derive it from
+  `scripts/check_release_consistency.py --print-version`, and release
+  consistency fails if a version is pasted back in.
+- Added `dev.py typecheck`, `coverage`, and `audit`. Border and security
+  modules are type checked strictly; the rest of the core is held by a ratchet
+  in `quality-baselines.json`. Dependency advisories are scanned across all
+  Python and Node manifests.
+- Extended Dependabot from three manifests to all nine published ones.
+- Resolved the two high-severity advisories the new audit found in the VS Code
+  extension dependency tree (`fast-uri` host confusion and `brace-expansion`
+  denial of service). Both were fixed inside their existing ranges, so only the
+  lockfile changed.
+- Removed `codex_configuration.md`, a tracked session artifact that no document
+  referenced, and stopped coverage output from reaching the working tree.
+- Aligned `CONTRIBUTING.md` with the v0.20 freeze line, which had been
+  describing v0.16, and made release consistency fail when a policy document
+  title drifts from `release_policy.FEATURE_FREEZE_LINE`.
+
 ## 0.20.0 — Polyglot External Agents
 
 - Unified shutdown, cancellation and restart recovery across Router and VS

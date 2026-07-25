@@ -4,6 +4,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { webviewCopyPayload } from '../dist/consoleActions.js';
+
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const source = fs.readFileSync(path.join(root, 'src', 'console.ts'), 'utf8');
 
@@ -134,7 +136,11 @@ function embeddedScript() {
   const end = source.indexOf('</script>', start + marker.length);
   assert.notEqual(start, -1);
   assert.notEqual(end, -1);
-  return source.slice(start + marker.length, end);
+  // The host injects the shared copy payload when it builds the HTML, so the
+  // harness resolves the same interpolation to exercise the real wording.
+  return source
+    .slice(start + marker.length, end)
+    .replace('${webviewCopyPayload()}', webviewCopyPayload());
 }
 
 function createHarness(persistedState = {}) {
@@ -143,7 +149,7 @@ function createHarness(persistedState = {}) {
     'gitChip', 'gitChipLabel', 'presetChip', 'presetChipLabel', 'rolesChip',
     'rolesChipLabel', 'contextChip', 'contextChipLabel', 'attachments', 'activeContext', 'slash',
     'plusMenu', 'plusFilter', 'plusEmpty', 'loading', 'liveStatus', 'historySearch',
-    'historyPanel', 'historyToggle', 'historyStatus',
+    'historyPanel', 'historyToggle', 'historyStatus', 'notice',
   ];
   const elements = Object.fromEntries(ids.map((id) => [id, new FakeElement(id)]));
   const historyFilters = ['active', 'completed', 'archived'].map((value) => {
@@ -817,4 +823,50 @@ test('responsive CSS covers narrow panels, reduced motion and forced colors', ()
   assert.match(source, /@media \(forced-colors: active\)/);
   assert.match(source, /\.task-body\s*\{[^}]*overflow-wrap:\s*anywhere/);
   assert.match(source, /\.actions\s*\{[^}]*justify-content:\s*center/);
+});
+
+test('a rejected interaction explains itself instead of failing silently', () => {
+  const harness = createHarness();
+
+  harness.receive({
+    type: 'notice',
+    message: 'Baldr está trabajando en la operación anterior. Esperá a que termine.',
+  });
+
+  const notice = harness.elements.notice;
+  assert.equal(notice.hidden, false);
+  assert.match(notice.textContent, /Esperá a que termine/);
+  // The element is its own polite live region, so the message is announced
+  // without duplicating the main status announcements.
+  assert.match(
+    source,
+    /id="notice" role="status" aria-live="polite" hidden/,
+  );
+
+  harness.receive({ type: 'notice', message: '' });
+  assert.equal(notice.hidden, true);
+  assert.equal(notice.textContent, '');
+});
+
+test('the console uses the shared preference wording in chips', () => {
+  const harness = createHarness();
+
+  harness.receive({
+    type: 'state',
+    state: {
+      ok: true,
+      trusted: true,
+      workspaceRoot: '/repo',
+      workbench: {
+        items: [],
+        selected: null,
+        preferences: { safety_mode: 'automatic', preset: 'deep', context_mode: 'auto' },
+        profiles: {},
+      },
+    },
+  });
+
+  assert.equal(harness.elements.gitChipLabel.textContent, 'Pedir autorización');
+  assert.equal(harness.elements.presetChipLabel.textContent, 'Detallado');
+  assert.equal(harness.elements.contextChipLabel.textContent, 'Ayuda automática');
 });
