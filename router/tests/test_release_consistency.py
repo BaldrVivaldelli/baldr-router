@@ -198,3 +198,46 @@ def test_packaged_release_gate_rejects_stale_embedded_wheels(tmp_path: Path) -> 
         release_consistency.check_artifact_consistency(
             wheel, vsix, root=ROOT, version="0.20.0"
         )
+
+
+def test_release_workflow_never_hardcodes_a_version() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "check_release_consistency.py --print-version" in workflow
+    assert 'expected="v${RELEASE_VERSION}"' in workflow
+    assert not [
+        line for line in workflow.splitlines() if "v0.20.0" in line
+    ], "the release gate must derive the version from the repository"
+
+
+def test_print_version_reports_the_uniform_release(capsys) -> None:
+    assert release_consistency.main(["--print-version"]) == 0
+
+    assert capsys.readouterr().out.strip() == "0.20.0"
+
+
+def test_freeze_documents_must_state_the_current_line(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stale = tmp_path / "CONTRIBUTING.md"
+    stale.write_text(
+        "# Contributing during the v0.16 durable feature freeze\n",
+        encoding="utf-8",
+    )
+    real_read_text = Path.read_text
+
+    def _read_text(self: Path, *args: object, **kwargs: object) -> str:
+        if self == ROOT / "CONTRIBUTING.md":
+            return real_read_text(stale, *args, **kwargs)  # type: ignore[arg-type]
+        return real_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "read_text", _read_text)
+
+    with pytest.raises(
+        release_consistency.ReleaseConsistencyError,
+        match=r"CONTRIBUTING.md title must state exactly the current freeze line",
+    ):
+        release_consistency.check_source_consistency(ROOT)

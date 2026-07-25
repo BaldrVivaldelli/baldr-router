@@ -5,6 +5,7 @@ import json
 import platform
 import re
 import uuid
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -1197,6 +1198,112 @@ def _promotion_receipt_files(receipt_paths: list[str | Path]) -> list[Path]:
     return list(dict.fromkeys(files))
 
 
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if str(item)]
+
+
+def _receipt_pending(receipt: Mapping[str, Any]) -> dict[str, Any]:
+    """Name the exact work left on a receipt instead of only counting it.
+
+    A promotion blocked by "five remaining observations" is not actionable: the
+    operator cannot tell which client assertions to observe. The receipt
+    already records them per id, so promotion status must surface them.
+    """
+    checks = receipt.get("checks") or {}
+    assertions = checks.get("assertions") or {}
+    canaries = checks.get("canaries") or {}
+    provider_smoke = checks.get("provider_smoke") or {}
+    environment = checks.get("environment") or {}
+    lab = checks.get("lab") or {}
+
+    required = _string_list(assertions.get("required"))
+    missing = _string_list(assertions.get("missing"))
+    failed = _string_list(assertions.get("failed"))
+    evidence_missing = _string_list(assertions.get("evidence_missing"))
+    blocked = set(missing) | set(failed) | set(evidence_missing)
+    # Preserve the declared profile order so operators work through a stable
+    # checklist across runs.
+    ordered_pending = [item for item in required if item in blocked]
+    ordered_pending.extend(sorted(blocked - set(required)))
+    passed_with_evidence = _string_list(assertions.get("passed_with_evidence"))
+
+    return {
+        "assertions": {
+            "ok": assertions.get("ok") is True,
+            "required_count": len(required),
+            "passed_with_evidence_count": len(passed_with_evidence),
+            "pending_count": len(ordered_pending),
+            "pending": ordered_pending,
+            "missing": missing,
+            "failed": failed,
+            "evidence_missing": evidence_missing,
+            "invalid": _string_list(assertions.get("invalid")),
+        },
+        "canaries": {
+            "ok": canaries.get("ok") is True,
+            "required_tasks": canaries.get("required_tasks"),
+            "passed_with_evidence_count": canaries.get("passed_with_evidence_count"),
+            "failed_count": canaries.get("failed_count"),
+            "missing_task_ids": _string_list(canaries.get("missing_task_ids")),
+        },
+        "environment_ok": environment.get("ok") is True,
+        "lab_ok": lab.get("ok") is True,
+        "provider_smoke_ok": provider_smoke.get("passed") is True,
+    }
+
+
+def _closest_blocking_receipt(
+    evaluations: list[dict[str, Any]],
+    profile: str,
+) -> dict[str, Any] | None:
+    """Pick the receipt that best explains why a required profile is missing.
+
+    Several provisional receipts can exist for the same profile. The most
+    advanced and most recent one is the one whose remaining work is worth
+    reporting.
+    """
+    candidates = [item for item in evaluations if item.get("profile") == profile]
+    if not candidates:
+        return None
+    return max(
+        candidates,
+        key=lambda item: (
+            int(
+                ((item.get("pending") or {}).get("assertions") or {}).get(
+                    "passed_with_evidence_count"
+                )
+                or 0
+            ),
+            str(item.get("generated_at") or ""),
+        ),
+    )
+
+
+def _promotion_next_steps(pending: Mapping[str, Any]) -> list[str]:
+    steps: list[str] = []
+    if not pending.get("environment_ok"):
+        steps.append("Run qualification from the exact required client/runtime profile.")
+    if not pending.get("lab_ok"):
+        steps.append("Obtain the required consecutive clean lifecycle lab passes.")
+    if not pending.get("provider_smoke_ok"):
+        steps.append("Authenticate the promotion provider and pass a real provider smoke.")
+    assertions = pending.get("assertions") or {}
+    names = _string_list(assertions.get("pending"))
+    if names:
+        steps.append(
+            "Observe and record evidence for the remaining client assertions: "
+            + ", ".join(names)
+        )
+    canaries = pending.get("canaries") or {}
+    if not canaries.get("ok"):
+        missing_tasks = _string_list(canaries.get("missing_task_ids"))
+        detail = f": {', '.join(missing_tasks)}" if missing_tasks else ""
+        steps.append(f"Record the remaining real canary tasks with evidence{detail}")
+    return steps
+
+
 def promotion_status(
     *,
     receipt_paths: list[str | Path] | None = None,
@@ -1258,12 +1365,22 @@ def promotion_status(
             "required": required,
             "eligible": eligible,
             "errors": errors,
+            "generated_at": receipt.get("generated_at"),
+            "pending": _receipt_pending(receipt),
         }
         evaluations.append(evaluation)
         if eligible and profile not in accepted:
             accepted[profile] = evaluation
 
     missing = [profile for profile in required_profiles if profile not in accepted]
+    blocking = {
+        profile: {
+            **candidate,
+            "next_steps": _promotion_next_steps(candidate["pending"]),
+        }
+        for profile in missing
+        if (candidate := _closest_blocking_receipt(evaluations, profile)) is not None
+    }
     return {
         "ok": bool(required_profiles) and not missing,
         "release_version": expected_version,
@@ -1277,6 +1394,7 @@ def promotion_status(
         },
         "accepted_profiles": sorted(accepted),
         "missing_profiles": missing,
+        "blocking": blocking,
         "receipts": evaluations,
     }
 

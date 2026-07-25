@@ -325,6 +325,137 @@ def test_invalid_promotion_receipts_are_rejected(
     assert expected_error in result["receipts"][0]["errors"]
 
 
+def _provisional_receipt(
+    *,
+    pending: list[str],
+    passed_with_evidence: list[str],
+    generated_at: str = "2026-07-19T00:00:00+00:00",
+) -> dict:
+    required = passed_with_evidence + pending
+    receipt = {
+        "schema_version": 1,
+        "qualification_id": "qualification-provisional",
+        "baldr_version": "0.20.0",
+        "profile": "vscode-remote-wsl",
+        "status": "provisional",
+        "generated_at": generated_at,
+        "checks": {
+            "provider_smoke": {"passed": True, "providers": ["codex"]},
+            "environment": {"ok": True},
+            "lab": {"ok": True},
+            "assertions": {
+                "ok": False,
+                "required": required,
+                "passed_with_evidence": passed_with_evidence,
+                "missing": pending,
+                "failed": [],
+                "evidence_missing": [],
+                "invalid": [],
+            },
+            "canaries": {"ok": True, "required_tasks": 10, "failed_count": 0},
+        },
+    }
+    receipt["receipt_sha256"] = qualification_receipt_sha256(receipt)
+    return receipt
+
+
+def test_promotion_status_names_the_remaining_client_assertions(
+    tmp_path: Path,
+) -> None:
+    pending = [
+        "vscode.progress_accessible",
+        "vscode.polling_quiet",
+    ]
+    receipt_path = _write_receipt(
+        tmp_path / "receipt.json",
+        _provisional_receipt(
+            pending=pending,
+            passed_with_evidence=["vscode.extension_installed", "vscode.mcp_visible"],
+        ),
+    )
+
+    result = promotion_status(
+        receipt_paths=[receipt_path],
+        release_version="0.20.0",
+    )
+
+    assert result["ok"] is False
+    blocking = result["blocking"]["vscode-remote-wsl"]
+    assertions = blocking["pending"]["assertions"]
+    assert assertions["pending"] == pending
+    assert assertions["pending_count"] == 2
+    assert assertions["required_count"] == 4
+    assert assertions["passed_with_evidence_count"] == 2
+    assert any("vscode.polling_quiet" in step for step in blocking["next_steps"])
+
+
+def test_promotion_status_reports_assertions_passed_without_evidence(
+    tmp_path: Path,
+) -> None:
+    receipt = _provisional_receipt(
+        pending=[],
+        passed_with_evidence=["vscode.extension_installed"],
+    )
+    receipt["checks"]["assertions"]["evidence_missing"] = ["vscode.workspace_trust"]
+    receipt["checks"]["assertions"]["required"].append("vscode.workspace_trust")
+    receipt["receipt_sha256"] = qualification_receipt_sha256(
+        {key: value for key, value in receipt.items() if key != "receipt_sha256"}
+    )
+    receipt_path = _write_receipt(tmp_path / "receipt.json", receipt)
+
+    result = promotion_status(
+        receipt_paths=[receipt_path],
+        release_version="0.20.0",
+    )
+
+    pending = result["blocking"]["vscode-remote-wsl"]["pending"]["assertions"]
+    assert pending["pending"] == ["vscode.workspace_trust"]
+    assert pending["evidence_missing"] == ["vscode.workspace_trust"]
+
+
+def test_promotion_status_blocking_prefers_the_most_advanced_receipt(
+    tmp_path: Path,
+) -> None:
+    _write_receipt(
+        tmp_path / "early" / "receipt.json",
+        _provisional_receipt(
+            pending=["vscode.polling_quiet", "vscode.progress_accessible"],
+            passed_with_evidence=["vscode.extension_installed"],
+            generated_at="2026-07-18T00:00:00+00:00",
+        ),
+    )
+    _write_receipt(
+        tmp_path / "late" / "receipt.json",
+        _provisional_receipt(
+            pending=["vscode.polling_quiet"],
+            passed_with_evidence=[
+                "vscode.extension_installed",
+                "vscode.progress_accessible",
+            ],
+            generated_at="2026-07-19T00:00:00+00:00",
+        ),
+    )
+
+    result = promotion_status(receipt_paths=[tmp_path], release_version="0.20.0")
+
+    blocking = result["blocking"]["vscode-remote-wsl"]["pending"]["assertions"]
+    assert blocking["pending"] == ["vscode.polling_quiet"]
+
+
+def test_promotion_status_has_no_blocking_detail_when_qualified(
+    tmp_path: Path,
+) -> None:
+    receipt_path = _write_receipt(tmp_path / "receipt.json", _promotion_receipt())
+
+    result = promotion_status(
+        receipt_paths=[receipt_path],
+        release_version="0.20.0",
+    )
+
+    assert result["ok"] is True
+    assert result["blocking"] == {}
+
+
 def test_tampered_promotion_receipt_is_rejected(tmp_path: Path) -> None:
     receipt = _promotion_receipt()
     receipt["status"] = "provisional"
