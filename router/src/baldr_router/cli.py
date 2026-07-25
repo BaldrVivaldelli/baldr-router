@@ -27,6 +27,7 @@ from .agent_manager_policy import policy_template
 from .agent_registry import LocalAgentRegistryAdmin, local_agent_registry_path
 from .agent_sources import (
     AgentManagerSource,
+    AgentSource,
     AgentSourceContext,
     KiroAgentSource,
     ManifestAgentSource,
@@ -343,10 +344,10 @@ def cmd_agent_catalog(args: argparse.Namespace) -> int:
     return 0 if result.get("ok") else 2
 
 
-def _agent_sources_from_args(args: argparse.Namespace):
+def _agent_sources_from_args(args: argparse.Namespace) -> list[AgentSource]:
     cfg = load_config()
     selected = str(args.source or "kiro").strip().lower()
-    sources = []
+    sources: list[AgentSource] = []
     if selected in {"kiro", "all"}:
         sources.append(KiroAgentSource())
     if selected in {"manager", "all"}:

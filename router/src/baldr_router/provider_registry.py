@@ -23,7 +23,7 @@ def _normalize_provider_name(value: str) -> str:
 
 class CodexProvider:
     name = "codex"
-    aliases = ("openai-codex",)
+    aliases: tuple[str, ...] = ("openai-codex",)
     capabilities = ProviderCapabilities(
         supports_read_only=True,
         supports_workspace_write=True,
@@ -70,7 +70,7 @@ class CodexProvider:
 
 class KiroCliProvider:
     name = "kiro-cli"
-    aliases = ("kiro", "kiro_cli")
+    aliases: tuple[str, ...] = ("kiro", "kiro_cli")
     capabilities = ProviderCapabilities(
         supports_read_only=True,
         supports_workspace_write=True,
@@ -284,13 +284,13 @@ def provider_isolation_status(
         if normalized_agent_transport == "local-process":
             normalized_sandbox = str(sandbox or "").strip().lower()
             expected_sandbox = "workspace-write" if can_write else "read-only"
-            reasons = (
+            local_reasons = (
                 []
                 if normalized_sandbox == expected_sandbox
                 else ["runner-sandbox-mismatch"]
             )
             return {
-                "ok": not reasons,
+                "ok": not local_reasons,
                 "provider": provider,
                 "agent_ref": agent_ref,
                 "agent_transport": normalized_agent_transport,
@@ -300,7 +300,7 @@ def provider_isolation_status(
                     if can_write
                     else "local-runner-read-only-snapshot"
                 ),
-                "reasons": reasons,
+                "reasons": local_reasons,
             }
         if normalized_agent_transport == "http-json" and not can_write:
             return {
@@ -337,22 +337,22 @@ def provider_isolation_status(
     normalized_provider = _normalize_provider_name(adapter.name)
     normalized_runner = str(runner or "").strip().lower()
     normalized_sandbox = str(sandbox or "").strip().lower()
-    reasons: list[str] = []
+    boundary_reasons: list[str] = []
     if enforcement != "enforced":
-        reasons.append(f"{enforcement or 'unknown'}-provider-boundary")
+        boundary_reasons.append(f"{enforcement or 'unknown'}-provider-boundary")
     if normalized_sandbox not in {"read-only", "workspace-write"}:
-        reasons.append("unrestricted-sandbox")
+        boundary_reasons.append("unrestricted-sandbox")
     # The legacy SDK fallback can start or resume a thread without proving its
     # cwd. Exec-json and app-server both bind cwd+sandbox for every invocation.
     if normalized_provider == "codex" and normalized_runner == "sdk":
-        reasons.append("sdk-cwd-not-enforced")
+        boundary_reasons.append("sdk-cwd-not-enforced")
     return {
-        "ok": not reasons,
+        "ok": not boundary_reasons,
         "provider": adapter.name,
         "runner": normalized_runner,
         "sandbox": normalized_sandbox,
         "enforcement": enforcement,
-        "reasons": reasons,
+        "reasons": boundary_reasons,
     }
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 import json
 import re
 import uuid
@@ -1685,7 +1686,8 @@ class WorkItemService:
         if result.get("ok") is False and status == "draft":
             status = "failed"
         terminal = status in TERMINAL_ITEM_STATUSES
-        error = result.get("error") if isinstance(result.get("error"), dict) else {}
+        raw_error = result.get("error")
+        error = raw_error if isinstance(raw_error, dict) else {}
         now = utc_now_iso()
         with self.store.transaction(immediate=True) as connection:
             if run_id:
@@ -1723,7 +1725,7 @@ class WorkItemService:
         *,
         client_name: str = "generic-mcp",
         dry_run: bool = False,
-        context7_libraries: list[str] | None = None,
+        context7_libraries: builtins.list[str] | None = None,
     ) -> dict[str, Any]:
         current = self.get(item_id, include_timeline=False)
         if not dry_run and (current.get("resolution") or {}).get("action"):

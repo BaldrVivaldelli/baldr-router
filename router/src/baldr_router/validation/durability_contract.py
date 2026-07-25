@@ -311,7 +311,10 @@ def durable_state_contract(scratch: Path) -> dict[str, Any]:
     except LeaseFenceError:
         stale_lease_rejected = True
     contender.transition_run("lease-fencing", "running", lease=current_lease)
-    fresh_lease_accepted = contender.get_run("lease-fencing")["status"] == "running"
+    current_run = contender.get_run("lease-fencing")
+    fresh_lease_accepted = (
+        current_run is not None and current_run["status"] == "running"
+    )
     fencing_epoch_advanced = current_lease.epoch == stale_lease.epoch + 1
 
     _, first_created = _create_run(

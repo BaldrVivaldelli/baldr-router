@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import time
 from contextlib import contextmanager
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -188,12 +189,14 @@ def _git_file_change(
         return None
     repository = _git_root(root)
     if repository is None:
-        additions = _text_line_count(target) if claimed_kind == "added" else None
+        observed_additions = (
+            _text_line_count(target) if claimed_kind == "added" else None
+        )
         return {
             "path": display_path,
             "kind": claimed_kind,
-            "additions": additions,
-            "deletions": 0 if additions is not None else None,
+            "additions": observed_additions,
+            "deletions": 0 if observed_additions is not None else None,
             "evidence": "observed" if target.exists() else "reported",
         }
     try:
@@ -315,18 +318,18 @@ def _shadow_file_changes(
             )
     result: list[dict[str, Any]] = []
     for path, claimed_kind in _reported_change_candidates(reported_file_changes):
-        kind = actual.get(path)
-        if kind is None:
+        actual_kind = actual.get(path)
+        if actual_kind is None:
             continue
         additions = (
             _text_line_count(execution.execution_root / path)
-            if kind == "added"
+            if actual_kind == "added"
             else None
         )
         result.append(
             {
                 "path": path,
-                "kind": kind or claimed_kind,
+                "kind": actual_kind or claimed_kind,
                 "additions": additions,
                 "deletions": 0 if additions is not None else None,
                 "evidence": "observed",
@@ -356,7 +359,8 @@ def _publication_lock(original_root: Path, *, timeout_seconds: float = 30.0):
             while not acquired:
                 try:
                     os.lseek(descriptor, 0, os.SEEK_SET)
-                    msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+                    locking = getattr(msvcrt, "locking")
+                    locking(descriptor, getattr(msvcrt, "LK_NBLCK"), 1)
                     acquired = True
                 except OSError:
                     if time.monotonic() >= deadline:
@@ -385,7 +389,8 @@ def _publication_lock(original_root: Path, *, timeout_seconds: float = 30.0):
                 import msvcrt
 
                 os.lseek(descriptor, 0, os.SEEK_SET)
-                msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+                locking = getattr(msvcrt, "locking")
+                locking(descriptor, getattr(msvcrt, "LK_UNLCK"), 1)
             else:
                 import fcntl
 
@@ -694,9 +699,9 @@ class GitWorkspaceManager:
         clean = not status
         if requested not in {"auto", "worktree", "in-place"}:
             requested = "auto"
-        policy = (dirty_policy or "reject").strip().lower()
-        if policy not in {"reject", "in-place", "explicit-only"}:
-            policy = "reject"
+        dirty_workspace_policy = (dirty_policy or "reject").strip().lower()
+        if dirty_workspace_policy not in {"reject", "in-place", "explicit-only"}:
+            dirty_workspace_policy = "reject"
 
         if requested == "worktree" and not base_commit:
             raise GitWorkspaceError(
@@ -714,7 +719,7 @@ class GitWorkspaceManager:
             use_worktree = True
         elif base_commit and clean:
             use_worktree = True
-        elif not clean and policy == "in-place":
+        elif not clean and dirty_workspace_policy == "in-place":
             use_worktree = False
         elif not clean:
             raise GitWorkspaceError(
@@ -723,7 +728,7 @@ class GitWorkspaceManager:
             )
         else:
             # Unborn but clean repository. Git cannot create a detached worktree.
-            if policy == "explicit-only":
+            if dirty_workspace_policy == "explicit-only":
                 raise GitWorkspaceError(
                     "This repository has no commits. Explicitly choose write_isolation='in-place'."
                 )
@@ -744,7 +749,10 @@ class GitWorkspaceManager:
                 base_commit=base_commit,
                 clean_at_start=True,
                 repository_fingerprint=str(identity.get("repository_fingerprint") or ""),
-                metadata={"requested_mode": requested, "dirty_policy": policy},
+                metadata={
+                    "requested_mode": requested,
+                    "dirty_policy": dirty_workspace_policy,
+                },
             )
         else:
             # Direct modes retain the exact folder selected and trusted by the
@@ -780,7 +788,7 @@ class GitWorkspaceManager:
                 ),
                 metadata={
                     "requested_mode": requested,
-                    "dirty_policy": policy,
+                    "dirty_policy": dirty_workspace_policy,
                     "dirty_at_start": not clean,
                     "git_root": str(repository_root),
                     "pre_existing_changes": pre_existing_changes,
@@ -1256,6 +1264,9 @@ class GitWorkspaceManager:
                 checkpoint_id=execution.checkpoint_id,
             )
             if publication is None:
+                raw_delta = plan["delta"]
+                plan_delta = raw_delta if isinstance(raw_delta, dict) else {}
+                changed_paths = plan_delta.get("changed_paths")
                 plan_artifact = self.store.store_artifact(
                     run_id=execution.run_id,
                     kind="shadow-publication-plan-private",
@@ -1272,8 +1283,8 @@ class GitWorkspaceManager:
                     status="planned",
                     metadata={
                         "mode": "shadow",
-                        "operation_count": len(
-                            (plan.get("delta") or {}).get("changed_paths") or []
+                        "operation_count": (
+                            len(changed_paths) if isinstance(changed_paths, list) else 0
                         ),
                     },
                     lease=lease,
@@ -1295,7 +1306,7 @@ class GitWorkspaceManager:
             def observe_publication(
                 event: str,
                 ordinal: int,
-                operation: dict[str, Any],
+                operation: Mapping[str, Any],
             ) -> None:
                 current_publication = self.store.get_publication(publication_id)
                 if current_publication is None:
@@ -1514,45 +1525,50 @@ class GitWorkspaceManager:
                         or execution.execution_root.parent
                     )
                 )
-                allowed = ["inspect_shadow"]
+                recovery_actions = ["inspect_shadow"]
                 if (
                     (shadow_root / "control" / "ownership.json").is_file()
                     and (shadow_root / "control" / "state.json").is_file()
                 ):
-                    allowed.append("discard_shadow")
-                allowed.append("mark_failed")
+                    recovery_actions.append("discard_shadow")
+                recovery_actions.append("mark_failed")
                 return {
                     **self.inspect(execution),
-                    "allowed_actions": allowed,
+                    "allowed_actions": recovery_actions,
                     "error_code": exc.code,
                     "reason": str(exc),
                 }
             backend_actions = set(details.pop("actions", []) or [])
-            allowed = ["inspect_shadow"]
+            shadow_actions = ["inspect_shadow"]
             if "continue" in backend_actions:
-                allowed.extend(["continue_from_shadow", "resume_from_checkpoint"])
+                shadow_actions.extend(
+                    ["continue_from_shadow", "resume_from_checkpoint"]
+                )
             if "apply" in backend_actions:
-                allowed.append("apply_shadow_changes")
+                shadow_actions.append("apply_shadow_changes")
             if "discard" in backend_actions:
-                allowed.append("discard_shadow")
-            allowed.append("mark_failed")
+                shadow_actions.append("discard_shadow")
+            shadow_actions.append("mark_failed")
             return {
                 **details,
                 "mode": "shadow",
                 "recoverable": bool(details.get("checkpoint_recoverable")),
-                "allowed_actions": list(dict.fromkeys(allowed)),
+                "allowed_actions": list(dict.fromkeys(shadow_actions)),
             }
         inspection = self.inspect(execution)
-        allowed: list[str] = ["mark_failed"]
+        workspace_actions: list[str] = ["mark_failed"]
         if execution.mode == "worktree":
             if inspection.get("execution_head_matches") or execution.checkpoint_commit:
-                allowed.append("resume_from_checkpoint")
+                workspace_actions.append("resume_from_checkpoint")
             if inspection.get("patch_already_applied") or inspection.get("execution_head_matches"):
-                allowed.append("accept_existing_changes")
-            allowed.append("discard_worktree")
+                workspace_actions.append("accept_existing_changes")
+            workspace_actions.append("discard_worktree")
         else:
-            allowed.extend(["accept_existing_changes", "mark_failed"])
-        return {**inspection, "allowed_actions": list(dict.fromkeys(allowed))}
+            workspace_actions.extend(["accept_existing_changes", "mark_failed"])
+        return {
+            **inspection,
+            "allowed_actions": list(dict.fromkeys(workspace_actions)),
+        }
 
     def restore_checkpoint(
         self,

@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from baldr_router.durability import shadow_workspace as shadow_workspace_module
+from baldr_router.durability import shadow_workspace_models
 from baldr_router.durability.shadow_workspace import (
     ShadowConflictError,
     ShadowPolicy,
@@ -19,6 +20,22 @@ from baldr_router.durability.shadow_workspace import (
     ShadowWorkspaceManager,
     scan_workspace,
 )
+
+
+def test_public_shadow_contracts_are_owned_by_the_models_module() -> None:
+    assert shadow_workspace_module.ShadowPolicy is shadow_workspace_models.ShadowPolicy
+    assert (
+        shadow_workspace_module.ShadowExecution
+        is shadow_workspace_models.ShadowExecution
+    )
+    assert (
+        shadow_workspace_module.ShadowWorkspaceError
+        is shadow_workspace_models.ShadowWorkspaceError
+    )
+    assert (
+        shadow_workspace_module.manifest_delta
+        is shadow_workspace_models.manifest_delta
+    )
 
 
 def _manager(tmp_path: Path, **policy: object) -> ShadowWorkspaceManager:

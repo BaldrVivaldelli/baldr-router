@@ -199,7 +199,7 @@ def diagnose_agent_manifest(
             )
         )
 
-    lifecycle = {"last_execution": None, "last_success": None}
+    lifecycle: dict[str, Any] = {"last_execution": None, "last_success": None}
     if store is not None:
         try:
             lifecycle = store.agent_execution_status(str(manifest.reference))

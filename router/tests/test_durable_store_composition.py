@@ -18,11 +18,21 @@ from baldr_router.durability.store_core import (
     LeaseToken,
     PublicationConflict,
 )
+from baldr_router.durability.store_artifacts import EventArtifactMixin
+from baldr_router.durability.store_execution import ExecutionStateMixin
 from baldr_router.durability.store_maintenance import MaintenanceMixin
 from baldr_router.durability.store_publications import WorkspacePublicationMixin
+from baldr_router.durability.store_runs import RunLifecycleMixin
 from baldr_router.durability.store_snapshots import SnapshotMixin
 
-AGGREGATES = (WorkspacePublicationMixin, MaintenanceMixin, SnapshotMixin)
+AGGREGATES = (
+    EventArtifactMixin,
+    RunLifecycleMixin,
+    ExecutionStateMixin,
+    WorkspacePublicationMixin,
+    MaintenanceMixin,
+    SnapshotMixin,
+)
 
 
 def _own_methods(cls: type) -> set[str]:
@@ -36,7 +46,9 @@ def _own_methods(cls: type) -> set[str]:
 def test_every_aggregate_method_stays_on_the_public_store() -> None:
     for aggregate in AGGREGATES:
         for name in _own_methods(aggregate):
-            assert hasattr(DurableStore, name), f"{aggregate.__name__}.{name} is unreachable"
+            assert hasattr(DurableStore, name), (
+                f"{aggregate.__name__}.{name} is unreachable"
+            )
 
 
 def test_aggregates_do_not_shadow_each_other_or_the_core() -> None:
@@ -44,7 +56,9 @@ def test_aggregates_do_not_shadow_each_other_or_the_core() -> None:
     for owner in (DurableStore, *AGGREGATES):
         for name in _own_methods(owner):
             previous = seen.get(name)
-            assert previous is None, f"{name} is defined by both {previous} and {owner.__name__}"
+            assert previous is None, (
+                f"{name} is defined by both {previous} and {owner.__name__}"
+            )
             seen[name] = owner.__name__
 
 
@@ -71,7 +85,13 @@ def test_store_module_still_re_exports_its_public_names() -> None:
         ("PublicationConflict", PublicationConflict),
     ):
         assert getattr(store_module, name) is expected
-    for name in ("database_path", "artifacts_root", "utc_now", "utc_now_iso", "get_store"):
+    for name in (
+        "database_path",
+        "artifacts_root",
+        "utc_now",
+        "utc_now_iso",
+        "get_store",
+    ):
         assert callable(getattr(store_module, name))
 
 
@@ -79,7 +99,7 @@ def test_the_store_class_body_is_no_longer_oversized() -> None:
     """Keeps the split from silently regressing back into one class."""
     lines = len(inspect.getsource(DurableStore).splitlines())
 
-    assert lines < 2400, f"DurableStore grew back to {lines} lines"
+    assert lines < 400, f"DurableStore grew back to {lines} lines"
 
 
 def test_aggregate_mixins_carry_no_runtime_base() -> None:

@@ -201,8 +201,8 @@ def _external_profile(
     *, role: str, plan: Mapping[str, Any], item: Mapping[str, Any]
 ) -> dict[str, Any]:
     raw_profiles = plan.get("profiles")
-    fallback = (
-        copy.deepcopy(raw_profiles[0])
+    fallback: dict[str, Any] = (
+        dict(copy.deepcopy(raw_profiles[0]))
         if isinstance(raw_profiles, list)
         and raw_profiles
         and isinstance(raw_profiles[0], Mapping)

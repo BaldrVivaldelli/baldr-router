@@ -332,7 +332,9 @@ class AgentManagerStore:
                     detail_code[:96],
                 ),
             )
-            return int(cursor.lastrowid)
+            if cursor.lastrowid is None:
+                raise RuntimeError("Agent Manager audit insert returned no sequence.")
+            return cursor.lastrowid
 
     def audit_events(
         self,
@@ -488,8 +490,11 @@ class AgentManagerRequestHandler(BaseHTTPRequestHandler):
         reference: AgentRef | None = None,
         tenant: str = "",
     ) -> int:
-        if tenant or reference is not None:
-            audit_tenants = (tenant or reference.namespace,)
+        audit_tenants: tuple[str, ...]
+        if tenant:
+            audit_tenants = (tenant,)
+        elif reference is not None:
+            audit_tenants = (reference.namespace,)
         elif principal is not None and not principal.unrestricted_tenants:
             # A catalog/health/metrics decision can span every tenant in a
             # principal's scope. Emit one tenant-addressable event per

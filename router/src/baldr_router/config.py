@@ -448,20 +448,22 @@ def load_config(path: Path | None = None) -> AppConfig:
     if isinstance(data.get("execution_profiles"), dict):
         for name, values in data["execution_profiles"].items():
             if isinstance(values, dict):
-                default = cfg.execution_profiles.get(name, ExecutionProfileConfig())
-                cfg.execution_profiles[name] = _merge_profile(default, values)
+                profile_default = cfg.execution_profiles.get(
+                    name, ExecutionProfileConfig()
+                )
+                cfg.execution_profiles[name] = _merge_profile(profile_default, values)
 
     if isinstance(data.get("roles"), dict):
         for name, values in data["roles"].items():
             if isinstance(values, dict):
-                default = cfg.roles.get(name, RoleConfig())
-                cfg.roles[name] = _merge_role(default, values)
+                role_default = cfg.roles.get(name, RoleConfig())
+                cfg.roles[name] = _merge_role(role_default, values)
 
     if isinstance(data.get("workflows"), dict):
         for name, values in data["workflows"].items():
             if isinstance(values, dict):
-                default = cfg.workflows.get(name, WorkflowConfig())
-                cfg.workflows[name] = _merge_workflow(default, values)
+                workflow_default = cfg.workflows.get(name, WorkflowConfig())
+                cfg.workflows[name] = _merge_workflow(workflow_default, values)
     return cfg
 
 

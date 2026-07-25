@@ -577,6 +577,11 @@ def _automatic_assertion_evidence(
         ]
 
     cancellation = facts.get("extension_host_cancellation") or {}
+    process_tree_observed = (
+        cancellation.get("process_tree_observed")
+        if isinstance(cancellation, dict)
+        else None
+    )
     if (
         "vscode" in client.lower()
         and isinstance(cancellation, dict)
@@ -587,8 +592,8 @@ def _automatic_assertion_evidence(
         and cancellation.get("worker_stopped") is True
         and type(cancellation.get("orphan_processes")) is int
         and cancellation.get("orphan_processes") == 0
-        and type(cancellation.get("process_tree_observed")) is int
-        and int(cancellation.get("process_tree_observed")) >= 2
+        and isinstance(process_tree_observed, int)
+        and process_tree_observed >= 2
         and str(cancellation.get("run_id") or "").startswith("workflow-")
         and str(cancellation.get("evidence_id") or "").startswith("br-workflow-")
         and "cancellation.no_orphans" in automatic

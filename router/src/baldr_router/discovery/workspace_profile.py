@@ -213,13 +213,12 @@ def _parse_pyproject(path: Path, max_dependencies: int) -> dict[str, Any]:
         data = tomllib.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return {"kind": "python", "parse_error": True}
-    project = data.get("project") if isinstance(data.get("project"), dict) else {}
-    poetry = (
-        data.get("tool", {}).get("poetry", {})
-        if isinstance(data.get("tool"), dict)
-        and isinstance(data.get("tool", {}).get("poetry"), dict)
-        else {}
-    )
+    raw_project = data.get("project")
+    project = raw_project if isinstance(raw_project, dict) else {}
+    raw_tool = data.get("tool")
+    tool = raw_tool if isinstance(raw_tool, dict) else {}
+    raw_poetry = tool.get("poetry")
+    poetry = raw_poetry if isinstance(raw_poetry, dict) else {}
     dependencies: list[str] = []
     raw_dependencies = project.get("dependencies")
     if isinstance(raw_dependencies, list):
@@ -230,8 +229,10 @@ def _parse_pyproject(path: Path, max_dependencies: int) -> dict[str, Any]:
     poetry_dependencies = poetry.get("dependencies")
     if isinstance(poetry_dependencies, dict):
         dependencies.extend(str(name) for name in poetry_dependencies if name != "python")
-    scripts = project.get("scripts") if isinstance(project.get("scripts"), dict) else {}
-    tool = data.get("tool") if isinstance(data.get("tool"), dict) else {}
+    raw_scripts = project.get("scripts")
+    scripts = raw_scripts if isinstance(raw_scripts, dict) else {}
+    raw_build_system = data.get("build-system")
+    build_system = raw_build_system if isinstance(raw_build_system, dict) else {}
     return {
         "kind": "python",
         "name": project.get("name") or poetry.get("name"),
@@ -239,11 +240,7 @@ def _parse_pyproject(path: Path, max_dependencies: int) -> dict[str, Any]:
         "scripts": sorted(str(k) for k in scripts),
         "dependencies": sorted(set(dependencies))[:max_dependencies],
         "tools": sorted(str(name) for name in tool.keys()),
-        "build_backend": (
-            data.get("build-system", {}).get("build-backend")
-            if isinstance(data.get("build-system"), dict)
-            else None
-        ),
+        "build_backend": build_system.get("build-backend"),
     }
 
 
@@ -252,13 +249,15 @@ def _parse_cargo(path: Path, max_dependencies: int) -> dict[str, Any]:
         data = tomllib.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return {"kind": "rust", "parse_error": True}
-    package = data.get("package") if isinstance(data.get("package"), dict) else {}
+    raw_package = data.get("package")
+    package = raw_package if isinstance(raw_package, dict) else {}
     deps: list[str] = []
     for key in ("dependencies", "dev-dependencies", "build-dependencies"):
         value = data.get(key)
         if isinstance(value, dict):
             deps.extend(str(name) for name in value)
-    workspace = data.get("workspace") if isinstance(data.get("workspace"), dict) else {}
+    raw_workspace = data.get("workspace")
+    workspace = raw_workspace if isinstance(raw_workspace, dict) else {}
     return {
         "kind": "rust",
         "name": package.get("name"),

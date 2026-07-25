@@ -442,7 +442,13 @@ def prepare_context7_bundle(
             "reason": "Context7 API key is missing.",
         }
 
-    max_libraries = max(0, int(settings["max_libraries"]))
+    raw_max_libraries = settings["max_libraries"]
+    max_libraries = max(
+        0,
+        raw_max_libraries
+        if isinstance(raw_max_libraries, int)
+        else int(str(raw_max_libraries)),
+    )
     selected = libraries or detect_workspace_libraries(
         workspace_root, task_text, limit=max_libraries
     )
@@ -456,7 +462,11 @@ def prepare_context7_bundle(
 
     results: list[dict[str, Any]] = []
     docs_parts: list[str] = []
-    remaining = max(0, int(settings["max_chars"]))
+    raw_max_chars = settings["max_chars"]
+    remaining = max(
+        0,
+        raw_max_chars if isinstance(raw_max_chars, int) else int(str(raw_max_chars)),
+    )
     for lib in selected:
         if remaining <= 500:
             break

@@ -47,7 +47,7 @@ def run_lab_matrix(
     environment = environment_probe()
     runs: list[dict[str, Any]] = []
     for index in range(repeats):
-        result = run_lifecycle_verification(
+        lifecycle_result = run_lifecycle_verification(
             mode=mode,
             workspace_root=workspace_root,
             include_provider_smoke=include_provider_smoke,
@@ -57,13 +57,13 @@ def run_lab_matrix(
         runs.append(
             {
                 "iteration": index + 1,
-                "ok": result.get("ok"),
-                "run_id": result.get("run_id"),
-                "duration_ms": result.get("duration_ms"),
-                "passed": result.get("passed"),
-                "skipped": result.get("skipped"),
-                "failed": result.get("failed"),
-                "scenarios": result.get("scenarios"),
+                "ok": lifecycle_result.get("ok"),
+                "run_id": lifecycle_result.get("run_id"),
+                "duration_ms": lifecycle_result.get("duration_ms"),
+                "passed": lifecycle_result.get("passed"),
+                "skipped": lifecycle_result.get("skipped"),
+                "failed": lifecycle_result.get("failed"),
+                "scenarios": lifecycle_result.get("scenarios"),
             }
         )
     consecutive_passes = 0
@@ -72,7 +72,7 @@ def run_lab_matrix(
             consecutive_passes += 1
         else:
             consecutive_passes = 0
-    result: dict[str, Any] = {
+    matrix_result: dict[str, Any] = {
         "ok": all(item.get("ok") is True for item in runs),
         "schema_version": 1,
         "series_id": series_id,
@@ -87,17 +87,17 @@ def run_lab_matrix(
         "environment_fingerprint": environment.get("fingerprint"),
         "runs": runs,
     }
-    result["evidence"] = create_evidence_bundle(
+    matrix_result["evidence"] = create_evidence_bundle(
         kind="lab",
         environment=environment,
-        lifecycle=result,
+        lifecycle=matrix_result,
         metadata={
-            "profile": result["profile"],
+            "profile": matrix_result["profile"],
             "repeat": repeats,
-            "acceptance_met": result["acceptance_met"],
+            "acceptance_met": matrix_result["acceptance_met"],
         },
     )
-    return result
+    return matrix_result
 
 
 def load_matrix_definition(path: str | Path) -> dict[str, Any]:

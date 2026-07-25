@@ -917,13 +917,13 @@ def _stage_projection(stage_id: str, steps: list[dict[str, Any]]) -> dict[str, A
                 participant.get("provider"),
                 participant.get("model_or_agent"),
             )
-            current = participants_by_identity.get(identity)
-            if current is None:
+            accumulated = participants_by_identity.get(identity)
+            if accumulated is None:
                 participants_by_identity[identity] = participant
             else:
-                current["state"] = participant.get("state")
-                current["attempt_count"] = _integer(
-                    _integer(current.get("attempt_count"))
+                accumulated["state"] = participant.get("state")
+                accumulated["attempt_count"] = _integer(
+                    _integer(accumulated.get("attempt_count"))
                     + _integer(participant.get("attempt_count"))
                 )
     return {
@@ -1345,7 +1345,7 @@ def _attention(
         "planning": "La planificación",
         "execution": "La etapa de cambios",
         "review": "La revisión",
-    }.get(active_stage)
+    }.get(active_stage or "")
     title = "Necesitamos que elijas cómo continuar"
     if kind == "reconciliation" and error_code == "write_authorization_required":
         kind = "authorization"
@@ -1750,7 +1750,11 @@ def project_work_item_progress(
         None,
     )
     current_stage = _stage_for_step(current_step) if current_step else None
-    if run_status == "recovering" and current_stage is not None:
+    if (
+        run_status == "recovering"
+        and current_stage is not None
+        and current_step is not None
+    ):
         # An unknown/interrupted attempt is being recovered, not reviewed for
         # corrections. Keep the durable phase association while presenting the
         # current round as active until recovery produces a new terminal fact.

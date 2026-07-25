@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import copy
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from .config import RoleConfig, load_config
 from .context7 import prepare_context7_bundle
@@ -15,7 +15,9 @@ DIRECT_TASK_WORKFLOW = "direct-task"
 DIRECT_REVIEW_WORKFLOW = "direct-review"
 
 
-def _workspace(workspace_root: str, *, access: str) -> Path:
+def _workspace(
+    workspace_root: str, *, access: Literal["read", "write"]
+) -> Path:
     return require_workspace(workspace_root, access=access)
 
 
