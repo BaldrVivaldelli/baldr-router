@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Finished decomposing the durable engine's oversized methods.
+  `_apply_reconciliation` went from 434 lines to a ~60-line decision path, with
+  the write-authorization gate, the allowed-action description, the rejection of
+  unsafe actions and each reconciliation action in its own method.
+  `_execute_phase` went from 354 to 278 by extracting step re-entry, participant
+  preparation, parallel and serial dispatch, and the failure-recording sequence
+  that three paths repeated.
 - Split `durability/store.py` from 3.619 lines into the core plus three
   aggregate mixins: `store_publications.py` (durable Git publication state),
   `store_maintenance.py` (recovery bookkeeping, GC and SQLite upkeep) and

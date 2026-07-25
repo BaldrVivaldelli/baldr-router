@@ -13,7 +13,7 @@
       "src/baldr_router/release_policy.py",
       "src/baldr_router/secrets.py"
     ],
-    "max_errors": 53
+    "max_errors": 50
   },
   "coverage": {
     "comment": "Measured router branch coverage is 77%. Raise this floor as it improves.",

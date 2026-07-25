@@ -2069,6 +2069,245 @@ class DurableWorkflowEngine:
         )
         return {"continue": True}
 
+    def _reconcile_inspect(
+        self,
+        *,
+        run: dict[str, Any],
+        run_id: str,
+        details: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Report the parked state without changing it."""
+        result = self._result_from_snapshot(self.store.snapshot_run(run_id))
+        result.update(
+            {
+                "ok": False,
+                "status": "awaiting_reconciliation",
+                "reason": run.get("error_reason"),
+                "reconciliation": {
+                    **(run.get("reconciliation") or {}),
+                    **details,
+                    "inspected_at": utc_now_iso(),
+                },
+            }
+        )
+        return {"continue": False, "result": result}
+
+    def _reconcile_mark_failed(
+        self,
+        run_id: str,
+        *,
+        action: str,
+        lease: LeaseToken,
+    ) -> dict[str, Any]:
+        """Close an ambiguous write workflow as failed at operator request."""
+        self.store.transition_run(
+            run_id,
+            "failed",
+            event_type="workflow.reconciliation_marked_failed",
+            error_code="operator_marked_failed",
+            error_reason="The operator marked an ambiguous write workflow as failed.",
+            reconciliation={"resolved_by": action},
+            lease=lease,
+        )
+        return {
+            "continue": False,
+            "result": self._result_from_snapshot(self.store.snapshot_run(run_id)),
+        }
+
+    def _reconcile_discard_shadow(
+        self,
+        run_id: str,
+        *,
+        action: str,
+        execution: Any,
+        lease: LeaseToken,
+    ) -> dict[str, Any]:
+        """Destroy the protected shadow workspace and fail the run."""
+        if execution is None or execution.mode != "shadow":
+            raise GitWorkspaceError(
+                "No shadow workspace exists for this reconciliation.",
+                code="shadow_workspace_missing",
+            )
+        self.workspace_manager.discard_workspace(execution, lease=lease)
+        self.store.transition_run(
+            run_id,
+            "failed",
+            event_type="workflow.shadow_discarded",
+            error_code="operator_discarded_shadow",
+            error_reason="The operator discarded the protected shadow workspace.",
+            reconciliation={"resolved_by": action, "resolved_at": utc_now_iso()},
+            lease=lease,
+        )
+        return {
+            "continue": False,
+            "result": self._result_from_snapshot(self.store.snapshot_run(run_id)),
+        }
+
+    def _reconcile_accept_existing(
+        self,
+        *,
+        run_id: str,
+        unknown_steps: list[dict[str, Any]],
+        execution: Any,
+        lease: LeaseToken,
+    ) -> None:
+        """Accept the workspace as it stands for every uncertain step.
+
+        Without an execution the workspace was changed in place, so the
+        checkpoint is recorded as an observation instead of a recoverable one.
+        """
+        for step in unknown_steps:
+            checkpoint_result = (
+                self.workspace_manager.checkpoint(
+                    execution,
+                    step_id=str(step["id"]),
+                    label="operator-accepted-existing-changes",
+                    lease=lease,
+                )
+                if execution is not None
+                else {
+                    "ok": True,
+                    "mode": "in-place",
+                    "checkpoint_id": None,
+                    "recoverable": False,
+                    "observation_only": True,
+                }
+            )
+            report = {
+                "ok": True,
+                "status": "implemented",
+                "final_report": {
+                    "status": "implemented",
+                    "summary": "The operator accepted the existing workspace changes after reconciliation.",
+                    "changes_added": [],
+                    "changes_modified": [],
+                    "changes_removed": [],
+                    "files_added": [],
+                    "files_modified": [],
+                    "files_deleted": [],
+                    "commands_run": [],
+                    "tests_run": [],
+                    "verification_needed": [
+                        "Review the reconciled diff before approval."
+                    ],
+                    "risks": [],
+                    "follow_up": [],
+                    "decisions": {},
+                    "constraints": [],
+                    "assumptions": [],
+                    "alternatives_rejected": [],
+                    "acceptance_criteria": [],
+                    "blockers": [],
+                    "review_decision": "not_applicable",
+                },
+                "checkpoint": checkpoint_result,
+                "reconciled": True,
+            }
+            artifact = self.store.store_artifact(
+                run_id=run_id, kind="reconciled-write-result", value=report
+            )
+            self.store.accept_unknown_step(
+                str(step["id"]),
+                result_artifact_id=artifact,
+                reason="operator accepted existing changes",
+                lease=lease,
+            )
+
+    def _reconcile_apply_shadow(
+        self,
+        *,
+        run: dict[str, Any],
+        run_id: str,
+        action: str,
+        execution: Any,
+        workspace_config: dict[str, Any],
+        lease: LeaseToken,
+    ) -> dict[str, Any]:
+        """Publish a verified shadow checkpoint on the operator's behalf.
+
+        The run reaches its terminal state here, so the outcome carries the
+        publication and its evidence instead of returning to execution.
+        """
+        if execution is None or execution.mode != "shadow":
+            raise GitWorkspaceError(
+                "No shadow checkpoint exists to apply.",
+                code="shadow_checkpoint_missing",
+            )
+        publication = self.workspace_manager.publish(execution, lease=lease)
+        review_approved = bool((run.get("reconciliation") or {}).get("review_approved"))
+        target = "approved" if review_approved else "needs_changes"
+        report = {
+            "status": target,
+            "summary": "The operator safely applied the verified shadow checkpoint.",
+            "publication": publication,
+            "operator_action": action,
+        }
+        artifact = self.store.store_artifact(
+            run_id=run_id,
+            kind="workflow-final-report",
+            value=report,
+        )
+        self.store.transition_run(
+            run_id,
+            target,
+            event_type="workflow.shadow_applied_by_operator",
+            final_artifact_id=artifact,
+            reconciliation={
+                "resolved_by": action,
+                "resolved_at": utc_now_iso(),
+                "publication_id": publication.get("publication_id"),
+            },
+            lease=lease,
+        )
+        self._cleanup_applied_shadow(
+            execution=execution, workspace_config=workspace_config, lease=lease
+        )
+        result = self._result_from_snapshot(self.store.snapshot_run(run_id))
+        result["evidence"] = create_workflow_evidence(self.store, run_id)
+        result["publication"] = publication
+        self._append_telemetry(result)
+        return {"continue": False, "result": result}
+
+    def _cleanup_applied_shadow(
+        self,
+        *,
+        execution: Any,
+        workspace_config: dict[str, Any],
+        lease: LeaseToken,
+    ) -> None:
+        """Remove a published shadow workspace when retention does not keep it.
+
+        A failed cleanup leaves the checkpoint marked ``cleanup_pending`` rather
+        than failing the publication that already succeeded.
+        """
+        cleanup_requested = bool(
+            workspace_config.get("cleanup_successful_shadow_workspaces", True)
+            and int(workspace_config.get("shadow_success_retention_hours", 0) or 0) <= 0
+        )
+        if not cleanup_requested:
+            return
+        try:
+            cleanup = self.workspace_manager.cleanup(execution)
+        except GitWorkspaceError as exc:
+            if execution.checkpoint_id:
+                self.store.mark_checkpoint_status(
+                    execution.checkpoint_id,
+                    "cleanup_pending",
+                    metadata={
+                        "cleanup_error_code": exc.code,
+                        "cleanup_error": str(exc),
+                    },
+                    lease=lease,
+                )
+            return
+        if execution.checkpoint_id:
+            self.store.mark_checkpoint_status(
+                execution.checkpoint_id,
+                "cleaned",
+                metadata={"cleaned_at": utc_now_iso(), "cleanup": cleanup},
+                lease=lease,
+            )
+
     def _perform_reconciliation(
         self,
         *,
@@ -2081,54 +2320,20 @@ class DurableWorkflowEngine:
         authorization_granted: bool,
         lease: LeaseToken,
     ) -> dict[str, Any]:
-        """Apply one validated reconciliation action to a parked run."""
+        """Apply one validated reconciliation action to a parked run.
+
+        Three actions are terminal reads or decisions and return immediately.
+        The rest converge on the shared resolution that puts the run back into
+        execution.
+        """
         if action == "inspect_shadow":
-            result = self._result_from_snapshot(self.store.snapshot_run(run_id))
-            result.update(
-                {
-                    "ok": False,
-                    "status": "awaiting_reconciliation",
-                    "reason": run.get("error_reason"),
-                    "reconciliation": {
-                        **(run.get("reconciliation") or {}),
-                        **details,
-                        "inspected_at": utc_now_iso(),
-                    },
-                }
-            )
-            return {"continue": False, "result": result}
-
+            return self._reconcile_inspect(run=run, run_id=run_id, details=details)
         if action == "mark_failed":
-            self.store.transition_run(
-                run_id,
-                "failed",
-                event_type="workflow.reconciliation_marked_failed",
-                error_code="operator_marked_failed",
-                error_reason="The operator marked an ambiguous write workflow as failed.",
-                reconciliation={"resolved_by": action},
-                lease=lease,
-            )
-            result = self._result_from_snapshot(self.store.snapshot_run(run_id))
-            return {"continue": False, "result": result}
-
+            return self._reconcile_mark_failed(run_id, action=action, lease=lease)
         if action == "discard_shadow":
-            if execution is None or execution.mode != "shadow":
-                raise GitWorkspaceError(
-                    "No shadow workspace exists for this reconciliation.",
-                    code="shadow_workspace_missing",
-                )
-            self.workspace_manager.discard_workspace(execution, lease=lease)
-            self.store.transition_run(
-                run_id,
-                "failed",
-                event_type="workflow.shadow_discarded",
-                error_code="operator_discarded_shadow",
-                error_reason="The operator discarded the protected shadow workspace.",
-                reconciliation={"resolved_by": action, "resolved_at": utc_now_iso()},
-                lease=lease,
+            return self._reconcile_discard_shadow(
+                run_id, action=action, execution=execution, lease=lease
             )
-            result = self._result_from_snapshot(self.store.snapshot_run(run_id))
-            return {"continue": False, "result": result}
 
         snapshot = self.store.snapshot_run(run_id, include_events=False)
         unknown_steps = [
@@ -2162,129 +2367,21 @@ class DurableWorkflowEngine:
                     ),
                 )
         elif action == "apply_shadow_changes":
-            if execution is None or execution.mode != "shadow":
-                raise GitWorkspaceError(
-                    "No shadow checkpoint exists to apply.",
-                    code="shadow_checkpoint_missing",
-                )
-            publication = self.workspace_manager.publish(execution, lease=lease)
-            review_approved = bool(
-                (run.get("reconciliation") or {}).get("review_approved")
-            )
-            target = "approved" if review_approved else "needs_changes"
-            report = {
-                "status": target,
-                "summary": (
-                    "The operator safely applied the verified shadow checkpoint."
-                ),
-                "publication": publication,
-                "operator_action": action,
-            }
-            artifact = self.store.store_artifact(
+            return self._reconcile_apply_shadow(
+                run=run,
                 run_id=run_id,
-                kind="workflow-final-report",
-                value=report,
-            )
-            self.store.transition_run(
-                run_id,
-                target,
-                event_type="workflow.shadow_applied_by_operator",
-                final_artifact_id=artifact,
-                reconciliation={
-                    "resolved_by": action,
-                    "resolved_at": utc_now_iso(),
-                    "publication_id": publication.get("publication_id"),
-                },
+                action=action,
+                execution=execution,
+                workspace_config=workspace_config,
                 lease=lease,
             )
-            cleanup_requested = bool(
-                workspace_config.get("cleanup_successful_shadow_workspaces", True)
-                and int(workspace_config.get("shadow_success_retention_hours", 0) or 0)
-                <= 0
-            )
-            if cleanup_requested:
-                try:
-                    cleanup = self.workspace_manager.cleanup(execution)
-                    if execution.checkpoint_id:
-                        self.store.mark_checkpoint_status(
-                            execution.checkpoint_id,
-                            "cleaned",
-                            metadata={"cleaned_at": utc_now_iso(), "cleanup": cleanup},
-                            lease=lease,
-                        )
-                except GitWorkspaceError as exc:
-                    if execution.checkpoint_id:
-                        self.store.mark_checkpoint_status(
-                            execution.checkpoint_id,
-                            "cleanup_pending",
-                            metadata={
-                                "cleanup_error_code": exc.code,
-                                "cleanup_error": str(exc),
-                            },
-                            lease=lease,
-                        )
-            result = self._result_from_snapshot(self.store.snapshot_run(run_id))
-            result["evidence"] = create_workflow_evidence(self.store, run_id)
-            result["publication"] = publication
-            self._append_telemetry(result)
-            return {"continue": False, "result": result}
         elif action == "accept_existing_changes":
-            for step in unknown_steps:
-                checkpoint_result = (
-                    self.workspace_manager.checkpoint(
-                        execution,
-                        step_id=str(step["id"]),
-                        label="operator-accepted-existing-changes",
-                        lease=lease,
-                    )
-                    if execution is not None
-                    else {
-                        "ok": True,
-                        "mode": "in-place",
-                        "checkpoint_id": None,
-                        "recoverable": False,
-                        "observation_only": True,
-                    }
-                )
-                report = {
-                    "ok": True,
-                    "status": "implemented",
-                    "final_report": {
-                        "status": "implemented",
-                        "summary": "The operator accepted the existing workspace changes after reconciliation.",
-                        "changes_added": [],
-                        "changes_modified": [],
-                        "changes_removed": [],
-                        "files_added": [],
-                        "files_modified": [],
-                        "files_deleted": [],
-                        "commands_run": [],
-                        "tests_run": [],
-                        "verification_needed": [
-                            "Review the reconciled diff before approval."
-                        ],
-                        "risks": [],
-                        "follow_up": [],
-                        "decisions": {},
-                        "constraints": [],
-                        "assumptions": [],
-                        "alternatives_rejected": [],
-                        "acceptance_criteria": [],
-                        "blockers": [],
-                        "review_decision": "not_applicable",
-                    },
-                    "checkpoint": checkpoint_result,
-                    "reconciled": True,
-                }
-                artifact = self.store.store_artifact(
-                    run_id=run_id, kind="reconciled-write-result", value=report
-                )
-                self.store.accept_unknown_step(
-                    str(step["id"]),
-                    result_artifact_id=artifact,
-                    reason="operator accepted existing changes",
-                    lease=lease,
-                )
+            self._reconcile_accept_existing(
+                run_id=run_id,
+                unknown_steps=unknown_steps,
+                execution=execution,
+                lease=lease,
+            )
 
         if authorization_granted:
             architect_step = self.store.get_step(run_id, "architect.plan")
@@ -2633,6 +2730,185 @@ class DurableWorkflowEngine:
         )
         return {"ordinal": ordinal, "ok": False, "result": result}
 
+    def _record_phase_failure(
+        self,
+        *,
+        run_id: str,
+        step_id: str,
+        phase: str,
+        output: dict[str, Any],
+        error_code: str,
+        reason: str,
+        lease: LeaseToken,
+    ) -> dict[str, Any]:
+        """Persist a failed phase and its deliverable, returning its output.
+
+        Every failure path stores the phase result, fails the durable step and
+        materializes the deliverable in that order, so a client always finds the
+        evidence for a failure it was told about.
+        """
+        artifact = self.store.store_artifact(
+            run_id=run_id, kind=f"{phase}-phase-result", value=output
+        )
+        self.store.transition_step(
+            step_id,
+            "failed",
+            output_artifact_id=artifact,
+            error_code=error_code,
+            error_reason=reason,
+            lease=lease,
+        )
+        materialize_phase_deliverable(
+            self.store,
+            step_id=step_id,
+            phase_output=output,
+            lease=lease,
+        )
+        return output
+
+    def _dispatch_participants_in_parallel(
+        self,
+        *,
+        run_id: str,
+        step_key: str,
+        phase: str,
+        prepared: list[tuple[int, dict[str, Any], dict[str, Any]]],
+        invoke: Callable[[tuple[int, dict[str, Any], dict[str, Any]]], dict[str, Any]],
+        max_concurrency: int,
+    ) -> list[dict[str, Any]]:
+        """Run read-only participants concurrently, cancellable mid-flight.
+
+        Futures are waited on in short slices so a cancellation request is
+        observed promptly, and any exit path terminates the spawned process tree
+        before shutting the pool down.
+        """
+        outcomes: list[dict[str, Any]] = []
+        executor = ThreadPoolExecutor(
+            max_workers=min(max_concurrency, len(prepared)),
+            thread_name_prefix=f"baldr-{phase}",
+        )
+        futures: set[Future[dict[str, Any]]] = {
+            executor.submit(invoke, entry) for entry in prepared
+        }
+        try:
+            while futures:
+                if self.store.is_cancel_requested(run_id):
+                    raise WorkflowCancelled(
+                        f"Workflow {run_id} was cancelled during {step_key}."
+                    )
+                completed, futures = wait(
+                    futures, timeout=0.2, return_when=FIRST_COMPLETED
+                )
+                for future in completed:
+                    outcomes.append(future.result())
+        except BaseException:
+            terminate_processes_for_run(run_id, grace_seconds=0.75)
+            for future in futures:
+                future.cancel()
+            executor.shutdown(wait=False, cancel_futures=True)
+            raise
+        executor.shutdown(wait=True)
+        return outcomes
+
+    def _dispatch_participants_serially(
+        self,
+        *,
+        run_id: str,
+        prepared: list[tuple[int, dict[str, Any], dict[str, Any]]],
+        invoke: Callable[[tuple[int, dict[str, Any], dict[str, Any]]], dict[str, Any]],
+        strategy: str,
+        max_total_attempts: int,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Run participants one at a time, stopping at the attempt budget.
+
+        Returns the outcomes and whether the budget stopped the dispatch, which
+        the caller reports differently from a participant failure.
+        """
+        outcomes: list[dict[str, Any]] = []
+        for entry in prepared:
+            if self.store.count_attempts_for_run(run_id) >= max_total_attempts:
+                return outcomes, True
+            outcome = invoke(entry)
+            outcomes.append(outcome)
+            if strategy == "first-success" and outcome.get("ok"):
+                break
+        return outcomes, False
+
+    def _prepare_participants(
+        self,
+        *,
+        run_id: str,
+        step_key: str,
+        step_id: str,
+        profiles: list[dict[str, Any]],
+        strategy: str,
+        lease: LeaseToken,
+    ) -> tuple[
+        list[tuple[int, dict[str, Any], dict[str, Any]]],
+        dict[int, dict[str, Any]],
+    ]:
+        """Split a phase's profiles into work to dispatch and results to replay.
+
+        A participant that already succeeded contributes its recorded result, and
+        under ``first-success`` it ends the search. The lease is re-checked per
+        profile so a stale worker stops before creating durable rows.
+        """
+        prepared: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
+        successful_by_ordinal: dict[int, dict[str, Any]] = {}
+        for ordinal, profile in enumerate(profiles):
+            self.store.assert_lease(lease)
+            if self.store.is_cancel_requested(run_id):
+                raise WorkflowCancelled(
+                    f"Workflow {run_id} was cancelled during {step_key}."
+                )
+            participant = self.store.create_participant(
+                step_id=step_id, ordinal=ordinal, profile=profile, lease=lease
+            )
+            if participant["status"] == "succeeded":
+                previous = self.store.load_artifact(
+                    participant.get("result_artifact_id")
+                )
+                if isinstance(previous, dict):
+                    successful_by_ordinal[ordinal] = previous
+                    if strategy == "first-success":
+                        break
+                continue
+            prepared.append((ordinal, profile, participant))
+        return prepared, successful_by_ordinal
+
+    def _settled_phase_result(
+        self,
+        *,
+        run_id: str,
+        step_key: str,
+        lease: LeaseToken,
+    ) -> dict[str, Any] | None:
+        """Decide whether a durable step can be re-entered.
+
+        A succeeded step replays its recorded output instead of running again. A
+        write attempt with unknown effects is never retried blindly: it stays
+        for reconciliation. Anything else interrupted is reset for a retry.
+        """
+        existing = self.store.get_step(run_id, step_key)
+        if not existing:
+            return None
+        if existing["status"] == "succeeded":
+            return self.store.load_artifact(existing.get("output_artifact_id")) or {
+                "ok": False,
+                "reason": "Durable step output artifact is missing.",
+            }
+        if existing["status"] == "unknown" and bool(existing.get("can_write")):
+            return {
+                "ok": False,
+                "status": "unknown",
+                "reason": "A previous write attempt has unknown effects and requires reconciliation.",
+            }
+        if existing["status"] in {"interrupted", "unknown", "failed"}:
+            self.store.reset_step_for_retry(
+                str(existing["id"]), reason="durable resume", lease=lease
+            )
+        return None
+
     def _execute_phase(
         self,
         *,
@@ -2656,26 +2932,11 @@ class DurableWorkflowEngine:
             raise WorkflowCancelled(
                 f"Workflow {run_id} was cancelled before {step_key}."
             )
-        existing = self.store.get_step(run_id, step_key)
-        if existing and existing["status"] == "succeeded":
-            return self.store.load_artifact(existing.get("output_artifact_id")) or {
-                "ok": False,
-                "reason": "Durable step output artifact is missing.",
-            }
-        if (
-            existing
-            and existing["status"] == "unknown"
-            and bool(existing.get("can_write"))
-        ):
-            return {
-                "ok": False,
-                "status": "unknown",
-                "reason": "A previous write attempt has unknown effects and requires reconciliation.",
-            }
-        if existing and existing["status"] in {"interrupted", "unknown", "failed"}:
-            self.store.reset_step_for_retry(
-                str(existing["id"]), reason="durable resume", lease=lease
-            )
+        settled = self._settled_phase_result(
+            run_id=run_id, step_key=step_key, lease=lease
+        )
+        if settled is not None:
+            return settled
 
         prompt_artifact = self.store.store_artifact(
             run_id=run_id,
@@ -2740,24 +3001,15 @@ class DurableWorkflowEngine:
                     "attempt_budget": max_total_attempts,
                 },
             }
-            artifact = self.store.store_artifact(
-                run_id=run_id, kind=f"{phase}-phase-result", value=output
-            )
-            self.store.transition_step(
-                step_id,
-                "failed",
-                output_artifact_id=artifact,
-                error_code=code,
-                error_reason=reason,
-                lease=lease,
-            )
-            materialize_phase_deliverable(
-                self.store,
+            return self._record_phase_failure(
+                run_id=run_id,
                 step_id=step_id,
-                phase_output=output,
+                phase=phase,
+                output=output,
+                error_code=code,
+                reason=reason,
                 lease=lease,
             )
-            return output
 
         if bool(plan.get("can_write")) and len(profiles) != 1:
             return fail_before_dispatch(
@@ -2771,28 +3023,15 @@ class DurableWorkflowEngine:
             max_concurrency = 1
 
         role = _role_from_plan(plan)
-        prepared: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
-        successful_by_ordinal: dict[int, dict[str, Any]] = {}
+        prepared, successful_by_ordinal = self._prepare_participants(
+            run_id=run_id,
+            step_key=step_key,
+            step_id=step_id,
+            profiles=profiles,
+            strategy=strategy,
+            lease=lease,
+        )
         failed_by_ordinal: dict[int, dict[str, Any]] = {}
-        for ordinal, profile in enumerate(profiles):
-            self.store.assert_lease(lease)
-            if self.store.is_cancel_requested(run_id):
-                raise WorkflowCancelled(
-                    f"Workflow {run_id} was cancelled during {step_key}."
-                )
-            participant = self.store.create_participant(
-                step_id=step_id, ordinal=ordinal, profile=profile, lease=lease
-            )
-            if participant["status"] == "succeeded":
-                previous = self.store.load_artifact(
-                    participant.get("result_artifact_id")
-                )
-                if isinstance(previous, dict):
-                    successful_by_ordinal[ordinal] = previous
-                    if strategy == "first-success":
-                        break
-                continue
-            prepared.append((ordinal, profile, participant))
 
         used_attempts = self.store.count_attempts_for_run(run_id)
         if strategy == "all" and used_attempts + len(prepared) > max_total_attempts:
@@ -2825,8 +3064,6 @@ class DurableWorkflowEngine:
                 config_snapshot=config_snapshot,
             )
 
-        outcomes: list[dict[str, Any]] = []
-        budget_exhausted = False
         parallel = (
             strategy == "all"
             and not bool(plan.get("can_write"))
@@ -2834,41 +3071,23 @@ class DurableWorkflowEngine:
             and len(prepared) > 1
         )
         if parallel:
-            executor = ThreadPoolExecutor(
-                max_workers=min(max_concurrency, len(prepared)),
-                thread_name_prefix=f"baldr-{phase}",
+            outcomes = self._dispatch_participants_in_parallel(
+                run_id=run_id,
+                step_key=step_key,
+                phase=phase,
+                prepared=prepared,
+                invoke=invoke,
+                max_concurrency=max_concurrency,
             )
-            futures: set[Future[dict[str, Any]]] = {
-                executor.submit(invoke, entry) for entry in prepared
-            }
-            try:
-                while futures:
-                    if self.store.is_cancel_requested(run_id):
-                        raise WorkflowCancelled(
-                            f"Workflow {run_id} was cancelled during {step_key}."
-                        )
-                    completed, futures = wait(
-                        futures, timeout=0.2, return_when=FIRST_COMPLETED
-                    )
-                    for future in completed:
-                        outcomes.append(future.result())
-            except BaseException:
-                terminate_processes_for_run(run_id, grace_seconds=0.75)
-                for future in futures:
-                    future.cancel()
-                executor.shutdown(wait=False, cancel_futures=True)
-                raise
-            else:
-                executor.shutdown(wait=True)
+            budget_exhausted = False
         else:
-            for entry in prepared:
-                if self.store.count_attempts_for_run(run_id) >= max_total_attempts:
-                    budget_exhausted = True
-                    break
-                outcome = invoke(entry)
-                outcomes.append(outcome)
-                if strategy == "first-success" and outcome.get("ok"):
-                    break
+            outcomes, budget_exhausted = self._dispatch_participants_serially(
+                run_id=run_id,
+                prepared=prepared,
+                invoke=invoke,
+                strategy=strategy,
+                max_total_attempts=max_total_attempts,
+            )
 
         for outcome in outcomes:
             ordinal = int(outcome["ordinal"])
@@ -2911,24 +3130,15 @@ class DurableWorkflowEngine:
                     "attempts_consumed": self.store.count_attempts_for_run(run_id),
                 },
             }
-            artifact = self.store.store_artifact(
-                run_id=run_id, kind=f"{phase}-phase-result", value=output
-            )
-            self.store.transition_step(
-                step_id,
-                "failed",
-                output_artifact_id=artifact,
-                error_code="phase_min_successes_not_met",
-                error_reason=output["reason"],
-                lease=lease,
-            )
-            materialize_phase_deliverable(
-                self.store,
+            return self._record_phase_failure(
+                run_id=run_id,
                 step_id=step_id,
-                phase_output=output,
+                phase=phase,
+                output=output,
+                error_code="phase_min_successes_not_met",
+                reason=str(output["reason"]),
                 lease=lease,
             )
-            return output
 
         output = reduce_phase(
             phase=phase,
@@ -2947,25 +3157,15 @@ class DurableWorkflowEngine:
             }
         )
         if not output.get("ok"):
-            artifact = self.store.store_artifact(
-                run_id=run_id, kind=f"{phase}-phase-result", value=output
-            )
-            reason = str(output.get("reason") or "The phase reported blockers.")
-            self.store.transition_step(
-                step_id,
-                "failed",
-                output_artifact_id=artifact,
-                error_code=str(output.get("error_code") or "phase_report_blocked"),
-                error_reason=reason,
-                lease=lease,
-            )
-            materialize_phase_deliverable(
-                self.store,
+            return self._record_phase_failure(
+                run_id=run_id,
                 step_id=step_id,
-                phase_output=output,
+                phase=phase,
+                output=output,
+                error_code=str(output.get("error_code") or "phase_report_blocked"),
+                reason=str(output.get("reason") or "The phase reported blockers."),
                 lease=lease,
             )
-            return output
         if post_success:
             checkpoint = post_success(step_id, _reported_file_changes(output))
             output = {**output, "checkpoint": checkpoint}
