@@ -76,6 +76,30 @@ def _stable_hash(value: Any) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+def _workflow_lease_seconds(config_snapshot: dict[str, Any]) -> int:
+    """Return the workflow lease duration with its operational floor applied.
+
+    A shorter lease can expire between local Git/SQLite steps before the first
+    provider heartbeat has a chance to renew it, so recovery, cancellation and
+    execution all share this floor.
+    """
+    return max(15, int(config_snapshot["durability"].get("lease_seconds") or 45))
+
+
+def _idempotency_conflict_result(exc: IdempotencyConflict) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "status": "idempotency_conflict",
+        "error": {
+            "code": "idempotency_conflict",
+            "key": exc.key,
+            "expected_fingerprint": exc.expected,
+            "received_fingerprint": exc.received,
+        },
+        "reason": str(exc),
+    }
+
+
 def _owner_id() -> str:
     return f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
 
@@ -995,6 +1019,106 @@ class DurableWorkflowEngine:
         result["process_cleanup"] = cleanup
         return result
 
+    def _cancel_only_request(
+        self,
+        *,
+        resume_run_id: str | None,
+        cancel_reason: str,
+    ) -> dict[str, Any]:
+        """Handle a request whose only intent is cancelling a durable run."""
+        if not resume_run_id:
+            return {
+                "ok": False,
+                "status": "invalid_request",
+                "error": {"code": "cancel_requires_run_id"},
+                "reason": "Cancellation requires resume_run_id.",
+            }
+        return self.request_cancel(resume_run_id, reason=cancel_reason)
+
+    def _apply_start_policies(self, config_snapshot: dict[str, Any]) -> None:
+        """Run the configured recovery and maintenance work before executing.
+
+        Maintenance is best effort on purpose: a failed vacuum must never stop a
+        workflow that is otherwise ready to run.
+        """
+        durability = config_snapshot["durability"]
+        if durability.get("recovery_on_start", True):
+            self.recover()
+        if durability.get("maintenance_on_start", False):
+            try:
+                self.store.maintenance(full=False)
+            except Exception:
+                pass
+
+    def _resume_rejection(
+        self,
+        *,
+        resume_run_id: str,
+        run: dict[str, Any] | None,
+        workspace_root: Path,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        """Validate a resume request against its durable run.
+
+        Returns the durable rejection to send back, or the repository identity
+        of the persisted workspace when the resume is allowed. The identity is
+        returned rather than recomputed by the caller because probing the
+        repository costs a Git call.
+        """
+        if run is None:
+            return (
+                {
+                    "ok": False,
+                    "status": "not_found",
+                    "error": {"code": "durable_run_not_found"},
+                    "reason": f"Durable run {resume_run_id!r} was not found.",
+                },
+                None,
+            )
+        if run["status"] in TERMINAL_RUN_STATES:
+            return (
+                self._result_from_snapshot(self.store.snapshot_run(resume_run_id)),
+                None,
+            )
+        persisted_root = Path(str(run["workspace_root"])).expanduser().resolve()
+        if workspace_root != persisted_root:
+            return (
+                {
+                    "ok": False,
+                    "run_id": resume_run_id,
+                    "status": "resume_rejected",
+                    "error": {"code": "resume_workspace_path_mismatch"},
+                    "reason": "A durable run can only resume in its original workspace path.",
+                    "expected_workspace_root": str(persisted_root),
+                    "received_workspace_root": str(workspace_root),
+                },
+                None,
+            )
+        actual_identity = workspace_identity(persisted_root)
+        expected_identity = run.get("repository_identity") or {}
+        if expected_identity and not identities_match(
+            expected_identity, actual_identity
+        ):
+            return (
+                {
+                    "ok": False,
+                    "run_id": resume_run_id,
+                    "status": "resume_rejected",
+                    "error": {"code": "resume_repository_identity_mismatch"},
+                    "reason": (
+                        "The repository at the durable workspace path is not the repository "
+                        "that originally created this run."
+                    ),
+                    "expected_repository_fingerprint": expected_identity.get(
+                        "repository_fingerprint"
+                    ),
+                    "actual_repository_fingerprint": actual_identity.get(
+                        "repository_fingerprint"
+                    ),
+                },
+                None,
+            )
+        return (None, actual_identity)
+
     def run(
         self,
         *,
@@ -1012,22 +1136,11 @@ class DurableWorkflowEngine:
         work_item_id: str | None = None,
     ) -> dict[str, Any]:
         if cancel:
-            if not resume_run_id:
-                return {
-                    "ok": False,
-                    "status": "invalid_request",
-                    "error": {"code": "cancel_requires_run_id"},
-                    "reason": "Cancellation requires resume_run_id.",
-                }
-            return self.request_cancel(resume_run_id, reason=cancel_reason)
+            return self._cancel_only_request(
+                resume_run_id=resume_run_id, cancel_reason=cancel_reason
+            )
 
-        if config_snapshot["durability"].get("recovery_on_start", True):
-            self.recover()
-        if config_snapshot["durability"].get("maintenance_on_start", False):
-            try:
-                self.store.maintenance(full=False)
-            except Exception:
-                pass
+        self._apply_start_policies(config_snapshot)
 
         workspace_root = workspace_root.expanduser().resolve()
         owner = _owner_id()
@@ -1036,49 +1149,14 @@ class DurableWorkflowEngine:
         try:
             if resume_run_id:
                 run = self.store.get_run(resume_run_id)
-                if run is None:
-                    return {
-                        "ok": False,
-                        "status": "not_found",
-                        "error": {"code": "durable_run_not_found"},
-                        "reason": f"Durable run {resume_run_id!r} was not found.",
-                    }
-                if run["status"] in TERMINAL_RUN_STATES:
-                    return self._result_from_snapshot(
-                        self.store.snapshot_run(resume_run_id)
-                    )
-                persisted_root = Path(str(run["workspace_root"])).expanduser().resolve()
-                if workspace_root != persisted_root:
-                    return {
-                        "ok": False,
-                        "run_id": resume_run_id,
-                        "status": "resume_rejected",
-                        "error": {"code": "resume_workspace_path_mismatch"},
-                        "reason": "A durable run can only resume in its original workspace path.",
-                        "expected_workspace_root": str(persisted_root),
-                        "received_workspace_root": str(workspace_root),
-                    }
-                actual_identity = workspace_identity(persisted_root)
-                expected_identity = run.get("repository_identity") or {}
-                if expected_identity and not identities_match(
-                    expected_identity, actual_identity
-                ):
-                    return {
-                        "ok": False,
-                        "run_id": resume_run_id,
-                        "status": "resume_rejected",
-                        "error": {"code": "resume_repository_identity_mismatch"},
-                        "reason": (
-                            "The repository at the durable workspace path is not the repository "
-                            "that originally created this run."
-                        ),
-                        "expected_repository_fingerprint": expected_identity.get(
-                            "repository_fingerprint"
-                        ),
-                        "actual_repository_fingerprint": actual_identity.get(
-                            "repository_fingerprint"
-                        ),
-                    }
+                rejection, actual_identity = self._resume_rejection(
+                    resume_run_id=resume_run_id,
+                    run=run,
+                    workspace_root=workspace_root,
+                )
+                if rejection is not None:
+                    return rejection
+                assert run is not None and actual_identity is not None
                 requested_identity = actual_identity
                 input_value = (
                     self.store.load_artifact(run.get("task_artifact_id")) or {}
@@ -1134,25 +1212,11 @@ class DurableWorkflowEngine:
                         run.get("repository_identity") or requested_identity
                     )
         except IdempotencyConflict as exc:
-            return {
-                "ok": False,
-                "status": "idempotency_conflict",
-                "error": {
-                    "code": "idempotency_conflict",
-                    "key": exc.key,
-                    "expected_fingerprint": exc.expected,
-                    "received_fingerprint": exc.received,
-                },
-                "reason": str(exc),
-            }
+            return _idempotency_conflict_result(exc)
 
-        # A shorter workflow lease can expire between local Git/SQLite steps
-        # before the first provider heartbeat has a chance to renew it. Keep
-        # the same operational floor used by recovery and cancellation.
-        lease_seconds = max(
-            15, int(config_snapshot["durability"].get("lease_seconds") or 45)
+        lease = self.store.acquire_lease(
+            run_id, owner, _workflow_lease_seconds(config_snapshot)
         )
-        lease = self.store.acquire_lease(run_id, owner, lease_seconds)
         if lease is None:
             return {
                 "ok": False,
@@ -1594,115 +1658,161 @@ class DurableWorkflowEngine:
             release_lease = False
             raise
         except WorkflowCancelled as exc:
-            terminate_processes_for_run(run_id, grace_seconds=0.75)
-            try:
-                self.store.finalize_cancellation(run_id, lease=lease, reason=str(exc))
-            except LeaseFenceError:
-                pass
-            result = self._result_from_snapshot(self.store.snapshot_run(run_id))
-            result["evidence"] = create_workflow_evidence(self.store, run_id)
-            return result
+            return self._cancelled_run_result(run_id, lease=lease, exc=exc)
         except LeaseFenceError as exc:
-            result = self._result_from_snapshot(self.store.snapshot_run(run_id))
-            result.update(
-                {
-                    "ok": False,
-                    "stale_worker": True,
-                    "reason": str(exc),
-                    "error": {"code": "lease_fence_rejected"},
-                }
-            )
-            return result
+            return self._stale_worker_result(run_id, exc=exc)
         except GitWorkspaceError as exc:
+            return self._workspace_reconciliation_result(run_id, lease=lease, exc=exc)
+        except Exception as exc:
+            return self._engine_failure_result(run_id, lease=lease, exc=exc)
+        finally:
+            if release_lease:
+                self.store.release_lease(lease)
+
+    def _cancelled_run_result(
+        self,
+        run_id: str,
+        *,
+        lease: Any,
+        exc: WorkflowCancelled,
+    ) -> dict[str, Any]:
+        """Finalize a cancelled run and attach its evidence bundle."""
+        terminate_processes_for_run(run_id, grace_seconds=0.75)
+        try:
+            self.store.finalize_cancellation(run_id, lease=lease, reason=str(exc))
+        except LeaseFenceError:
+            pass
+        result = self._result_from_snapshot(self.store.snapshot_run(run_id))
+        result["evidence"] = create_workflow_evidence(self.store, run_id)
+        return result
+
+    def _stale_worker_result(
+        self,
+        run_id: str,
+        *,
+        exc: LeaseFenceError,
+    ) -> dict[str, Any]:
+        """Report that this worker lost the lease and must not persist anything."""
+        result = self._result_from_snapshot(self.store.snapshot_run(run_id))
+        result.update(
+            {
+                "ok": False,
+                "stale_worker": True,
+                "reason": str(exc),
+                "error": {"code": "lease_fence_rejected"},
+            }
+        )
+        return result
+
+    def _workspace_reconciliation_result(
+        self,
+        run_id: str,
+        *,
+        lease: Any,
+        exc: GitWorkspaceError,
+    ) -> dict[str, Any]:
+        """Park a run whose workspace state can no longer be trusted.
+
+        Recording the reconciliation is best effort: if the durable transition
+        fails too, the caller still receives the run snapshot instead of an
+        exception that would hide the original workspace error.
+        """
+        try:
+            current_run = self.store.get_run(run_id) or {}
+            checkpoint = self.store.latest_checkpoint(run_id)
+            execution = (
+                self.workspace_manager.from_checkpoint(checkpoint)
+                if checkpoint
+                else None
+            )
+            details = (
+                self.workspace_manager.reconciliation_status(execution)
+                if execution
+                else {"allowed_actions": ["mark_failed"]}
+            )
+            self.store.transition_run(
+                run_id,
+                "awaiting_reconciliation",
+                event_type="workflow.workspace_requires_reconciliation",
+                error_code=exc.code or "workspace_reconciliation_required",
+                error_reason=str(exc),
+                reconciliation={
+                    "reason": "workspace-state-invalid",
+                    "message": str(exc),
+                    "error_code": exc.code,
+                    "review_approved": bool(
+                        str(current_run.get("status") or "") == "finalizing"
+                        or (current_run.get("reconciliation") or {}).get(
+                            "review_approved"
+                        )
+                    ),
+                    "details": exc.details,
+                    **details,
+                },
+                lease=lease,
+            )
+        except Exception:
+            pass
+        result = self._result_from_snapshot(self.store.snapshot_run(run_id))
+        result["reason"] = str(exc)
+        return result
+
+    def _engine_failure_result(
+        self,
+        run_id: str,
+        *,
+        lease: Any,
+        exc: BaseException,
+    ) -> dict[str, Any]:
+        """Fail a run without discarding recoverable shadow work.
+
+        A shadow execution keeps uncertain changes reviewable, so the run is
+        parked for reconciliation instead of being marked failed outright.
+        """
+        run = self.store.get_run(run_id)
+        if run and run["status"] not in TERMINAL_RUN_STATES:
             try:
-                current_run = self.store.get_run(run_id) or {}
                 checkpoint = self.store.latest_checkpoint(run_id)
                 execution = (
                     self.workspace_manager.from_checkpoint(checkpoint)
                     if checkpoint
                     else None
                 )
-                details = (
-                    self.workspace_manager.reconciliation_status(execution)
-                    if execution
-                    else {"allowed_actions": ["mark_failed"]}
-                )
-                self.store.transition_run(
-                    run_id,
-                    "awaiting_reconciliation",
-                    event_type="workflow.workspace_requires_reconciliation",
-                    error_code=exc.code or "workspace_reconciliation_required",
-                    error_reason=str(exc),
-                    reconciliation={
-                        "reason": "workspace-state-invalid",
-                        "message": str(exc),
-                        "error_code": exc.code,
-                        "review_approved": bool(
-                            str(current_run.get("status") or "") == "finalizing"
-                            or (current_run.get("reconciliation") or {}).get(
-                                "review_approved"
-                            )
-                        ),
-                        "details": exc.details,
-                        **details,
-                    },
-                    lease=lease,
-                )
+                if execution is not None and execution.mode == "shadow":
+                    details = self.workspace_manager.reconciliation_status(execution)
+                    self.store.transition_run(
+                        run_id,
+                        "awaiting_reconciliation",
+                        event_type="workflow.shadow_retained_after_engine_failure",
+                        error_code="durable_engine_failed",
+                        error_reason=str(exc),
+                        reconciliation={
+                            "reason": "durable-engine-failure",
+                            "message": str(exc),
+                            "error_code": "durable_engine_failed",
+                            "review_approved": bool(
+                                str(run.get("status") or "") == "finalizing"
+                                or (run.get("reconciliation") or {}).get(
+                                    "review_approved"
+                                )
+                            ),
+                            **details,
+                        },
+                        lease=lease,
+                    )
+                else:
+                    self.store.transition_run(
+                        run_id,
+                        "failed",
+                        error_code="durable_engine_failed",
+                        error_reason=str(exc),
+                        lease=lease,
+                    )
             except Exception:
                 pass
-            result = self._result_from_snapshot(self.store.snapshot_run(run_id))
-            result["reason"] = str(exc)
-            return result
-        except Exception as exc:
-            run = self.store.get_run(run_id)
-            if run and run["status"] not in TERMINAL_RUN_STATES:
-                try:
-                    checkpoint = self.store.latest_checkpoint(run_id)
-                    execution = (
-                        self.workspace_manager.from_checkpoint(checkpoint)
-                        if checkpoint
-                        else None
-                    )
-                    if execution is not None and execution.mode == "shadow":
-                        details = self.workspace_manager.reconciliation_status(
-                            execution
-                        )
-                        self.store.transition_run(
-                            run_id,
-                            "awaiting_reconciliation",
-                            event_type="workflow.shadow_retained_after_engine_failure",
-                            error_code="durable_engine_failed",
-                            error_reason=str(exc),
-                            reconciliation={
-                                "reason": "durable-engine-failure",
-                                "message": str(exc),
-                                "error_code": "durable_engine_failed",
-                                "review_approved": bool(
-                                    str(run.get("status") or "") == "finalizing"
-                                    or (run.get("reconciliation") or {}).get(
-                                        "review_approved"
-                                    )
-                                ),
-                                **details,
-                            },
-                            lease=lease,
-                        )
-                    else:
-                        self.store.transition_run(
-                            run_id,
-                            "failed",
-                            error_code="durable_engine_failed",
-                            error_reason=str(exc),
-                            lease=lease,
-                        )
-                except Exception:
-                    pass
-            result = self._result_from_snapshot(self.store.snapshot_run(run_id))
-            result["reason"] = str(exc)
-            return result
-        finally:
-            if release_lease:
-                self.store.release_lease(lease)
+        result = self._result_from_snapshot(self.store.snapshot_run(run_id))
+        result["reason"] = str(exc)
+        return result
 
     def _apply_reconciliation(
         self,

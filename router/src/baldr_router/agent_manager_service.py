@@ -10,7 +10,7 @@ import uuid
 from collections.abc import Mapping
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from . import __version__
 from .agent_api import AgentContractError, AgentManifest, AgentRef
@@ -409,6 +409,589 @@ class AgentManagerStore:
         }
 
 
+
+class AgentManagerHTTPServer(ThreadingHTTPServer):
+    """HTTP server that owns the store, the policy, and the start instant.
+
+    The request handler used to be a closure defined inside the factory, which
+    made a 509-line function and left the handler impossible to construct or
+    inspect on its own. Holding the collaborators on the server is the standard
+    way to share them with a module-level handler.
+    """
+
+    daemon_threads = True
+
+    def __init__(
+        self,
+        address: tuple[str, int],
+        handler_class: type[BaseHTTPRequestHandler],
+        *,
+        store: AgentManagerStore,
+        policy: AgentManagerPolicy,
+    ) -> None:
+        self.store = store
+        self.policy = policy
+        self.started = time.monotonic()
+        super().__init__(address, handler_class)
+
+
+class AgentManagerRequestHandler(BaseHTTPRequestHandler):
+    """Request handler for the versioned Agent Manager HTTP contract."""
+
+    server_version = "BaldrAgentManager/1"
+
+    @property
+    def _service(self) -> AgentManagerHTTPServer:
+        return cast(AgentManagerHTTPServer, self.server)
+
+    @property
+    def store(self) -> AgentManagerStore:
+        return self._service.store
+
+    @property
+    def policy(self) -> AgentManagerPolicy:
+        return self._service.policy
+
+    def _uptime_seconds(self) -> int:
+        return int(time.monotonic() - self._service.started)
+
+    def _request_id(self) -> str:
+        current = getattr(self, "_baldr_request_id", "")
+        if current:
+            return str(current)
+        supplied = str(self.headers.get("X-Request-ID") or "").strip()
+        value = supplied if _REQUEST_ID.fullmatch(supplied) else uuid.uuid4().hex
+        self._baldr_request_id = value
+        return value
+
+    def _json(self, payload: Mapping[str, Any], status: int = 200) -> None:
+        body = json.dumps(dict(payload), ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Request-ID", self._request_id())
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _error(self, status: int, code: str, message: str) -> None:
+        self._json({"ok": False, "error": {"code": code, "message": message}}, status)
+
+    def _record(
+        self,
+        principal: AgentManagerPrincipal | None,
+        *,
+        action: str,
+        status: int,
+        outcome: str,
+        detail_code: str,
+        reference: AgentRef | None = None,
+        tenant: str = "",
+    ) -> int:
+        if tenant or reference is not None:
+            audit_tenants = (tenant or reference.namespace,)
+        elif principal is not None and not principal.unrestricted_tenants:
+            # A catalog/health/metrics decision can span every tenant in a
+            # principal's scope. Emit one tenant-addressable event per
+            # scope instead of creating a cross-tenant record that no
+            # scoped auditor can retrieve.
+            audit_tenants = principal.tenants
+        else:
+            audit_tenants = ("",)
+        sequence = 0
+        for audit_tenant in audit_tenants:
+            sequence = self.store.audit(
+                request_id=self._request_id(),
+                principal_id=principal.identifier
+                if principal is not None
+                else "anonymous",
+                tenant=audit_tenant,
+                action=action,
+                reference=str(reference) if reference is not None else "",
+                outcome=outcome,
+                status_code=status,
+                detail_code=detail_code,
+            )
+        return sequence
+
+    def _authenticate(self, *, action: str) -> AgentManagerPrincipal | None:
+        principal = self.policy.authenticate(str(self.headers.get("Authorization") or ""))
+        if principal is None:
+            self._record(
+                None,
+                action=action,
+                status=401,
+                outcome="denied",
+                detail_code="authentication_required",
+            )
+            self._error(401, "unauthorized", "Authentication is required.")
+        return principal
+
+    def _authorize(
+        self,
+        *,
+        action: str,
+        reference: AgentRef | None = None,
+    ) -> AgentManagerPrincipal | None:
+        principal = self._authenticate(action=action)
+        if principal is None:
+            return None
+        if not principal.permits(action):
+            self._record(
+                principal,
+                action=action,
+                status=403,
+                outcome="denied",
+                detail_code="permission_denied",
+                reference=reference,
+            )
+            self._error(403, "forbidden", "The principal cannot perform this action.")
+            return None
+        if reference is not None and not principal.allows_tenant(reference.namespace):
+            self._record(
+                principal,
+                action=action,
+                status=403,
+                outcome="denied",
+                detail_code="tenant_denied",
+                reference=reference,
+            )
+            self._error(403, "forbidden", "The principal cannot access this tenant.")
+            return None
+        return principal
+
+    @staticmethod
+    def _visible_tenants(principal: AgentManagerPrincipal) -> tuple[str, ...] | None:
+        return None if principal.unrestricted_tenants else principal.tenants
+
+    def _admin(
+        self,
+        result: Mapping[str, Any],
+        *,
+        principal: AgentManagerPrincipal,
+        action: str,
+        reference: AgentRef,
+        status: int = 200,
+    ) -> None:
+        sequence = self._record(
+            principal,
+            action=action,
+            status=status,
+            outcome="allowed",
+            detail_code="ok",
+            reference=reference,
+        )
+        self._json(
+            {
+                "contract": ADMIN_CONTRACT,
+                "version": AGENT_MANAGER_CONTRACT_VERSION,
+                "ok": True,
+                **dict(result),
+                "actor": principal.identifier,
+                "tenant": reference.namespace,
+                "request_id": self._request_id(),
+                "audit_sequence": sequence,
+            },
+            status,
+        )
+
+    def _body(self) -> dict[str, Any] | None:
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            self._body_error_status = 400
+            self._error(400, "invalid_content_length", "Content-Length is invalid.")
+            return None
+        if length <= 0 or length > MAX_REQUEST_BYTES:
+            self._body_error_status = 413
+            self._error(413, "invalid_request_size", "Request body size is invalid.")
+            return None
+        try:
+            value = json.loads(self.rfile.read(length).decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError):
+            self._body_error_status = 400
+            self._error(400, "invalid_json", "Request body must be UTF-8 JSON.")
+            return None
+        if not isinstance(value, dict):
+            self._body_error_status = 400
+            self._error(400, "invalid_json", "Request body must be an object.")
+            return None
+        return value
+
+    def _reference(self, path: str, suffix: str = "") -> AgentRef | None:
+        prefix = "/v1/agents/"
+        if not path.startswith(prefix) or (suffix and not path.endswith(suffix)):
+            return None
+        middle = path[len(prefix) : -len(suffix) if suffix else None]
+        parts = [urllib.parse.unquote(item) for item in middle.split("/")]
+        if len(parts) != 4 or parts[2] != "versions":
+            return None
+        try:
+            return AgentRef.parse(
+                f"{self.store.registry}://{parts[0]}/{parts[1]}@{parts[3]}"
+            )
+        except AgentContractError:
+            return None
+
+    # Routes are declared as data so the exposed GET surface is readable
+    # in one place and each handler stays small.
+    _GET_ROUTES = {
+        "/livez": "_get_live",
+        "/readyz": "_get_ready",
+        "/v1/health": "_get_health",
+        "/v1/agents": "_get_catalog",
+        "/v1/audit": "_get_audit",
+        "/v1/metrics": "_get_metrics",
+    }
+
+    def do_GET(self) -> None:
+        parsed = urllib.parse.urlsplit(self.path)
+        route = self._GET_ROUTES.get(parsed.path, "_get_resolution")
+        getattr(self, route)(parsed)
+
+    def _get_live(self, parsed: urllib.parse.SplitResult) -> None:
+        del parsed
+        self._json(
+            {
+                "contract": PROBE_CONTRACT,
+                "version": AGENT_MANAGER_CONTRACT_VERSION,
+                "probe": "live",
+                "status": "ok",
+            }
+        )
+
+    def _get_ready(self, parsed: urllib.parse.SplitResult) -> None:
+        del parsed
+        try:
+            ready = self.store.schema_version == AGENT_MANAGER_SCHEMA_VERSION
+        except sqlite3.Error:
+            ready = False
+        self._json(
+            {
+                "contract": PROBE_CONTRACT,
+                "version": AGENT_MANAGER_CONTRACT_VERSION,
+                "probe": "ready",
+                "status": "ok" if ready else "degraded",
+            },
+            200 if ready else 503,
+        )
+
+    def _get_health(self, parsed: urllib.parse.SplitResult) -> None:
+        del parsed
+        principal = self._authorize(action="health")
+        if principal is None:
+            return
+        health = self.store.health(tenants=self._visible_tenants(principal))
+        self._record(
+            principal,
+            action="health",
+            status=200,
+            outcome="allowed",
+            detail_code="ok",
+        )
+        self._json(
+            {
+                "contract": HEALTH_CONTRACT,
+                "version": AGENT_MANAGER_CONTRACT_VERSION,
+                "status": "ok",
+                "service_version": __version__,
+                "registry": self.store.registry,
+                "schema_version": self.store.schema_version,
+                "policy_mode": self.policy.mode,
+                "principal": principal.identifier,
+                "uptime_seconds": self._uptime_seconds(),
+                **health,
+            }
+        )
+
+    def _get_catalog(self, parsed: urllib.parse.SplitResult) -> None:
+        principal = self._authorize(action="catalog")
+        if principal is None:
+            return
+        query = urllib.parse.parse_qs(parsed.query)
+        try:
+            limit = int((query.get("limit") or ["100"])[0])
+        except ValueError:
+            self._record(
+                principal,
+                action="catalog",
+                status=400,
+                outcome="failed",
+                detail_code="invalid_limit",
+            )
+            self._error(400, "invalid_limit", "Catalog limit must be numeric.")
+            return
+        agents = self.store.catalog(
+            limit=limit,
+            tenants=self._visible_tenants(principal),
+        )
+        self._record(
+            principal,
+            action="catalog",
+            status=200,
+            outcome="allowed",
+            detail_code="ok",
+        )
+        self._json(
+            {
+                "contract": CATALOG_CONTRACT,
+                "version": AGENT_MANAGER_CONTRACT_VERSION,
+                "agents": agents,
+            }
+        )
+
+    def _get_audit(self, parsed: urllib.parse.SplitResult) -> None:
+        principal = self._authorize(action="audit")
+        if principal is None:
+            return
+        query = urllib.parse.parse_qs(parsed.query)
+        try:
+            after = int((query.get("after") or ["0"])[0])
+            limit = int((query.get("limit") or ["100"])[0])
+        except ValueError:
+            self._record(
+                principal,
+                action="audit",
+                status=400,
+                outcome="failed",
+                detail_code="invalid_cursor",
+            )
+            self._error(400, "invalid_cursor", "Audit cursor and limit must be numeric.")
+            return
+        events = self.store.audit_events(
+            after=after,
+            limit=limit,
+            tenants=self._visible_tenants(principal),
+        )
+        self._record(
+            principal,
+            action="audit",
+            status=200,
+            outcome="allowed",
+            detail_code="ok",
+        )
+        self._json(
+            {
+                "contract": AUDIT_CONTRACT,
+                "version": AGENT_MANAGER_CONTRACT_VERSION,
+                "events": events,
+                "next_after": int(events[-1]["sequence"]) if events else max(0, after),
+            }
+        )
+
+    def _get_metrics(self, parsed: urllib.parse.SplitResult) -> None:
+        del parsed
+        principal = self._authorize(action="metrics")
+        if principal is None:
+            return
+        metrics = self.store.metrics(tenants=self._visible_tenants(principal))
+        self._record(
+            principal,
+            action="metrics",
+            status=200,
+            outcome="allowed",
+            detail_code="ok",
+        )
+        self._json(
+            {
+                "contract": METRICS_CONTRACT,
+                "version": AGENT_MANAGER_CONTRACT_VERSION,
+                "registry": self.store.registry,
+                "schema_version": self.store.schema_version,
+                "uptime_seconds": self._uptime_seconds(),
+                **metrics,
+            }
+        )
+
+    def _get_resolution(self, parsed: urllib.parse.SplitResult) -> None:
+        reference = self._reference(parsed.path)
+        principal = self._authorize(action="resolve", reference=reference)
+        if principal is None:
+            return
+        manifest = self.store.resolve(reference) if reference is not None else None
+        if manifest is None:
+            self._record(
+                principal,
+                action="resolve",
+                status=404,
+                outcome="failed",
+                detail_code="agent_not_found",
+                reference=reference,
+            )
+            self._error(404, "agent_not_found", "Agent version is unavailable.")
+            return
+        self._record(
+            principal,
+            action="resolve",
+            status=200,
+            outcome="allowed",
+            detail_code="ok",
+            reference=reference,
+        )
+        self._json(
+            {
+                "contract": RESOLUTION_CONTRACT,
+                "version": AGENT_MANAGER_CONTRACT_VERSION,
+                "manifest": manifest,
+            }
+        )
+
+    def do_POST(self) -> None:
+        if urllib.parse.urlsplit(self.path).path == "/v1/agents":
+            self._post_publish()
+            return
+        self._post_lifecycle()
+
+    def _post_body(
+        self,
+        principal: AgentManagerPrincipal,
+        *,
+        action: str,
+        reference: AgentRef | None,
+    ) -> dict[str, Any] | None:
+        """Read the request body, auditing the exact rejection when it is invalid."""
+        body = self._body()
+        if body is None:
+            self._record(
+                principal,
+                action=action,
+                status=int(getattr(self, "_body_error_status", 400)),
+                outcome="failed",
+                detail_code="invalid_body",
+                reference=reference,
+            )
+        return body
+
+    def _post_failure(
+        self,
+        exc: Exception,
+        principal: AgentManagerPrincipal,
+        *,
+        action: str,
+        reference: AgentRef | None,
+    ) -> None:
+        if isinstance(exc, KeyError):
+            self._record(
+                principal,
+                action=action,
+                status=404,
+                outcome="failed",
+                detail_code="agent_not_found",
+                reference=reference,
+            )
+            self._error(404, "agent_not_found", "Agent version was not found.")
+            return
+        self._record(
+            principal,
+            action=action,
+            status=409,
+            outcome="failed",
+            detail_code="agent_contract_error",
+            reference=reference,
+        )
+        self._error(409, "agent_contract_error", str(exc))
+
+    def _post_publish(self) -> None:
+        action = "publish"
+        principal = self._authorize(action=action)
+        if principal is None:
+            return
+        body = self._post_body(principal, action=action, reference=None)
+        if body is None:
+            return
+        reference: AgentRef | None = None
+        try:
+            raw = body.get("manifest")
+            if not isinstance(raw, Mapping):
+                raise AgentContractError("Publish request requires manifest.")
+            manifest = AgentManifest.from_dict(raw)
+            reference = manifest.reference
+            if not principal.allows_tenant(reference.namespace):
+                self._record(
+                    principal,
+                    action=action,
+                    status=403,
+                    outcome="denied",
+                    detail_code="tenant_denied",
+                    reference=reference,
+                )
+                self._error(403, "forbidden", "The principal cannot publish to this tenant.")
+                return
+            if not principal.allows_owner(manifest.owner):
+                self._record(
+                    principal,
+                    action=action,
+                    status=403,
+                    outcome="denied",
+                    detail_code="owner_denied",
+                    reference=reference,
+                )
+                self._error(403, "forbidden", "The principal cannot publish for this owner.")
+                return
+            result = self.store.publish(manifest)
+        except (KeyError, AgentContractError) as exc:
+            self._post_failure(exc, principal, action=action, reference=reference)
+            return
+        self._admin(
+            result,
+            principal=principal,
+            action=action,
+            reference=reference,
+            status=201 if result["created"] else 200,
+        )
+
+    # Lifecycle transitions keyed by URL suffix. The previous inline loop reused
+    # the `action` variable as the loop target, so a failure after it recorded
+    # the audit action as "/disable" instead of "lifecycle".
+    _LIFECYCLE_SUFFIXES = ("/enable", "/disable", "/revoke")
+
+    def _post_lifecycle(self) -> None:
+        action = "lifecycle"
+        path = urllib.parse.urlsplit(self.path).path
+        reference: AgentRef | None = None
+        suffix = ""
+        for candidate_suffix in self._LIFECYCLE_SUFFIXES:
+            reference = self._reference(path, candidate_suffix)
+            if reference is not None:
+                suffix = candidate_suffix
+                break
+        principal = self._authorize(action=action, reference=reference)
+        if principal is None:
+            return
+        body = self._post_body(principal, action=action, reference=reference)
+        if body is None:
+            return
+        if reference is None:
+            self._record(
+                principal,
+                action=action,
+                status=404,
+                outcome="failed",
+                detail_code="route_not_found",
+                reference=None,
+            )
+            self._error(404, "route_not_found", "Route was not found.")
+            return
+        try:
+            result = (
+                self.store.revoke(reference)
+                if suffix == "/revoke"
+                else self.store.set_enabled(reference, enabled=suffix == "/enable")
+            )
+        except (KeyError, AgentContractError) as exc:
+            self._post_failure(exc, principal, action=action, reference=reference)
+            return
+        self._admin(
+            result,
+            principal=principal,
+            action=action,
+            reference=reference,
+        )
+
+    def log_message(self, format: str, *args: Any) -> None:
+        del format, args
+
+
 def build_agent_manager_server(
     *,
     host: str,
@@ -431,493 +1014,12 @@ def build_agent_manager_server(
         raise AgentContractError(
             "Agent Manager policy registry does not match the service registry."
         )
-    started = time.monotonic()
-
-    class Handler(BaseHTTPRequestHandler):
-        server_version = "BaldrAgentManager/1"
-
-        def _request_id(self) -> str:
-            current = getattr(self, "_baldr_request_id", "")
-            if current:
-                return str(current)
-            supplied = str(self.headers.get("X-Request-ID") or "").strip()
-            value = supplied if _REQUEST_ID.fullmatch(supplied) else uuid.uuid4().hex
-            self._baldr_request_id = value
-            return value
-
-        def _json(self, payload: Mapping[str, Any], status: int = 200) -> None:
-            body = json.dumps(dict(payload), ensure_ascii=False).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("X-Request-ID", self._request_id())
-            self.end_headers()
-            self.wfile.write(body)
-
-        def _error(self, status: int, code: str, message: str) -> None:
-            self._json({"ok": False, "error": {"code": code, "message": message}}, status)
-
-        def _record(
-            self,
-            principal: AgentManagerPrincipal | None,
-            *,
-            action: str,
-            status: int,
-            outcome: str,
-            detail_code: str,
-            reference: AgentRef | None = None,
-            tenant: str = "",
-        ) -> int:
-            if tenant or reference is not None:
-                audit_tenants = (tenant or reference.namespace,)
-            elif principal is not None and not principal.unrestricted_tenants:
-                # A catalog/health/metrics decision can span every tenant in a
-                # principal's scope. Emit one tenant-addressable event per
-                # scope instead of creating a cross-tenant record that no
-                # scoped auditor can retrieve.
-                audit_tenants = principal.tenants
-            else:
-                audit_tenants = ("",)
-            sequence = 0
-            for audit_tenant in audit_tenants:
-                sequence = store.audit(
-                    request_id=self._request_id(),
-                    principal_id=principal.identifier
-                    if principal is not None
-                    else "anonymous",
-                    tenant=audit_tenant,
-                    action=action,
-                    reference=str(reference) if reference is not None else "",
-                    outcome=outcome,
-                    status_code=status,
-                    detail_code=detail_code,
-                )
-            return sequence
-
-        def _authenticate(self, *, action: str) -> AgentManagerPrincipal | None:
-            principal = policy.authenticate(str(self.headers.get("Authorization") or ""))
-            if principal is None:
-                self._record(
-                    None,
-                    action=action,
-                    status=401,
-                    outcome="denied",
-                    detail_code="authentication_required",
-                )
-                self._error(401, "unauthorized", "Authentication is required.")
-            return principal
-
-        def _authorize(
-            self,
-            *,
-            action: str,
-            reference: AgentRef | None = None,
-        ) -> AgentManagerPrincipal | None:
-            principal = self._authenticate(action=action)
-            if principal is None:
-                return None
-            if not principal.permits(action):
-                self._record(
-                    principal,
-                    action=action,
-                    status=403,
-                    outcome="denied",
-                    detail_code="permission_denied",
-                    reference=reference,
-                )
-                self._error(403, "forbidden", "The principal cannot perform this action.")
-                return None
-            if reference is not None and not principal.allows_tenant(reference.namespace):
-                self._record(
-                    principal,
-                    action=action,
-                    status=403,
-                    outcome="denied",
-                    detail_code="tenant_denied",
-                    reference=reference,
-                )
-                self._error(403, "forbidden", "The principal cannot access this tenant.")
-                return None
-            return principal
-
-        @staticmethod
-        def _visible_tenants(principal: AgentManagerPrincipal) -> tuple[str, ...] | None:
-            return None if principal.unrestricted_tenants else principal.tenants
-
-        def _admin(
-            self,
-            result: Mapping[str, Any],
-            *,
-            principal: AgentManagerPrincipal,
-            action: str,
-            reference: AgentRef,
-            status: int = 200,
-        ) -> None:
-            sequence = self._record(
-                principal,
-                action=action,
-                status=status,
-                outcome="allowed",
-                detail_code="ok",
-                reference=reference,
-            )
-            self._json(
-                {
-                    "contract": ADMIN_CONTRACT,
-                    "version": AGENT_MANAGER_CONTRACT_VERSION,
-                    "ok": True,
-                    **dict(result),
-                    "actor": principal.identifier,
-                    "tenant": reference.namespace,
-                    "request_id": self._request_id(),
-                    "audit_sequence": sequence,
-                },
-                status,
-            )
-
-        def _body(self) -> dict[str, Any] | None:
-            try:
-                length = int(self.headers.get("Content-Length") or 0)
-            except ValueError:
-                self._body_error_status = 400
-                self._error(400, "invalid_content_length", "Content-Length is invalid.")
-                return None
-            if length <= 0 or length > MAX_REQUEST_BYTES:
-                self._body_error_status = 413
-                self._error(413, "invalid_request_size", "Request body size is invalid.")
-                return None
-            try:
-                value = json.loads(self.rfile.read(length).decode("utf-8"))
-            except (UnicodeError, json.JSONDecodeError):
-                self._body_error_status = 400
-                self._error(400, "invalid_json", "Request body must be UTF-8 JSON.")
-                return None
-            if not isinstance(value, dict):
-                self._body_error_status = 400
-                self._error(400, "invalid_json", "Request body must be an object.")
-                return None
-            return value
-
-        @staticmethod
-        def _reference(path: str, suffix: str = "") -> AgentRef | None:
-            prefix = "/v1/agents/"
-            if not path.startswith(prefix) or (suffix and not path.endswith(suffix)):
-                return None
-            middle = path[len(prefix) : -len(suffix) if suffix else None]
-            parts = [urllib.parse.unquote(item) for item in middle.split("/")]
-            if len(parts) != 4 or parts[2] != "versions":
-                return None
-            try:
-                return AgentRef.parse(
-                    f"{store.registry}://{parts[0]}/{parts[1]}@{parts[3]}"
-                )
-            except AgentContractError:
-                return None
-
-        def do_GET(self) -> None:
-            parsed = urllib.parse.urlsplit(self.path)
-            if parsed.path == "/livez":
-                self._json(
-                    {
-                        "contract": PROBE_CONTRACT,
-                        "version": AGENT_MANAGER_CONTRACT_VERSION,
-                        "probe": "live",
-                        "status": "ok",
-                    }
-                )
-                return
-            if parsed.path == "/readyz":
-                try:
-                    ready = store.schema_version == AGENT_MANAGER_SCHEMA_VERSION
-                except sqlite3.Error:
-                    ready = False
-                self._json(
-                    {
-                        "contract": PROBE_CONTRACT,
-                        "version": AGENT_MANAGER_CONTRACT_VERSION,
-                        "probe": "ready",
-                        "status": "ok" if ready else "degraded",
-                    },
-                    200 if ready else 503,
-                )
-                return
-            if parsed.path == "/v1/health":
-                principal = self._authorize(action="health")
-                if principal is None:
-                    return
-                health = store.health(tenants=self._visible_tenants(principal))
-                self._record(
-                    principal,
-                    action="health",
-                    status=200,
-                    outcome="allowed",
-                    detail_code="ok",
-                )
-                self._json(
-                    {
-                        "contract": HEALTH_CONTRACT,
-                        "version": AGENT_MANAGER_CONTRACT_VERSION,
-                        "status": "ok",
-                        "service_version": __version__,
-                        "registry": store.registry,
-                        "schema_version": store.schema_version,
-                        "policy_mode": policy.mode,
-                        "principal": principal.identifier,
-                        "uptime_seconds": int(time.monotonic() - started),
-                        **health,
-                    }
-                )
-                return
-            if parsed.path == "/v1/agents":
-                principal = self._authorize(action="catalog")
-                if principal is None:
-                    return
-                query = urllib.parse.parse_qs(parsed.query)
-                try:
-                    limit = int((query.get("limit") or ["100"])[0])
-                except ValueError:
-                    self._record(
-                        principal,
-                        action="catalog",
-                        status=400,
-                        outcome="failed",
-                        detail_code="invalid_limit",
-                    )
-                    self._error(400, "invalid_limit", "Catalog limit must be numeric.")
-                    return
-                agents = store.catalog(
-                    limit=limit,
-                    tenants=self._visible_tenants(principal),
-                )
-                self._record(
-                    principal,
-                    action="catalog",
-                    status=200,
-                    outcome="allowed",
-                    detail_code="ok",
-                )
-                self._json(
-                    {
-                        "contract": CATALOG_CONTRACT,
-                        "version": AGENT_MANAGER_CONTRACT_VERSION,
-                        "agents": agents,
-                    }
-                )
-                return
-            if parsed.path == "/v1/audit":
-                principal = self._authorize(action="audit")
-                if principal is None:
-                    return
-                query = urllib.parse.parse_qs(parsed.query)
-                try:
-                    after = int((query.get("after") or ["0"])[0])
-                    limit = int((query.get("limit") or ["100"])[0])
-                except ValueError:
-                    self._record(
-                        principal,
-                        action="audit",
-                        status=400,
-                        outcome="failed",
-                        detail_code="invalid_cursor",
-                    )
-                    self._error(400, "invalid_cursor", "Audit cursor and limit must be numeric.")
-                    return
-                events = store.audit_events(
-                    after=after,
-                    limit=limit,
-                    tenants=self._visible_tenants(principal),
-                )
-                self._record(
-                    principal,
-                    action="audit",
-                    status=200,
-                    outcome="allowed",
-                    detail_code="ok",
-                )
-                self._json(
-                    {
-                        "contract": AUDIT_CONTRACT,
-                        "version": AGENT_MANAGER_CONTRACT_VERSION,
-                        "events": events,
-                        "next_after": int(events[-1]["sequence"]) if events else max(0, after),
-                    }
-                )
-                return
-            if parsed.path == "/v1/metrics":
-                principal = self._authorize(action="metrics")
-                if principal is None:
-                    return
-                metrics = store.metrics(tenants=self._visible_tenants(principal))
-                self._record(
-                    principal,
-                    action="metrics",
-                    status=200,
-                    outcome="allowed",
-                    detail_code="ok",
-                )
-                self._json(
-                    {
-                        "contract": METRICS_CONTRACT,
-                        "version": AGENT_MANAGER_CONTRACT_VERSION,
-                        "registry": store.registry,
-                        "schema_version": store.schema_version,
-                        "uptime_seconds": int(time.monotonic() - started),
-                        **metrics,
-                    }
-                )
-                return
-            reference = self._reference(parsed.path)
-            principal = self._authorize(action="resolve", reference=reference)
-            if principal is None:
-                return
-            manifest = store.resolve(reference) if reference is not None else None
-            if manifest is None:
-                self._record(
-                    principal,
-                    action="resolve",
-                    status=404,
-                    outcome="failed",
-                    detail_code="agent_not_found",
-                    reference=reference,
-                )
-                self._error(404, "agent_not_found", "Agent version is unavailable.")
-                return
-            self._record(
-                principal,
-                action="resolve",
-                status=200,
-                outcome="allowed",
-                detail_code="ok",
-                reference=reference,
-            )
-            self._json(
-                {
-                    "contract": RESOLUTION_CONTRACT,
-                    "version": AGENT_MANAGER_CONTRACT_VERSION,
-                    "manifest": manifest,
-                }
-            )
-
-        def do_POST(self) -> None:
-            parsed = urllib.parse.urlsplit(self.path)
-            publish_route = parsed.path == "/v1/agents"
-            reference: AgentRef | None = None
-            action = "publish" if publish_route else "lifecycle"
-            if not publish_route:
-                for suffix in ("/enable", "/disable", "/revoke"):
-                    reference = self._reference(parsed.path, suffix)
-                    if reference is not None:
-                        break
-            principal = self._authorize(action=action, reference=reference)
-            if principal is None:
-                return
-            body = self._body()
-            if body is None:
-                self._record(
-                    principal,
-                    action=action,
-                    status=int(getattr(self, "_body_error_status", 400)),
-                    outcome="failed",
-                    detail_code="invalid_body",
-                    reference=reference,
-                )
-                return
-            try:
-                if publish_route:
-                    raw = body.get("manifest")
-                    if not isinstance(raw, Mapping):
-                        raise AgentContractError("Publish request requires manifest.")
-                    manifest = AgentManifest.from_dict(raw)
-                    reference = manifest.reference
-                    if not principal.allows_tenant(reference.namespace):
-                        self._record(
-                            principal,
-                            action=action,
-                            status=403,
-                            outcome="denied",
-                            detail_code="tenant_denied",
-                            reference=reference,
-                        )
-                        self._error(403, "forbidden", "The principal cannot publish to this tenant.")
-                        return
-                    if not principal.allows_owner(manifest.owner):
-                        self._record(
-                            principal,
-                            action=action,
-                            status=403,
-                            outcome="denied",
-                            detail_code="owner_denied",
-                            reference=reference,
-                        )
-                        self._error(403, "forbidden", "The principal cannot publish for this owner.")
-                        return
-                    result = store.publish(manifest)
-                    self._admin(
-                        result,
-                        principal=principal,
-                        action=action,
-                        reference=reference,
-                        status=201 if result["created"] else 200,
-                    )
-                    return
-                for action, enabled in (("/enable", True), ("/disable", False)):
-                    candidate = self._reference(parsed.path, action)
-                    if candidate is not None:
-                        self._admin(
-                            store.set_enabled(candidate, enabled=enabled),
-                            principal=principal,
-                            action="lifecycle",
-                            reference=candidate,
-                        )
-                        return
-                candidate = self._reference(parsed.path, "/revoke")
-                if candidate is not None:
-                    self._admin(
-                        store.revoke(candidate),
-                        principal=principal,
-                        action="lifecycle",
-                        reference=candidate,
-                    )
-                    return
-            except KeyError:
-                self._record(
-                    principal,
-                    action=action,
-                    status=404,
-                    outcome="failed",
-                    detail_code="agent_not_found",
-                    reference=reference,
-                )
-                self._error(404, "agent_not_found", "Agent version was not found.")
-                return
-            except AgentContractError as exc:
-                self._record(
-                    principal,
-                    action=action,
-                    status=409,
-                    outcome="failed",
-                    detail_code="agent_contract_error",
-                    reference=reference,
-                )
-                self._error(409, "agent_contract_error", str(exc))
-                return
-            self._record(
-                principal,
-                action=action,
-                status=404,
-                outcome="failed",
-                detail_code="route_not_found",
-                reference=reference,
-            )
-            self._error(404, "route_not_found", "Route was not found.")
-
-        def log_message(self, format: str, *args: Any) -> None:
-            del format, args
-
-    server = ThreadingHTTPServer((host, port), Handler)
-    server.daemon_threads = True
-    return server
+    return AgentManagerHTTPServer(
+        (host, port),
+        AgentManagerRequestHandler,
+        store=store,
+        policy=policy,
+    )
 
 
 def serve_agent_manager(

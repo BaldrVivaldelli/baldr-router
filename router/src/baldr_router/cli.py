@@ -5,6 +5,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 from . import __version__
 from .agent_api import (
@@ -1132,11 +1133,99 @@ def cmd_enable_context7_env(args: argparse.Namespace) -> int:
     return 0 if result.get("ok") else 2
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="baldr-router")
-    parser.add_argument("--version", action="version", version=__version__)
-    sub = parser.add_subparsers(dest="command", required=True)
+# argparse exposes no public type for the object returned by
+# ``add_subparsers``, so registrars annotate it structurally.
+SubParsers = Any
 
+RECONCILIATION_ACTIONS = [
+    "authorize_changes",
+    "decline_changes",
+    "resume_from_checkpoint",
+    "accept_existing_changes",
+    "discard_worktree",
+    "inspect_shadow",
+    "continue_from_shadow",
+    "apply_shadow_changes",
+    "discard_shadow",
+    "mark_failed",
+]
+
+
+def _add_execution_options(
+    parser: argparse.ArgumentParser,
+    *,
+    client_default: str,
+) -> None:
+    """Add the workflow execution options shared by `facade run` and `run-workflow`.
+
+    Both entrypoints drive the same frozen workflow, so their options must stay
+    identical. Declaring them once removes the chance of one growing a flag the
+    other lacks.
+    """
+    parser.add_argument("--extra-context", default="")
+    parser.add_argument("--architect-provider")
+    parser.add_argument("--implementer-provider")
+    parser.add_argument("--reviewer-provider")
+    parser.add_argument("--max-rounds", type=int)
+    parser.add_argument("--context7-library", action="append")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--idempotency-key")
+    parser.add_argument("--resume-run-id")
+    parser.add_argument("--reconciliation-action", choices=RECONCILIATION_ACTIONS)
+    parser.add_argument("--cancel", action="store_true")
+    parser.add_argument(
+        "--cancel-reason", default="Cancellation requested by client."
+    )
+    parser.add_argument("--client", default=client_default)
+
+
+def _add_context7_tuning_options(parser: argparse.ArgumentParser) -> None:
+    """Add the Context7 installation and cache options shared by both setup paths."""
+    parser.add_argument(
+        "--install-codex-mcp",
+        action="store_true",
+        help="Add Context7 to ~/.codex/config.toml without storing the key there",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Replace an existing [mcp_servers.context7] table",
+    )
+    parser.add_argument("--cache-ttl-hours", type=int, default=48)
+    parser.add_argument("--max-libraries", type=int, default=3)
+    parser.add_argument("--max-chars", type=int, default=9000)
+    parser.add_argument("--no-inject-docs", action="store_true")
+    parser.add_argument(
+        "--no-fast",
+        action="store_true",
+        help="Use Context7 LLM reranking instead of fast vector search",
+    )
+
+
+def _add_agent_publication_options(
+    parser: argparse.ArgumentParser,
+    *,
+    target_help: str | None = None,
+    digest_help: str | None = None,
+) -> None:
+    """Add the immutable agent publication options shared by local and manager paths."""
+    parser.add_argument("--owner", required=True)
+    parser.add_argument("--transport", required=True)
+    parser.add_argument("--target", action="append", help=target_help)
+    parser.add_argument("--capability", action="append", default=[])
+    parser.add_argument("--input-schema", default="baldr.Task/v1")
+    parser.add_argument("--output-schema", default="baldr.StructuredReport/v1")
+    parser.add_argument(
+        "--effect-mode",
+        choices=["read-only", "workspace-write", "external"],
+        default="read-only",
+    )
+    parser.add_argument("--supports-sessions", action="store_true")
+    parser.add_argument("--supports-cancellation", action="store_true")
+    parser.add_argument("--digest", help=digest_help)
+
+
+def _register_facade(sub: SubParsers) -> None:
     p = sub.add_parser(
         "facade",
         help="Shared client facade with only setup, status, and run intents",
@@ -1278,35 +1367,11 @@ def build_parser() -> argparse.ArgumentParser:
     f.add_argument(
         "--item-config-json", help="JSON object with durable item execution metadata"
     )
-    f.add_argument("--extra-context", default="")
-    f.add_argument("--architect-provider")
-    f.add_argument("--implementer-provider")
-    f.add_argument("--reviewer-provider")
-    f.add_argument("--max-rounds", type=int)
-    f.add_argument("--context7-library", action="append")
-    f.add_argument("--dry-run", action="store_true")
-    f.add_argument("--idempotency-key")
-    f.add_argument("--resume-run-id")
-    f.add_argument(
-        "--reconciliation-action",
-        choices=[
-            "authorize_changes",
-            "decline_changes",
-            "resume_from_checkpoint",
-            "accept_existing_changes",
-            "discard_worktree",
-            "inspect_shadow",
-            "continue_from_shadow",
-            "apply_shadow_changes",
-            "discard_shadow",
-            "mark_failed",
-        ],
-    )
-    f.add_argument("--cancel", action="store_true")
-    f.add_argument("--cancel-reason", default="Cancellation requested by client.")
-    f.add_argument("--client", default="generic-mcp")
+    _add_execution_options(f, client_default="generic-mcp")
     f.set_defaults(func=cmd_facade)
 
+
+def _register_workspace(sub: SubParsers) -> None:
     p = sub.add_parser(
         "workspace-status", help="Inspect the trusted-workspace policy for a path"
     )
@@ -1329,6 +1394,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("workspace_root")
     p.set_defaults(func=cmd_workspace_untrust)
 
+
+def _register_diagnostics(sub: SubParsers) -> None:
     p = sub.add_parser(
         "doctor",
         help="Check the core router, providers, extensions, Context7, telemetry, and an optional workspace path",
@@ -1358,6 +1425,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("workspace_root")
     p.set_defaults(func=cmd_probe_status)
 
+
+def _register_verification(sub: SubParsers) -> None:
     p = sub.add_parser(
         "verify",
         help="Run deterministic install/execute/cancel/restart/update lifecycle verification",
@@ -1456,6 +1525,8 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--release-version", default=__version__)
     q.set_defaults(func=cmd_qualification)
 
+
+def _register_runtime(sub: SubParsers) -> None:
     p = sub.add_parser("extensions", help="Show installed client-adapter extensions")
     p.set_defaults(func=cmd_extensions)
 
@@ -1486,6 +1557,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--refresh", action="store_true")
     p.set_defaults(func=cmd_provider_models)
 
+
+def _register_agents(sub: SubParsers) -> None:
     p = sub.add_parser(
         "agent-catalog",
         help="List safe metadata for externally registered agents",
@@ -1569,26 +1642,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Publish a new immutable local agent version",
     )
     p.add_argument("reference")
-    p.add_argument("--owner", required=True)
-    p.add_argument("--transport", required=True)
-    p.add_argument(
-        "--target",
-        action="append",
-        help="Transport target key=value; repeat for multiple values",
-    )
-    p.add_argument("--capability", action="append", default=[])
-    p.add_argument("--input-schema", default="baldr.Task/v1")
-    p.add_argument("--output-schema", default="baldr.StructuredReport/v1")
-    p.add_argument(
-        "--effect-mode",
-        choices=["read-only", "workspace-write", "external"],
-        default="read-only",
-    )
-    p.add_argument("--supports-sessions", action="store_true")
-    p.add_argument("--supports-cancellation", action="store_true")
-    p.add_argument(
-        "--digest",
-        help="Optional declared sha256 digest; computed automatically when omitted",
+    _add_agent_publication_options(
+        p,
+        target_help="Transport target key=value; repeat for multiple values",
+        digest_help=(
+            "Optional declared sha256 digest; computed automatically when omitted"
+        ),
     )
     p.set_defaults(func=cmd_agent_publish)
 
@@ -1612,6 +1671,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("reference")
     p.set_defaults(func=cmd_agent_remove)
 
+
+def _register_agent_manager(sub: SubParsers) -> None:
     manager = sub.add_parser(
         "agent-manager",
         help="Run and administer the persistent HTTP Agent Manager",
@@ -1683,20 +1744,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("output")
     p.add_argument("reference")
-    p.add_argument("--owner", required=True)
-    p.add_argument("--transport", required=True)
-    p.add_argument("--target", action="append")
-    p.add_argument("--capability", action="append", default=[])
-    p.add_argument("--input-schema", default="baldr.Task/v1")
-    p.add_argument("--output-schema", default="baldr.StructuredReport/v1")
-    p.add_argument(
-        "--effect-mode",
-        choices=["read-only", "workspace-write", "external"],
-        default="read-only",
-    )
-    p.add_argument("--supports-sessions", action="store_true")
-    p.add_argument("--supports-cancellation", action="store_true")
-    p.add_argument("--digest")
+    _add_agent_publication_options(p)
     p.add_argument("--force", action="store_true")
     p.set_defaults(func=cmd_agent_manager_init_manifest)
 
@@ -1716,20 +1764,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = manager_sub.add_parser("publish", help="Publish one immutable manager version")
     p.add_argument("reference")
-    p.add_argument("--owner", required=True)
-    p.add_argument("--transport", required=True)
-    p.add_argument("--target", action="append")
-    p.add_argument("--capability", action="append", default=[])
-    p.add_argument("--input-schema", default="baldr.Task/v1")
-    p.add_argument("--output-schema", default="baldr.StructuredReport/v1")
-    p.add_argument(
-        "--effect-mode",
-        choices=["read-only", "workspace-write", "external"],
-        default="read-only",
-    )
-    p.add_argument("--supports-sessions", action="store_true")
-    p.add_argument("--supports-cancellation", action="store_true")
-    p.add_argument("--digest")
+    _add_agent_publication_options(p)
     p.set_defaults(func=cmd_agent_manager_publish)
 
     for action, enabled in (("enable", True), ("disable", False)):
@@ -1743,6 +1778,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("reference")
     p.set_defaults(func=cmd_agent_manager_revoke)
 
+
+def _register_workflows(sub: SubParsers) -> None:
     p = sub.add_parser(
         "workflow-status", help="Show roles, workflows, providers, and safety settings"
     )
@@ -1787,33 +1824,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("workspace_root")
     p.add_argument("task", nargs="?", default="")
     p.add_argument("--workflow", default="architect-implement-review")
-    p.add_argument("--extra-context", default="")
-    p.add_argument("--architect-provider")
-    p.add_argument("--implementer-provider")
-    p.add_argument("--reviewer-provider")
-    p.add_argument("--max-rounds", type=int)
-    p.add_argument("--context7-library", action="append")
-    p.add_argument("--dry-run", action="store_true")
-    p.add_argument("--idempotency-key")
-    p.add_argument("--resume-run-id")
-    p.add_argument(
-        "--reconciliation-action",
-        choices=[
-            "authorize_changes",
-            "decline_changes",
-            "resume_from_checkpoint",
-            "accept_existing_changes",
-            "discard_worktree",
-            "inspect_shadow",
-            "continue_from_shadow",
-            "apply_shadow_changes",
-            "discard_shadow",
-            "mark_failed",
-        ],
-    )
-    p.add_argument("--cancel", action="store_true")
-    p.add_argument("--cancel-reason", default="Cancellation requested by client.")
-    p.add_argument("--client", default="cli")
+    _add_execution_options(p, client_default="cli")
     p.set_defaults(func=cmd_run_workflow)
 
     p = sub.add_parser(
@@ -1825,6 +1836,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.set_defaults(func=cmd_set_codex_runner)
 
+
+def _register_context7(sub: SubParsers) -> None:
     p = sub.add_parser(
         "setup-context7",
         help="Enable Context7 for the Codex provider and/or router prefetch cache",
@@ -1838,25 +1851,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=sorted(VALID_CONTEXT7_MODES),
         help="codex-mcp, router-cache, hybrid, or off",
     )
-    p.add_argument(
-        "--install-codex-mcp",
-        action="store_true",
-        help="Add Context7 to ~/.codex/config.toml without storing the key there",
-    )
-    p.add_argument(
-        "--force",
-        action="store_true",
-        help="Replace an existing [mcp_servers.context7] table",
-    )
-    p.add_argument("--cache-ttl-hours", type=int, default=48)
-    p.add_argument("--max-libraries", type=int, default=3)
-    p.add_argument("--max-chars", type=int, default=9000)
-    p.add_argument("--no-inject-docs", action="store_true")
-    p.add_argument(
-        "--no-fast",
-        action="store_true",
-        help="Use Context7 LLM reranking instead of fast vector search",
-    )
+    _add_context7_tuning_options(p)
     p.set_defaults(func=cmd_setup_context7)
 
     p = sub.add_parser(
@@ -1872,25 +1867,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--mode", default="hybrid", choices=sorted(VALID_CONTEXT7_MODES - {"off"})
     )
-    p.add_argument(
-        "--install-codex-mcp",
-        action="store_true",
-        help="Add Context7 to ~/.codex/config.toml without storing the key there",
-    )
-    p.add_argument(
-        "--force",
-        action="store_true",
-        help="Replace an existing [mcp_servers.context7] table",
-    )
-    p.add_argument("--cache-ttl-hours", type=int, default=48)
-    p.add_argument("--max-libraries", type=int, default=3)
-    p.add_argument("--max-chars", type=int, default=9000)
-    p.add_argument("--no-inject-docs", action="store_true")
-    p.add_argument(
-        "--no-fast",
-        action="store_true",
-        help="Use Context7 LLM reranking instead of fast vector search",
-    )
+    _add_context7_tuning_options(p)
     p.set_defaults(func=cmd_enable_context7_env)
 
     p = sub.add_parser("disable-context7", help="Disable Context7 in router config")
@@ -1930,6 +1907,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--older-than-hours", type=int)
     p.set_defaults(func=cmd_context7_cache_clear)
 
+
+def _register_telemetry(sub: SubParsers) -> None:
     p = sub.add_parser("runs", help="Show recent provider runs from telemetry")
     p.add_argument("--limit", type=int, default=20)
     p.set_defaults(func=cmd_runs)
@@ -1937,6 +1916,30 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("stats", help="Show aggregated provider telemetry")
     p.set_defaults(func=cmd_stats)
 
+
+# Registration order is the order commands appear in `--help`, so this tuple is
+# the authoritative CLI outline. `router/tests/test_cli_surface.py` snapshots the
+# resulting surface and fails on any unintended change.
+COMMAND_REGISTRARS = (
+    _register_facade,
+    _register_workspace,
+    _register_diagnostics,
+    _register_verification,
+    _register_runtime,
+    _register_agents,
+    _register_agent_manager,
+    _register_workflows,
+    _register_context7,
+    _register_telemetry,
+)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="baldr-router")
+    parser.add_argument("--version", action="version", version=__version__)
+    sub = parser.add_subparsers(dest="command", required=True)
+    for register in COMMAND_REGISTRARS:
+        register(sub)
     return parser
 
 
