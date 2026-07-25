@@ -1,5 +1,14 @@
 # Change Log
 
+## 0.20.1
+
+- Builds the extension with TypeScript 7.0.2 and bundles the matching 0.20.1
+  Router runtime.
+- Fixes Windows qualification cleanup for terminated process identifiers,
+  SQLite handles and read-only Git objects.
+- Includes the reliability, type-safety and durable-core modularization fixes
+  from the coordinated 0.20.1 release.
+
 ## 0.20.0
 
 - Ships the coordinated 0.20 runtime for immutable external agents, Agent Manager team resolution and the independently installed Agent Runner.

@@ -265,7 +265,7 @@ class LocalAgentRunner:
                     "health-response",
                     message["request_id"],
                     status="ok",
-                    runner_version="0.20.0",
+                    runner_version="0.20.1",
                     protocols=[1],
                 ),
             )

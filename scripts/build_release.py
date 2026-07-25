@@ -15,8 +15,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from release_files import tracked_repository_files
+
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "0.20.0"
+VERSION = "0.20.1"
 DIST = ROOT / "dist"
 ARTIFACTS = DIST / "artifacts"
 PYTHON_DIST = ARTIFACTS / "python"
@@ -171,6 +173,7 @@ def zip_directory(
     *,
     root_name: str | None = None,
     exclude_parts: set[str] | None = None,
+    tracked_only: bool = False,
 ) -> None:
     excluded = {
         "node_modules", "__pycache__", ".pytest_cache", ".ruff_cache",
@@ -178,8 +181,13 @@ def zip_directory(
     }
     excluded.update(exclude_parts or set())
     target.parent.mkdir(parents=True, exist_ok=True)
+    inputs = (
+        tracked_repository_files(ROOT, subtree=source)
+        if tracked_only
+        else sorted(source.rglob("*"))
+    )
     with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
-        for item in sorted(source.rglob("*")):
+        for item in inputs:
             if not item.is_file() or any(part in excluded for part in item.parts):
                 continue
             if item.suffix.lower() in {".pyc", ".sqlite3", ".vsix"}:
@@ -1837,6 +1845,7 @@ def main() -> int:
         ROOT / "facades" / "kiro" / "baldr-orchestrator",
         kiro_power_archive,
         root_name="baldr-orchestrator",
+        tracked_only=True,
     )
     isolated_kiro_distribution_validation(
         uv,
@@ -1851,6 +1860,7 @@ def main() -> int:
         ROOT / "facades" / "vscode-agent-plugin",
         ARTIFACTS / f"baldr-router-agent-plugin-{VERSION}.zip",
         root_name="baldr-router-agent-plugin",
+        tracked_only=True,
     )
 
     individual_artifacts = [
@@ -1878,6 +1888,7 @@ def main() -> int:
         source_bundle,
         root_name="baldr-router",
         exclude_parts={"baldr_instrospeccion.md"},
+        tracked_only=True,
     )
     zip_selected([(ARTIFACTS, "artifacts"), (METADATA_DIR, "metadata")], artifacts_bundle)
     zip_selected([(VALIDATION_DIR, "validation")], validation_bundle)

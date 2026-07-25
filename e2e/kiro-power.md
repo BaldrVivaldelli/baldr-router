@@ -1,8 +1,8 @@
 # E2E: Kiro Power and optional adapter
 
 1. Install the v0.20 core and `baldr-kiro-adapter` in the same Python environment.
-2. Install `baldr-router-launcher-0.20.0.tgz` on the host that starts Kiro; run `baldr-router-launcher detect` and verify it resolves Router 0.20.0 on the host or WSL.
-3. Install the packaged `baldr-orchestrator-kiro-0.20.0.zip` through Kiro's
+2. Install `baldr-router-launcher-0.20.1.tgz` on the host that starts Kiro; run `baldr-router-launcher detect` and verify it resolves Router 0.20.1 on the host or WSL.
+3. Install the packaged `baldr-orchestrator-kiro-0.20.1.zip` through Kiro's
    **Add Custom Power → Import power from a folder → Install** flow. Verify its
    `mcp.json` uses `baldr-router-launcher mcp` and Kiro generated the
    namespaced entry under `powers.mcpServers`. Copying files into the installed

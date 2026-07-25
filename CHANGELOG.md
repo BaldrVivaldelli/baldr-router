@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+## 0.20.1 — Reliability Hardening
+
+- Eliminated the remaining 50 mypy findings across the Router and lowered the
+  full-core typecheck ratchet to zero, while keeping the seven boundary and
+  security modules under their stricter configuration.
+- Moved the shadow workspace's stable contracts, policy and manifest/delta
+  models into `shadow_workspace_models.py`; the backend now concentrates on
+  filesystem and Git execution while preserving its public import surface.
+- Separated durable-engine prompt construction and immutable agent-snapshot
+  resolution into `engine_prompts.py` and `engine_snapshot.py`. The engine keeps
+  a compatibility seam for injected catalog and gateway factories, so existing
+  integrations and tests can still replace those boundaries.
+- Migrated the TypeScript SDK, external-agent driver and VS Code extension to
+  TypeScript 7.0.2. The driver no longer depends on the removed legacy compiler
+  API: it invokes the packaged native compiler through its portable Node
+  entrypoint, emits LF-normalized CommonJS modules and records the exact
+  compiler version in build metadata.
+- Fixed the Windows CI lifecycle canaries. An already-terminated PID reported
+  as `WinError 87` is no longer mistaken for a live orphan, the extension-host
+  cancellation fixture closes its SQLite connection before temporary cleanup,
+  and verification cleanup clears read-only Git object attributes while still
+  retrying transient sharing locks.
+- Kept release secret scans scoped to repository-owned inputs by excluding
+  downloaded VS Code test runtimes and explicitly marking the Agent Manager
+  test credential as synthetic.
 - Finished decomposing the durable engine's oversized methods.
   `_apply_reconciliation` went from 434 lines to a ~60-line decision path, with
   the write-authorization gate, the allowed-action description, the rejection of
@@ -9,13 +34,12 @@
   `_execute_phase` went from 354 to 278 by extracting step re-entry, participant
   preparation, parallel and serial dispatch, and the failure-recording sequence
   that three paths repeated.
-- Split `durability/store.py` from 3.619 lines into the core plus three
-  aggregate mixins: `store_publications.py` (durable Git publication state),
-  `store_maintenance.py` (recovery bookkeeping, GC and SQLite upkeep) and
-  `store_snapshots.py` (read models, private and redacted). Shared helpers,
-  errors and the lease token moved to `store_core.py`; `durability.store`
-  re-exports them so importers are unaffected. `DurableStore` keeps 58 methods
-  in 2.240 lines.
+- Finished splitting `durability/store.py`: its 297-line composition root now
+  keeps only connection, migration, integrity and lease-fencing primitives.
+  Six aggregate mixins own events/artifacts, run lifecycle and leases, execution
+  state, durable Git publication, maintenance, and private/redacted read models.
+  Shared helpers, errors and the lease token live in `store_core.py`;
+  `durability.store` re-exports them so importers are unaffected.
 - Kept type checking honest across that split with a `DurableStoreProtocol`
   that declares the primitives an aggregate borrows. It applies only under
   `TYPE_CHECKING`, so at runtime the mixins stay plain classes and nothing can

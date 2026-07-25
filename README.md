@@ -131,8 +131,8 @@ Una release se instala sin conservar el checkout:
 ```bash
 node_package_dir=/ruta/a/release/artifacts/node
 npm install --global \
-  "$node_package_dir/baldr-agent-sdk-0.20.0.tgz" \
-  "$node_package_dir/baldr-agent-builder-typescript-0.20.0.tgz"
+  "$node_package_dir/baldr-agent-sdk-0.20.1.tgz" \
+  "$node_package_dir/baldr-agent-builder-typescript-0.20.1.tgz"
 baldr-agent driver doctor baldr.typescript
 ```
 
@@ -232,7 +232,7 @@ make check
 - Agregar otro lenguaje requiere un SDK de autoría y un driver compatible; no
   requiere modificar Router, Agent Manager ni Runner.
 
-> **v0.20.0 — Agentes externos políglotas.** La consola explica en lenguaje cotidiano
+> **v0.20.1 — Agentes externos políglotas.** La consola explica en lenguaje cotidiano
 > qué entendió Baldr, qué está haciendo, qué produjo Planificación, Ejecución y
 > Revisión, qué comprobó y cuándo necesita una decisión. El recorrido normal
 > trabaja directamente sobre el workspace confiado; la autorización por tarea
@@ -259,7 +259,7 @@ baldr-router qualification run \
   --canary-results ./qualification-input/canary-results.json \
   --repeat 3
 baldr-router qualification status --latest
-baldr-router qualification promotion-status --receipt ./qualification-output --release-version 0.20.0
+baldr-router qualification promotion-status --receipt ./qualification-output --release-version 0.20.1
 ```
 
 `qualified` exige el entorno exacto, todas las assertions del cliente, tres pases del Lab y diez tareas con evidence sobre dos repositorios distintos. Un build de CI siempre queda como máximo `provisional`.
@@ -323,7 +323,7 @@ Instalación local:
 Extensions
   -> …
   -> Install from VSIX
-  -> baldr-router-vscode-0.20.0.vsix
+  -> baldr-router-vscode-0.20.1.vsix
 ```
 
 Superficie diaria:
@@ -404,14 +404,14 @@ facades/kiro/baldr-orchestrator/
 ```
 
 La distribución ejecutable también incluye
-`artifacts/node/baldr-router-launcher-0.20.0.tgz`. Instalalo en el host que
+`artifacts/node/baldr-router-launcher-0.20.1.tgz`. Instalalo en el host que
 inicia Kiro antes de cargar el Power; el launcher encuentra primero un Router
 local y usa WSL como fallback automático. No hace falta editar `mcp.json` ni
 depender de un checkout del monorepo:
 
 ```bash
 npm install --global \
-  ./artifacts/node/baldr-router-launcher-0.20.0.tgz
+  ./artifacts/node/baldr-router-launcher-0.20.1.tgz
 baldr-router-launcher detect
 ```
 

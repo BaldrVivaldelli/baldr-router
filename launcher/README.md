@@ -42,7 +42,7 @@ the Kiro Power. On the host that starts Kiro and its MCP processes, run:
 
 ```bash
 npm install --global \
-  ./artifacts/node/baldr-router-launcher-0.20.0.tgz
+  ./artifacts/node/baldr-router-launcher-0.20.1.tgz
 baldr-router-launcher detect
 ```
 

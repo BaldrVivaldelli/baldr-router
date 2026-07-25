@@ -26,7 +26,7 @@ import { fileURLToPath } from "node:url";
 const DRIVER_CONTRACT = "baldr-builder-driver";
 const PROTOCOL_VERSION = 1;
 const DRIVER_ID = "baldr.typescript";
-const DRIVER_VERSION = "0.20.0";
+const DRIVER_VERSION = "0.20.1";
 const TARGET_PROTOCOL = "agent-execution-v1";
 const SDK_MODULE_ID = "@baldr/agent-sdk";
 const SDK_SOURCE_ID = "__baldr_internal__/sdk/index.ts";

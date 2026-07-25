@@ -217,10 +217,10 @@ Verify the release input explicitly:
 ```bash
 baldr-router qualification promotion-status \
   --receipt ./qualification-output \
-  --release-version 0.20.0
+  --release-version 0.20.1
 ```
 
-The release workflow is manual and must be dispatched from the `v0.20.0` tag
+The release workflow is manual and must be dispatched from the `v0.20.1` tag
 with the run id of the successful `vscode-remote-wsl` qualification workflow.
 
 ## Self-hosted CI evaluation

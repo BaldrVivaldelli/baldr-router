@@ -216,8 +216,8 @@ Release artifacts support installation without a source checkout:
 
 ```bash
 npm install --global \
-  ./baldr-agent-sdk-0.20.0.tgz \
-  ./baldr-agent-builder-typescript-0.20.0.tgz
+  ./baldr-agent-sdk-0.20.1.tgz \
+  ./baldr-agent-builder-typescript-0.20.1.tgz
 baldr-agent driver doctor baldr.typescript
 ```
 

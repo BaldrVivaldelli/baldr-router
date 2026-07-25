@@ -93,7 +93,7 @@ wheels = [
 
 [[package]]
 name = "baldr-agent-builder"
-version = "0.20.0"
+version = "0.20.1"
 source = { editable = "tooling/agent-builder" }
 dependencies = [
     { name = "baldr-agent-sdk" },
@@ -117,7 +117,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "baldr-agent-runner"
-version = "0.20.0"
+version = "0.20.1"
 source = { editable = "runtimes/agent-runner" }
 dependencies = [
     { name = "baldr-agent-sdk" },
@@ -139,7 +139,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "baldr-agent-sdk"
-version = "0.20.0"
+version = "0.20.1"
 source = { editable = "sdks/python" }
 
 [package.optional-dependencies]
@@ -157,7 +157,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "baldr-kiro-adapter"
-version = "0.20.0"
+version = "0.20.1"
 source = { editable = "facades/kiro/adapter" }
 dependencies = [
     { name = "baldr-router" },
@@ -181,7 +181,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "baldr-router"
-version = "0.20.0"
+version = "0.20.1"
 source = { editable = "router" }
 dependencies = [
     { name = "jsonschema" },

@@ -8,7 +8,7 @@ monorepo.
 
 ## Actualizar el runtime
 
-Instalá juntos los wheels `0.20.0` de Router, Agent Builder, Agent Runner y el
+Instalá juntos los wheels `0.20.1` de Router, Agent Builder, Agent Runner y el
 SDK Python. La extensión VS Code instala su wheel privado en un runtime
 versionado separado, por lo que puede volver a `0.19.0` si la actualización no
 completa.
@@ -19,7 +19,7 @@ actualizado antes de reconectar MCP:
 
 ```bash
 npm install --global \
-  ./artifacts/node/baldr-router-launcher-0.20.0.tgz
+  ./artifacts/node/baldr-router-launcher-0.20.1.tgz
 baldr-router-launcher detect
 ```
 
@@ -27,8 +27,8 @@ Para TypeScript, el driver requiere exactamente la misma versión del SDK:
 
 ```bash
 npm install --global \
-  ./baldr-agent-sdk-0.20.0.tgz \
-  ./baldr-agent-builder-typescript-0.20.0.tgz
+  ./baldr-agent-sdk-0.20.1.tgz \
+  ./baldr-agent-builder-typescript-0.20.1.tgz
 
 baldr-agent driver doctor baldr.typescript
 ```
@@ -43,7 +43,7 @@ Desde el repositorio externo:
 
 ```bash
 baldr-agent test
-baldr-agent driver conformance baldr.typescript --driver-version 0.20.0
+baldr-agent driver conformance baldr.typescript --driver-version 0.20.1
 baldr-agent build
 baldr-agent publish
 baldr-agent doctor
@@ -64,7 +64,7 @@ baldr-agent run \
   --role implementer \
   --workspace /ruta/al/workspace \
   --request "Generá el informe" \
-  --driver-version 0.20.0
+  --driver-version 0.20.1
 ```
 
 El workspace es obligatorio. Planner y reviewer reciben snapshots de solo

@@ -6,7 +6,7 @@ import * as vscode from 'vscode';
 import { redactSensitive } from './redaction.js';
 import { describeRuntimeInvocation } from './runtimeLog.js';
 
-export const EXTENSION_VERSION = '0.20.0';
+export const EXTENSION_VERSION = '0.20.1';
 export const CONTEXT7_SECRET_KEY = 'baldr.context7ApiKey';
 const PROVIDER_MODELS_CACHE_TTL_MS = 5 * 60 * 1000;
 
@@ -137,7 +137,7 @@ export class BaldrRuntime implements vscode.Disposable {
       ? fs.readdirSync(runtimeDir).filter((name) => /^baldr_router-.*\.whl$/i.test(name)).sort()
       : [];
     if (candidates.length === 0) {
-      return path.join(runtimeDir, 'baldr_router-0.20.0-py3-none-any.whl');
+      return path.join(runtimeDir, 'baldr_router-0.20.1-py3-none-any.whl');
     }
     return path.join(runtimeDir, candidates.at(-1)!);
   }

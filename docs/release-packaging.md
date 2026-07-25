@@ -1,6 +1,6 @@
 # Release packaging
 
-v0.20.0 separates source, executable artifacts, and validation evidence.
+v0.20.1 separates source, executable artifacts, and validation evidence.
 
 Python artifacts are also split by responsibility: `baldr-router` is the
 control plane, `baldr-agent-sdk` is the public authoring API,
@@ -23,7 +23,7 @@ facade clients, compares two byte-identical builds, publishes versions 1.0.0
 and 1.1.0, rejects replacement of 1.1.0 and rolls back to 1.0.0. Evidence is
 written to `dist/validation/typescript-distribution.json`.
 
-The release workflow is dispatched manually from the `v0.20.0` tag. Before it
+The release workflow is dispatched manually from the `v0.20.1` tag. Before it
 builds or publishes, it downloads the artifact from a successful real
 qualification run on the same commit and verifies a digest-valid
 `vscode-remote-wsl` receipt whose provider smoke identifies Codex. Kiro
@@ -34,12 +34,12 @@ PyPI projects and the npm organization must first configure this repository as
 a trusted publisher; a tag alone never publishes packages.
 
 ```text
-dist/baldr-router-0.20.0-source.zip
+dist/baldr-router-0.20.1-source.zip
   source, tests, docs, workflows, contracts; no runtime database or cache
 
-dist/baldr-router-0.20.0-artifacts.zip
+dist/baldr-router-0.20.1-artifacts.zip
   wheels, VSIX, Kiro Power, Agent Plugin, SBOM and provenance
-dist/baldr-router-0.20.0-validation-evidence.zip
+dist/baldr-router-0.20.1-validation-evidence.zip
   portable synthetic build reports only
 ```
 

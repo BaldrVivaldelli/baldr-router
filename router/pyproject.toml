@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "baldr-router"
-version = "0.20.0"
+version = "0.20.1"
 description = "Client-agnostic MCP orchestration runtime with a frozen setup/status/run facade contract, provider adapters, roles, workflows, Context7 cache, telemetry, and structured reports."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -90,8 +90,8 @@ strict_equality = true
 [project.optional-dependencies]
 codex-sdk = ["openai-codex"]
 dev = [
-  "baldr-agent-runner>=0.20.0,<0.21.0",
-  "baldr-agent-sdk>=0.20.0,<0.21.0",
+  "baldr-agent-runner>=0.20.1,<0.21.0",
+  "baldr-agent-sdk>=0.20.1,<0.21.0",
   "coverage[toml]>=7.6",
   "mypy>=1.13",
   "pytest>=8.0",

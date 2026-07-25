@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from release_files import tracked_repository_files
+
 ROOT = Path(__file__).resolve().parents[1]
 
 SECRET_PATTERNS = {
@@ -156,10 +158,10 @@ def generate_provenance(version: str, artifacts: list[Path], output: Path) -> di
     return statement
 
 
-def secret_scan(output: Path) -> dict[str, Any]:
+def secret_scan(output: Path, *, root: Path = ROOT) -> dict[str, Any]:
     findings: list[dict[str, Any]] = []
     scanned = 0
-    for path in ROOT.rglob("*"):
+    for path in tracked_repository_files(root):
         if not path.is_file() or any(part in SKIP_PARTS for part in path.parts):
             continue
         if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".zip", ".whl", ".vsix", ".sqlite3", ".pyc"}:
@@ -176,7 +178,7 @@ def secret_scan(output: Path) -> dict[str, Any]:
                     continue
                 findings.append(
                     {
-                        "path": path.relative_to(ROOT).as_posix(),
+                        "path": path.relative_to(root).as_posix(),
                         "pattern": name,
                         "line": text.count("\n", 0, match.start()) + 1,
                     }

@@ -44,8 +44,8 @@ def test_init_test_and_deterministic_self_contained_build(tmp_path: Path) -> Non
     second = build_project(project, output_dir=tmp_path / "build-two")
 
     assert first.artifact_digest == second.artifact_digest
-    assert first.metadata["builder_version"] == "0.20.0"
-    assert first.metadata["sdk_version"] == "0.20.0"
+    assert first.metadata["builder_version"] == "0.20.1"
+    assert first.metadata["sdk_version"] == "0.20.1"
     with zipfile.ZipFile(first.artifact) as archive:
         assert "baldr_agent_sdk/agent.py" in archive.namelist()
     env = os.environ.copy()

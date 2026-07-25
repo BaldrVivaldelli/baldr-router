@@ -14,7 +14,7 @@ Requisitos:
 
 Recorrido:
 
-1. Instalá `baldr-router-vscode-0.20.0.vsix` y recargá la ventana si VS Code lo
+1. Instalá `baldr-router-vscode-0.20.1.vsix` y recargá la ventana si VS Code lo
    solicita.
 2. Abrí el repositorio y aceptá **Workspace Trust**. Esa decisión autoriza el
    workspace; Baldr no vuelve a pedir permiso antes de cada tarea.
@@ -59,14 +59,14 @@ qualification ni puede satisfacer el gate de promoción v0.20; estas
 instrucciones preservan la integración disponible para una qualification
 posterior.
 
-Descargá y extraé `baldr-router-0.20.0-artifacts.zip`. Desde el directorio
+Descargá y extraé `baldr-router-0.20.1-artifacts.zip`. Desde el directorio
 extraído, instalá Router y el adapter en el mismo entorno donde se ejecutará
 el core (el host o la distribución WSL elegida):
 
 ```bash
 cd artifacts/python
-uv tool install --force ./baldr_router-0.20.0-py3-none-any.whl \
-  --with ./baldr_kiro_adapter-0.20.0-py3-none-any.whl \
+uv tool install --force ./baldr_router-0.20.1-py3-none-any.whl \
+  --with ./baldr_kiro_adapter-0.20.1-py3-none-any.whl \
   --with-executables-from baldr-kiro-adapter
 cd ../..
 ```
@@ -76,13 +76,13 @@ PowerShell— instalá el launcher incluido en el mismo release:
 
 ```bash
 npm install --global \
-  ./artifacts/node/baldr-router-launcher-0.20.0.tgz
+  ./artifacts/node/baldr-router-launcher-0.20.1.tgz
 baldr-router-launcher detect
 ```
 
-`detect` debe informar Router `0.20.0` en el host o en WSL. Después:
+`detect` debe informar Router `0.20.1` en el host o en WSL. Después:
 
-1. extraé `artifacts/baldr-orchestrator-kiro-0.20.0.zip` e instalá el Power
+1. extraé `artifacts/baldr-orchestrator-kiro-0.20.1.zip` e instalá el Power
    local desde el directorio `baldr-orchestrator/` resultante usando
    **Powers → Add Custom Power → Import power from a folder → Install**. No
    copies el contenido directamente dentro de `~/.kiro/powers/installed`:
@@ -111,10 +111,10 @@ agentes. Desde el directorio donde extrajiste el ZIP de artefactos:
 
 ```bash
 cd artifacts/python
-uv tool install --force ./baldr_agent_runner-0.20.0-py3-none-any.whl \
-  --with ./baldr_agent_sdk-0.20.0-py3-none-any.whl \
-  --with ./baldr_agent_builder-0.20.0-py3-none-any.whl \
-  --with ./baldr_router-0.20.0-py3-none-any.whl \
+uv tool install --force ./baldr_agent_runner-0.20.1-py3-none-any.whl \
+  --with ./baldr_agent_sdk-0.20.1-py3-none-any.whl \
+  --with ./baldr_agent_builder-0.20.1-py3-none-any.whl \
+  --with ./baldr_router-0.20.1-py3-none-any.whl \
   --with-executables-from baldr-agent-builder \
   --with-executables-from baldr-router
 cd ../..
@@ -124,8 +124,8 @@ Para TypeScript, instalá además el driver publicado:
 
 ```bash
 npm install --global \
-  ./artifacts/node/baldr-agent-sdk-0.20.0.tgz \
-  ./artifacts/node/baldr-agent-builder-typescript-0.20.0.tgz
+  ./artifacts/node/baldr-agent-sdk-0.20.1.tgz \
+  ./artifacts/node/baldr-agent-builder-typescript-0.20.1.tgz
 ```
 
 Creá el proyecto sin escribir configuración manual:

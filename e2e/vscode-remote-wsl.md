@@ -7,10 +7,10 @@ iteration.
 ## Prepare the real client
 
 1. Open a real disposable Git repository through **WSL: Open Folder in WSL**.
-2. Install `baldr-router-vscode-0.20.0.vsix` in the WSL extension host and
+2. Install `baldr-router-vscode-0.20.1.vsix` in the WSL extension host and
    reload the window.
 3. Grant **Workspace Trust**. Do not edit JSON, TOML, or MCP configuration.
-4. Confirm the Baldr output reports `version: 0.20.0`, `kind: host`,
+4. Confirm the Baldr output reports `version: 0.20.1`, `kind: host`,
    `source: installed-private-host-runtime`, and never invokes `wsl.exe`.
 5. Open Baldr and complete one bounded task with Codex. Planning, execution,
    and review must finish; implementation must write directly without a

@@ -2306,7 +2306,7 @@
                   "dest": "release_version",
                   "nargs": null,
                   "const": null,
-                  "default": "0.20.0",
+                  "default": "0.20.1",
                   "type": null,
                   "choices": null,
                   "required": false,

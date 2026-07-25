@@ -21,7 +21,7 @@ Context7 is optional and is configured during `/setup`.
 
 ## VS Code: clean Windows machine with optional WSL
 
-1. Install the `baldr-router-vscode-0.20.0.vsix`, or install Baldr Router from the Marketplace when published.
+1. Install the `baldr-router-vscode-0.20.1.vsix`, or install Baldr Router from the Marketplace when published.
 2. Accept VS Code's publisher and MCP trust dialogs.
 3. Open the Git repository you want Baldr to work on. Direct work is the default; a non-Git folder remains an explicit reduced-guarantee choice.
 4. Once startup finishes, Baldr prepares its private runtime in the background
@@ -50,30 +50,30 @@ and compatibility tests remain part of v0.20, but its real-client
 qualification is explicitly deferred and cannot block or satisfy this
 iteration's VS Code Remote WSL + Codex promotion gate:
 
-1. Download and extract `baldr-router-0.20.0-artifacts.zip`.
+1. Download and extract `baldr-router-0.20.1-artifacts.zip`.
 2. From the extracted directory, install the core and adapter into the same
    environment where Router will run (the host or the selected WSL
    distribution):
 
    ```bash
    cd artifacts/python
-   uv tool install --force ./baldr_router-0.20.0-py3-none-any.whl \
-     --with ./baldr_kiro_adapter-0.20.0-py3-none-any.whl \
+   uv tool install --force ./baldr_router-0.20.1-py3-none-any.whl \
+     --with ./baldr_kiro_adapter-0.20.1-py3-none-any.whl \
      --with-executables-from baldr-kiro-adapter
    cd ../..
    ```
 
 3. On the host that starts Kiro and its MCP servers—normally Windows
    PowerShell—install the launcher shipped in the same release and verify that
-   it resolves Router `0.20.0`:
+   it resolves Router `0.20.1`:
 
    ```bash
    npm install --global \
-     ./artifacts/node/baldr-router-launcher-0.20.0.tgz
+     ./artifacts/node/baldr-router-launcher-0.20.1.tgz
    baldr-router-launcher detect
    ```
 
-4. Extract `artifacts/baldr-orchestrator-kiro-0.20.0.zip`. In Kiro, use
+4. Extract `artifacts/baldr-orchestrator-kiro-0.20.1.zip`. In Kiro, use
    **Powers → Add Custom Power → Import power from a folder → Install** and
    select the resulting `baldr-orchestrator/` directory. Do not copy the
    directory into `~/.kiro/powers/installed`: the supported install action is

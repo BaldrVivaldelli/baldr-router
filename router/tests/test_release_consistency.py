@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
 import zipfile
 from pathlib import Path
@@ -152,9 +153,9 @@ def _synthetic_artifacts(
 def test_current_release_surfaces_are_consistent() -> None:
     values = release_consistency.source_version_values(ROOT)
     assert len(values) >= 15
-    assert set(values.values()) == {"0.20.0"}
+    assert set(values.values()) == {"0.20.1"}
     assert release_consistency.TYPESCRIPT_TOOLCHAIN_RANGE == "^7.0.2"
-    assert release_consistency.check_source_consistency(ROOT) == "0.20.0"
+    assert release_consistency.check_source_consistency(ROOT) == "0.20.1"
 
 
 def test_uniform_version_gate_reports_every_surface() -> None:
@@ -209,14 +210,16 @@ def test_release_workflow_never_hardcodes_a_version() -> None:
     assert "check_release_consistency.py --print-version" in workflow
     assert 'expected="v${RELEASE_VERSION}"' in workflow
     assert not [
-        line for line in workflow.splitlines() if "v0.20.0" in line
+        line
+        for line in workflow.splitlines()
+        if re.search(r"\bv\d+\.\d+\.\d+\b", line)
     ], "the release gate must derive the version from the repository"
 
 
 def test_print_version_reports_the_uniform_release(capsys) -> None:
     assert release_consistency.main(["--print-version"]) == 0
 
-    assert capsys.readouterr().out.strip() == "0.20.0"
+    assert capsys.readouterr().out.strip() == "0.20.1"
 
 
 def test_freeze_documents_must_state_the_current_line(
