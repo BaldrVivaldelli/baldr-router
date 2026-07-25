@@ -17,11 +17,18 @@ from .agent_api import (
     AgentTransportError,
     ResolvedAgent,
 )
+from .contract_schemas import ContractSchemaError, validate_contract
 from .run import run_command
 from .provider_activity import PUBLIC_ACTIVITY_CATEGORIES, emit_provider_activity
 
 EXECUTION_CONTRACT = "baldr-agent-execution"
 EXECUTION_VERSION = 1
+EXECUTION_SCHEMA = "agent-execution-v1.schema.json"
+_MESSAGE_DEFINITIONS = {
+    "accepted": "accepted",
+    "event": "event",
+    "result": "result",
+}
 _MAX_PROTOCOL_OUTPUT = 8 * 1024 * 1024
 _TERMINAL_STATES = {"succeeded", "failed", "cancelled", "unknown"}
 _LOCAL_TARGET_KEYS = {
@@ -131,8 +138,20 @@ def _execution_message(value: Any) -> dict[str, Any]:
         raise AgentContractError(
             "Agent response does not implement baldr-agent-execution v1."
         )
-    if message.get("kind") not in {"accepted", "event", "result"}:
+    kind = message.get("kind")
+    if kind not in _MESSAGE_DEFINITIONS:
         raise AgentContractError("Agent execution response has an unsupported kind.")
+    # The packaged contract is authoritative for external payloads. Hand-rolled
+    # checks below still run, but they no longer decide what is well formed.
+    try:
+        validate_contract(
+            message,
+            contract=EXECUTION_SCHEMA,
+            definition=_MESSAGE_DEFINITIONS[kind],
+            label=f"Agent execution {kind} message",
+        )
+    except ContractSchemaError as exc:
+        raise AgentContractError(str(exc)) from exc
     return message
 
 

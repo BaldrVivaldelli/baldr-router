@@ -17,9 +17,11 @@ from .agent_api import (
     ResolvedAgent,
 )
 from .agent_execution import build_execution_invocation, consume_execution_messages
+from .contract_schemas import ContractSchemaError, validate_contract
 
 INVOCATION_CONTRACT = "baldr-agent-invocation"
 RESULT_CONTRACT = "baldr-agent-result"
+HTTP_TRANSPORT_CONTRACT = "agent-transport-http-v1.schema.json"
 HTTP_CONTRACT_VERSION = 1
 MAX_HTTP_RESPONSE_BYTES = 2 * 1024 * 1024
 _ENV_NAME = re.compile(r"^[A-Z_][A-Z0-9_]{0,127}$")
@@ -59,7 +61,15 @@ def validate_http_endpoint(url: str, *, allow_insecure_loopback: bool) -> str:
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
+    def redirect_request(
+        self,
+        req: Any,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> None:
         del req, fp, code, msg, headers, newurl
         return None
 
@@ -173,6 +183,24 @@ class JsonHttpClient:
         return decoded
 
 
+def _validate_transport_message(
+    message: Mapping[str, Any],
+    *,
+    definition: str,
+    label: str,
+) -> None:
+    """Enforce the packaged HTTP transport contract on a wire message."""
+    try:
+        validate_contract(
+            dict(message),
+            contract=HTTP_TRANSPORT_CONTRACT,
+            definition=definition,
+            label=label,
+        )
+    except ContractSchemaError as exc:
+        raise AgentContractError(str(exc)) from exc
+
+
 class HttpJsonAgentConnector:
     """Invoke an externally hosted agent through the Baldr HTTP JSON v1 contract."""
 
@@ -246,6 +274,11 @@ class HttpJsonAgentConnector:
                 "requested_capabilities": list(invocation.requested_capabilities),
             },
         }
+        # Validating our own request first keeps a Baldr-side regression from
+        # being reported as a misbehaving third-party agent.
+        _validate_transport_message(
+            payload, definition="invocation", label="Agent HTTP request"
+        )
         response = self.client.request_json(
             method="POST",
             url=endpoint,
@@ -260,6 +293,9 @@ class HttpJsonAgentConnector:
             raise AgentContractError(
                 "Agent HTTP response does not implement baldr-agent-result v1."
             )
+        _validate_transport_message(
+            response, definition="result", label="Agent HTTP response"
+        )
         result = response.get("result")
         if not isinstance(result, Mapping):
             raise AgentContractError("Agent HTTP result must be an object.")
