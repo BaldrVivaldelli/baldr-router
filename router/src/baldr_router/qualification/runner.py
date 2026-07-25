@@ -260,6 +260,8 @@ def _evaluate_profile_environment(
     actual_router_runtime = _normalize_runtime(
         facts.get("router_runtime") or facts.get("runtime_transport")
     )
+    actual_baldr_version = str((receipt or {}).get("baldr_version") or "")
+    actual_client_version = str((receipt or {}).get("client_version") or "")
     is_wsl = _router_is_wsl(environment)
     expected_client = str(profile.get("client_id_contains") or "").lower()
     expected_host = _normalize_host(profile.get("expected_client_host"))
@@ -267,6 +269,8 @@ def _evaluate_profile_environment(
     expected_runtime = _normalize_runtime(profile.get("expected_router_runtime"))
     checks = {
         "client_receipt": receipt is not None,
+        "client_receipt_version": actual_baldr_version == __version__,
+        "client_version": actual_client_version == __version__,
         "client": bool(expected_client and expected_client in actual_client),
         "client_host": actual_client_host == expected_host,
         "router_platform": actual_router_platform == expected_platform,
@@ -280,6 +284,8 @@ def _evaluate_profile_environment(
             "router_platform": actual_router_platform,
             "client_id": actual_client,
             "client_host": actual_client_host or None,
+            "client_version": actual_client_version or None,
+            "client_receipt_version": actual_baldr_version or None,
             "router_runtime": actual_router_runtime or None,
             "is_wsl": is_wsl,
         },
@@ -287,6 +293,8 @@ def _evaluate_profile_environment(
             "router_platform": expected_platform,
             "client_id_contains": expected_client,
             "client_host": expected_host,
+            "client_version": __version__,
+            "client_receipt_version": __version__,
             "router_runtime": expected_runtime,
             "requires_wsl": profile.get("requires_wsl"),
         },

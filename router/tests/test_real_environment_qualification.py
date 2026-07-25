@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 import baldr_router.qualification.runner as qualification_runner
+from baldr_router import __version__
 from baldr_router.qualification import (
     latest_qualification,
     promotion_status,
@@ -492,6 +493,28 @@ def test_client_receipt_is_redacted_and_discoverable(
     assert latest["receipt"]["client"] == "vscode-extension"
 
 
+def test_profile_environment_rejects_stale_client_receipt() -> None:
+    result = qualification_runner._evaluate_profile_environment(
+        qualification_profile("vscode-linux-native"),
+        _linux_native_environment(),
+        {
+            "client": "vscode-extension",
+            "client_version": "0.0.0",
+            "baldr_version": "0.0.0",
+            "facts": {
+                "extension_host": "linux",
+                "router_runtime": "host",
+            },
+        },
+    )
+
+    assert result["ok"] is False
+    assert result["checks"]["client_receipt_version"] is False
+    assert result["checks"]["client_version"] is False
+    assert result["actual"]["client_receipt_version"] == "0.0.0"
+    assert result["expected"]["client_receipt_version"] == __version__
+
+
 def test_qualification_template_contains_two_repositories_and_ten_tasks(
     tmp_path: Path,
 ) -> None:
@@ -596,7 +619,7 @@ def test_real_environment_qualification_requires_real_evidence(
     )
     record_client_receipt(
         client="vscode-extension",
-        client_version="0.17.0",
+        client_version=__version__,
         facts={"extension_host": "linux", "router_runtime": "host"},
     )
 
@@ -624,7 +647,7 @@ def test_real_run_auto_attests_only_machine_proven_assertions(
     assert trust_workspace(str(workspace))["ok"] is True
     record_client_receipt(
         client="vscode-extension",
-        client_version="0.20.0",
+        client_version=__version__,
         facts={
             "extension_host": "linux",
             "router_runtime": "host",
@@ -725,7 +748,7 @@ def test_real_environment_qualification_qualifies_exact_profile_and_canaries(
     assert trust_workspace(str(workspace))["ok"] is True
     record_client_receipt(
         client="vscode-extension",
-        client_version="0.17.0",
+        client_version=__version__,
         facts={
             "extension_host": "linux",
             "router_runtime": "host",
@@ -793,7 +816,7 @@ def test_same_assertion_without_evidence_remains_provisional(
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     record_client_receipt(
         client="vscode-extension",
-        client_version="0.17.0",
+        client_version=__version__,
         facts={"extension_host": "linux", "router_runtime": "host"},
     )
     template_dir = tmp_path / "qualification"
