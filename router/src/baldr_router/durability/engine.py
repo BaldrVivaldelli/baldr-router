@@ -1825,91 +1825,12 @@ class DurableWorkflowEngine:
         run_id = str(run["id"])
         recorded_reconciliation = run.get("reconciliation") or {}
         if recorded_reconciliation.get("reason") == "write-authorization-required":
-            allowed_actions = {"authorize_changes", "decline_changes"}
-            if not action:
-                result = self._result_from_snapshot(self.store.snapshot_run(run_id))
-                result.update(
-                    {
-                        "ok": False,
-                        "status": "awaiting_reconciliation",
-                        "reason": "Baldr necesita autorización para modificar archivos.",
-                        "reconciliation": {
-                            "reason": "write-authorization-required",
-                            "allowed_actions": sorted(allowed_actions),
-                        },
-                    }
-                )
-                return {"continue": False, "result": result}
-            action = action.strip().lower()
-            if action not in allowed_actions:
-                result = self._result_from_snapshot(self.store.snapshot_run(run_id))
-                result.update(
-                    {
-                        "ok": False,
-                        "status": "awaiting_reconciliation",
-                        "error": {"code": "invalid_write_authorization_action"},
-                        "reason": "Elegí si Baldr puede modificar archivos.",
-                        "reconciliation": {
-                            "reason": "write-authorization-required",
-                            "allowed_actions": sorted(allowed_actions),
-                        },
-                    }
-                )
-                return {"continue": False, "result": result}
-            if action == "decline_changes":
-                self.store.transition_run(
-                    run_id,
-                    "cancelled",
-                    event_type="workflow.write_authorization_declined",
-                    error_code="write_authorization_declined",
-                    error_reason="The person declined workspace changes.",
-                    reconciliation={
-                        "reason": "write-authorization-resolved",
-                        "authorization": "declined",
-                        "resolved_by": action,
-                        "resolved_at": utc_now_iso(),
-                    },
-                    lease=lease,
-                )
-                return {
-                    "continue": False,
-                    "result": self._result_from_snapshot(
-                        self.store.snapshot_run(run_id)
-                    ),
-                }
-            resolved = {
-                "reason": "write-authorization-resolved",
-                "authorization": "granted",
-                "resolved_by": action,
-                "resolved_at": utc_now_iso(),
-            }
-            if recorded_reconciliation.get("replay_architect") is True:
-                architect_step = self.store.get_step(run_id, "architect.plan")
-                if architect_step and str(architect_step.get("status") or "") in {
-                    "unknown",
-                    "interrupted",
-                    "failed",
-                }:
-                    self.store.reset_step_for_retry(
-                        str(architect_step["id"]),
-                        reason="operator:authorize_changes:legacy-write-policy",
-                        lease=lease,
-                        retry_successful_participants=True,
-                    )
-            self.store.transition_run(
-                run_id,
-                "recovering",
-                event_type="workflow.write_authorization_granted",
-                reconciliation=resolved,
+            return self._resolve_write_authorization(
+                run_id=run_id,
+                recorded_reconciliation=recorded_reconciliation,
+                action=action,
                 lease=lease,
             )
-            self.store.transition_run(
-                run_id,
-                "running",
-                reconciliation=resolved,
-                lease=lease,
-            )
-            return {"continue": True}
 
         legacy_write_authorization = self._legacy_write_policy_failure(run_id, run)
         authorization_granted = False
@@ -1918,26 +1839,7 @@ class DurableWorkflowEngine:
             "decline_changes",
         }:
             if action == "decline_changes":
-                self.store.transition_run(
-                    run_id,
-                    "cancelled",
-                    event_type="workflow.write_authorization_declined",
-                    error_code="write_authorization_declined",
-                    error_reason="The person declined workspace changes.",
-                    reconciliation={
-                        "reason": "write-authorization-resolved",
-                        "authorization": "declined",
-                        "resolved_by": action,
-                        "resolved_at": utc_now_iso(),
-                    },
-                    lease=lease,
-                )
-                return {
-                    "continue": False,
-                    "result": self._result_from_snapshot(
-                        self.store.snapshot_run(run_id)
-                    ),
-                }
+                return self._decline_write_authorization(run_id, lease=lease)
             authorization_granted = True
             action = "continue_from_shadow"
 
@@ -1946,24 +1848,11 @@ class DurableWorkflowEngine:
             self.workspace_manager.from_checkpoint(checkpoint) if checkpoint else None
         )
         workspace_config = (run.get("config_snapshot") or {}).get("workspace") or {}
-        repository_identity = run.get("repository_identity") or {}
-        non_git_run = bool(
-            workspace_config.get("allow_non_git") is True
-            or repository_identity.get("git") is False
+        details = self._reconciliation_details(
+            run=run,
+            execution=execution,
+            workspace_root=workspace_root,
         )
-        if execution:
-            details = self.workspace_manager.reconciliation_status(execution)
-        elif non_git_run:
-            details = {
-                "allowed_actions": ["accept_existing_changes", "mark_failed"],
-                "mode": "in-place",
-                "original_exists": workspace_root.exists(),
-                "execution_exists": workspace_root.exists(),
-                "execution_is_git": False,
-                "recoverable": False,
-            }
-        else:
-            details = {"allowed_actions": ["mark_failed"]}
         if not action:
             result = self._result_from_snapshot(self.store.snapshot_run(run_id))
             result.update(
@@ -1976,34 +1865,223 @@ class DurableWorkflowEngine:
             )
             return {"continue": False, "result": result}
         action = action.strip().lower()
+        rejection = self._reconciliation_rejection(
+            run_id=run_id, action=action, details=details
+        )
+        if rejection is not None:
+            return rejection
+        return self._perform_reconciliation(
+            run=run,
+            run_id=run_id,
+            action=action,
+            details=details,
+            execution=execution,
+            workspace_config=workspace_config,
+            authorization_granted=authorization_granted,
+            lease=lease,
+        )
+
+    def _decline_write_authorization(
+        self, run_id: str, *, lease: LeaseToken
+    ) -> dict[str, Any]:
+        """Cancel a run whose workspace changes the person refused."""
+        self.store.transition_run(
+            run_id,
+            "cancelled",
+            event_type="workflow.write_authorization_declined",
+            error_code="write_authorization_declined",
+            error_reason="The person declined workspace changes.",
+            reconciliation={
+                "reason": "write-authorization-resolved",
+                "authorization": "declined",
+                "resolved_by": "decline_changes",
+                "resolved_at": utc_now_iso(),
+            },
+            lease=lease,
+        )
+        return {
+            "continue": False,
+            "result": self._result_from_snapshot(self.store.snapshot_run(run_id)),
+        }
+
+    def _reconciliation_details(
+        self,
+        *,
+        run: dict[str, Any],
+        execution: Any,
+        workspace_root: Path,
+    ) -> dict[str, Any]:
+        """Describe which reconciliation actions the recorded state allows.
+
+        A run without a workspace checkpoint can only be marked failed, unless it
+        ran in place in a non-Git workspace, where accepting the existing changes
+        is also safe.
+        """
+        if execution:
+            return self.workspace_manager.reconciliation_status(execution)
+        workspace_config = (run.get("config_snapshot") or {}).get("workspace") or {}
+        repository_identity = run.get("repository_identity") or {}
+        non_git_run = bool(
+            workspace_config.get("allow_non_git") is True
+            or repository_identity.get("git") is False
+        )
+        if not non_git_run:
+            return {"allowed_actions": ["mark_failed"]}
+        return {
+            "allowed_actions": ["accept_existing_changes", "mark_failed"],
+            "mode": "in-place",
+            "original_exists": workspace_root.exists(),
+            "execution_exists": workspace_root.exists(),
+            "execution_is_git": False,
+            "recoverable": False,
+        }
+
+    def _reconciliation_rejection(
+        self,
+        *,
+        run_id: str,
+        action: str,
+        details: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Refuse an action that is unknown or unsafe for the recorded state."""
         if action not in RECONCILIATION_ACTIONS:
-            result = self._result_from_snapshot(self.store.snapshot_run(run_id))
-            result.update(
-                {
-                    "ok": False,
-                    "status": "awaiting_reconciliation",
-                    "error": {"code": "invalid_reconciliation_action"},
-                    "reason": f"Unsupported reconciliation action: {action}",
-                    "reconciliation": details,
-                }
-            )
-            return {"continue": False, "result": result}
-        if (
+            error_code = "invalid_reconciliation_action"
+            reason = f"Unsupported reconciliation action: {action}"
+        elif (
             action not in set(details.get("allowed_actions") or [])
             and action != "mark_failed"
         ):
+            error_code = "unsafe_reconciliation_action"
+            reason = (
+                f"Action {action!r} is not safe for the recorded workspace state."
+            )
+        else:
+            return None
+        result = self._result_from_snapshot(self.store.snapshot_run(run_id))
+        result.update(
+            {
+                "ok": False,
+                "status": "awaiting_reconciliation",
+                "error": {"code": error_code},
+                "reason": reason,
+                "reconciliation": details,
+            }
+        )
+        return {"continue": False, "result": result}
+
+    def _resolve_write_authorization(
+        self,
+        *,
+        run_id: str,
+        recorded_reconciliation: dict[str, Any],
+        action: str | None,
+        lease: LeaseToken,
+    ) -> dict[str, Any]:
+        """Resolve a run parked because Baldr needs permission to write.
+
+        This gate is deliberately narrower than general reconciliation: the only
+        answers are granting or declining the change, so an unrelated action is
+        rejected rather than interpreted.
+        """
+        allowed_actions = {"authorize_changes", "decline_changes"}
+        if not action:
             result = self._result_from_snapshot(self.store.snapshot_run(run_id))
             result.update(
                 {
                     "ok": False,
                     "status": "awaiting_reconciliation",
-                    "error": {"code": "unsafe_reconciliation_action"},
-                    "reason": f"Action {action!r} is not safe for the recorded workspace state.",
-                    "reconciliation": details,
+                    "reason": "Baldr necesita autorización para modificar archivos.",
+                    "reconciliation": {
+                        "reason": "write-authorization-required",
+                        "allowed_actions": sorted(allowed_actions),
+                    },
                 }
             )
             return {"continue": False, "result": result}
+        action = action.strip().lower()
+        if action not in allowed_actions:
+            result = self._result_from_snapshot(self.store.snapshot_run(run_id))
+            result.update(
+                {
+                    "ok": False,
+                    "status": "awaiting_reconciliation",
+                    "error": {"code": "invalid_write_authorization_action"},
+                    "reason": "Elegí si Baldr puede modificar archivos.",
+                    "reconciliation": {
+                        "reason": "write-authorization-required",
+                        "allowed_actions": sorted(allowed_actions),
+                    },
+                }
+            )
+            return {"continue": False, "result": result}
+        if action == "decline_changes":
+            self.store.transition_run(
+                run_id,
+                "cancelled",
+                event_type="workflow.write_authorization_declined",
+                error_code="write_authorization_declined",
+                error_reason="The person declined workspace changes.",
+                reconciliation={
+                    "reason": "write-authorization-resolved",
+                    "authorization": "declined",
+                    "resolved_by": action,
+                    "resolved_at": utc_now_iso(),
+                },
+                lease=lease,
+            )
+            return {
+                "continue": False,
+                "result": self._result_from_snapshot(
+                    self.store.snapshot_run(run_id)
+                ),
+            }
+        resolved = {
+            "reason": "write-authorization-resolved",
+            "authorization": "granted",
+            "resolved_by": action,
+            "resolved_at": utc_now_iso(),
+        }
+        if recorded_reconciliation.get("replay_architect") is True:
+            architect_step = self.store.get_step(run_id, "architect.plan")
+            if architect_step and str(architect_step.get("status") or "") in {
+                "unknown",
+                "interrupted",
+                "failed",
+            }:
+                self.store.reset_step_for_retry(
+                    str(architect_step["id"]),
+                    reason="operator:authorize_changes:legacy-write-policy",
+                    lease=lease,
+                    retry_successful_participants=True,
+                )
+        self.store.transition_run(
+            run_id,
+            "recovering",
+            event_type="workflow.write_authorization_granted",
+            reconciliation=resolved,
+            lease=lease,
+        )
+        self.store.transition_run(
+            run_id,
+            "running",
+            reconciliation=resolved,
+            lease=lease,
+        )
+        return {"continue": True}
 
+    def _perform_reconciliation(
+        self,
+        *,
+        run: dict[str, Any],
+        run_id: str,
+        action: str,
+        details: dict[str, Any],
+        execution: Any,
+        workspace_config: dict[str, Any],
+        authorization_granted: bool,
+        lease: LeaseToken,
+    ) -> dict[str, Any]:
+        """Apply one validated reconciliation action to a parked run."""
         if action == "inspect_shadow":
             result = self._result_from_snapshot(self.store.snapshot_run(run_id))
             result.update(
