@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Split `durability/store.py` from 3.619 lines into the core plus three
+  aggregate mixins: `store_publications.py` (durable Git publication state),
+  `store_maintenance.py` (recovery bookkeeping, GC and SQLite upkeep) and
+  `store_snapshots.py` (read models, private and redacted). Shared helpers,
+  errors and the lease token moved to `store_core.py`; `durability.store`
+  re-exports them so importers are unaffected. `DurableStore` keeps 58 methods
+  in 2.240 lines.
+- Kept type checking honest across that split with a `DurableStoreProtocol`
+  that declares the primitives an aggregate borrows. It applies only under
+  `TYPE_CHECKING`, so at runtime the mixins stay plain classes and nothing can
+  shadow a concrete method through the MRO. New tests assert every aggregate
+  method stays reachable, that no two aggregates define the same name, and that
+  the publication short-name aliases still resolve.
 - Lifted the Agent Manager request handler out of its factory. The 509-line
   `build_agent_manager_server` closure became a module-level
   `AgentManagerHTTPServer` plus `AgentManagerRequestHandler`, with GET routes
