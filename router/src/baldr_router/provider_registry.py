@@ -38,12 +38,24 @@ class CodexProvider:
         cfg = load_config()
         path = codex_found()
         login = codex_login_status()
+        # Every other adapter answers whether it is usable and says why not;
+        # this one left each caller to infer it from `found` and a nested login
+        # result, so a caller that did not know to look read an installed,
+        # signed-in Codex as unavailable and an absent one as unexplained.
+        usable = bool(path) and login.get("ok") is not False
+        if not path:
+            reason = (
+                "Codex CLI was not found on PATH. Install Codex CLI and run "
+                "`codex login`."
+            )
+        elif not usable:
+            reason = "Codex CLI is not signed in. Run `codex login`."
+        else:
+            reason = ""
         return {
             "implemented": True,
-            # Every other adapter answers whether it is usable; this one left
-            # each caller to infer it from `found` and a nested login result,
-            # and a caller that did not know to look read it as unavailable.
-            "ok": bool(path) and login.get("ok") is not False,
+            "ok": usable,
+            "reason": reason,
             "found": bool(path),
             "path": path,
             "login": login,

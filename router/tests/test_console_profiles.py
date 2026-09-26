@@ -128,8 +128,30 @@ def test_a_provider_says_whether_it_could_actually_run(console: str) -> None:
 
     for entry in payload["providers"]:
         assert isinstance(entry["available"], bool)
-        if not entry["available"]:
-            assert entry["reason"]
+
+
+def test_every_unusable_provider_explains_itself(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Asserted with none of them installed, rather than whatever this machine has.
+
+    Written the other way first, this only ran its interesting branch on a
+    machine missing a CLI, so it passed locally and failed everywhere else —
+    which is how Codex's status turned out to report "unavailable" with no
+    reason at all.
+    """
+    from baldr_router import claude_cli, kiro_cli, provider_registry
+
+    monkeypatch.setattr(provider_registry, "codex_found", lambda *_, **__: None)
+    monkeypatch.setattr(claude_cli, "claude_found", lambda *_, **__: None)
+    monkeypatch.setattr(kiro_cli, "kiro_cli_found", lambda *_, **__: None)
+
+    reported = provider_registry.get_provider_registry().status()["providers"]
+
+    assert set(reported) == {"claude", "codex", "kiro-cli"}
+    for name, status in reported.items():
+        assert status["ok"] is False, name
+        assert status.get("reason"), f"{name} is unusable and does not say why"
 
 
 def test_models_are_suggestions_rather_than_a_closed_list(console: str) -> None:
