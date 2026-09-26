@@ -47,7 +47,7 @@ from urllib.parse import parse_qs, quote, urlparse
 
 from .context7_setup import context7_runtime_status
 from .diagnostics import get_logger, log_suppressed
-from .discovery.inventory import attachment_record, workspace_listing
+from .discovery.inventory import attachment_record, run_git, workspace_listing
 from .facade import facade_run, facade_status_report
 from .process_control import install_signal_handlers
 from .redaction import redact_text
@@ -199,6 +199,47 @@ def selectable_workspaces() -> list[dict[str, Any]]:
     return workspaces
 
 
+def describe_workspace(workspace_root: str) -> dict[str, Any]:
+    """Report what the protection setting is actually protecting.
+
+    The modes already describe themselves; what the screen could not say is the
+    state they apply to. Whether this is a Git repository decides whether the
+    recommended mode is even accepted, and whether the tree is dirty decides
+    whether an agent's changes will land on top of unfinished ones — every mode
+    the console offers writes in place, so that is a real question rather than a
+    detail.
+    """
+    policy = inspect_workspace(workspace_root, access="write")
+    git_root = policy.get("git_root")
+    state: dict[str, Any] = {
+        "root": workspace_root,
+        "is_git_repository": bool(git_root),
+        "git_root": git_root,
+        "trusted": bool(policy.get("trusted")),
+        "trusted_by": policy.get("trusted_by"),
+        "non_git_confirmed": bool(policy.get("intentional_non_git")),
+        "ready": bool(policy.get("ok")),
+        "reason": policy.get("reason"),
+        # None of the modes the console offers isolates writes into a copy; the
+        # difference between them is whether Baldr pauses for authorization and
+        # whether Git is required at all.
+        "writes_in_place": True,
+    }
+    if not git_root:
+        return state
+    root = Path(workspace_root)
+    branch_code, branch = run_git(root, "branch", "--show-current")
+    # -uno keeps this cheap on a tree full of untracked build output; what the
+    # warning is about is tracked work that is not committed yet.
+    status_code, status = run_git(root, "status", "--porcelain=v1", "-uno")
+    state["branch"] = branch if branch_code == 0 and branch else None
+    state["dirty"] = bool(status) if status_code == 0 else None
+    state["uncommitted_files"] = (
+        len(status.splitlines()) if status_code == 0 and status else 0
+    )
+    return state
+
+
 def is_trusted_workspace(path: Path) -> bool:
     try:
         return bool(inspect_workspace(path, access="write").get("ok"))
@@ -296,6 +337,18 @@ class ConsoleHTTPServer(ThreadingHTTPServer):
         return cast(
             "dict[str, Any]",
             self._cached("context7", _ENVIRONMENT_TTL, context7_runtime_status),
+        )
+
+    def workspace_state(self, workspace_root: str) -> dict[str, Any]:
+        """Report the tree the protection setting applies to."""
+
+        return cast(
+            "dict[str, Any]",
+            self._cached(
+                f"workspace-state:{workspace_root}",
+                _ENVIRONMENT_TTL,
+                lambda: describe_workspace(workspace_root),
+            ),
         )
 
 
@@ -480,6 +533,11 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 "workspace_locked": bool(self._console.workspace_root),
                 "workspaces": self._console.workspaces(),
                 "context7": self._console.context7(),
+                "workspace_state": (
+                    self._console.workspace_state(workspace_root)
+                    if workspace_root
+                    else None
+                ),
             }
         )
 

@@ -286,6 +286,7 @@ let lastStates = new Map();
 let notified = false;
 let lastWorkbench = null;
 let context7State = null;
+let workspaceState = null;
 let canCompose = false;
 let workspaceRoot = new URLSearchParams(location.search).get('workspace_root') || '';
 const drafts = new Map();
@@ -670,6 +671,48 @@ const SETTINGS_GROUPS = [
   ['team_mode', 'team_modes', 'Equipo', 'Cómo elige qué agente cubre cada fase.'],
 ];
 
+// The modes describe themselves; what was missing is the tree they apply to.
+// Every mode the console offers writes into this directory rather than a copy,
+// so uncommitted work and a missing repository are consequences, not trivia.
+function safetyNote(preferences) {
+  const state = workspaceState;
+  if (!state) return null;
+  const mode = preferences.safety_mode;
+  const box = el('div', {});
+  let problem = '';
+  if (!state.is_git_repository && mode === 'current') {
+    problem = 'Esta carpeta no es un repositorio Git, y «Trabajar directamente» lo exige: la tarea va a ser rechazada. '
+      + 'Inicializá Git, o elegí «Sin protección» si de verdad querés trabajar sin él.';
+  } else if (!state.is_git_repository && mode === 'automatic') {
+    problem = 'Esta carpeta no es un repositorio Git. Baldr va a pedirte autorización antes de escribir, '
+      + 'pero no vas a tener un diff con el que revisar lo que hizo.';
+  } else if (mode === 'non-git') {
+    problem = 'Sin protección: Baldr escribe directo y, si una tarea se interrumpe, no hay copia para restaurar.';
+  } else if (state.dirty) {
+    const count = state.uncommitted_files;
+    problem = `Tenés ${count} archivo${count === 1 ? '' : 's'} modificado${count === 1 ? '' : 's'} sin confirmar. `
+      + 'Baldr escribe sobre esta misma carpeta, así que sus cambios van a quedar mezclados con los tuyos. '
+      + 'Confirmá o guardá lo tuyo antes de arrancar.';
+  }
+  if (problem) box.append(el('p', { class: 'notice', text: problem }));
+  const facts = [
+    state.is_git_repository
+      ? `Repositorio Git${state.branch ? ' en ' + state.branch : ''}`
+      : 'Sin repositorio Git',
+    state.is_git_repository
+      ? (state.dirty ? `${state.uncommitted_files} sin confirmar` : 'sin cambios pendientes')
+      : '',
+    state.trusted ? 'workspace de confianza' : 'workspace sin confiar',
+  ].filter(Boolean);
+  box.append(el('p', { class: 'action-hint', text: facts.join(' · ') + '.' }));
+  // Worth stating once: none of these three works in a copy.
+  box.append(el('p', {
+    class: 'action-hint',
+    text: 'Las tres opciones escriben sobre esta carpeta. Lo que cambia es si Baldr te pide autorización antes, y si exige Git.',
+  }));
+  return box;
+}
+
 // Choosing a documentation mode says what you want; whether anything happens
 // depends on a key and a router mode the page does not own. Without this the
 // choice looks applied and silently does nothing, which is the worst of both.
@@ -857,7 +900,7 @@ function renderSettings(workbench, force) {
   // The view polls, and rebuilding these controls under the pointer would drop
   // a half-made choice every three seconds.
   const signature = JSON.stringify([
-    preferences, options, workbench && workbench.profiles, context7State,
+    preferences, options, workbench && workbench.profiles, context7State, workspaceState,
   ]);
   if (!force && host.dataset.signature === signature) return;
   host.dataset.signature = signature;
@@ -893,10 +936,10 @@ function renderSettings(workbench, force) {
       input.addEventListener('change', () => savePreference(field, option.id, option, group));
       group.append(label);
     }
-    if (field === 'context_mode') {
-      const note = context7Note(preferences);
-      if (note) group.append(note);
-    }
+    const note = field === 'context_mode' ? context7Note(preferences)
+      : field === 'safety_mode' ? safetyNote(preferences)
+      : null;
+    if (note) group.append(note);
     host.append(group);
   }
   renderPhases(host, workbench);
@@ -1151,6 +1194,7 @@ async function refresh() {
     const payload = await response.json();
     const workbench = payload.workbench || {};
     context7State = payload.context7 || null;
+    workspaceState = payload.workspace_state || null;
     document.getElementById('scope').textContent = workbench.items && workbench.items.length
       ? 'tareas durables' : '';
     renderCounts(workbench.counts, workbench.total);

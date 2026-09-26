@@ -334,6 +334,59 @@ def test_the_phase_team_saves_without_any_other_preference(
     assert payload["preferences"]["role_profiles"]["architect"] == ["default"]
 
 
+# --- what the protection setting is protecting --------------------------------
+
+
+def test_the_view_reports_the_tree_the_protection_applies_to(
+    console: str, workspace: Path
+) -> None:
+    state = _workbench(console)["workspace_state"]
+
+    assert state["is_git_repository"] is True
+    assert state["branch"]
+    assert state["dirty"] is False
+    assert state["trusted"] is True
+    # Every mode the console offers writes here rather than into a copy.
+    assert state["writes_in_place"] is True
+
+
+def test_uncommitted_work_is_counted(console: str, workspace: Path) -> None:
+    """In-place writes land next to whatever is already unfinished."""
+
+    (workspace / "README.md").write_text("edited\n", encoding="utf-8")
+
+    from baldr_router.console_service import describe_workspace
+
+    state = describe_workspace(str(workspace))
+
+    assert state["dirty"] is True
+    assert state["uncommitted_files"] == 1
+
+
+def test_a_directory_without_git_says_so(tmp_path: Path) -> None:
+    from baldr_router.console_service import describe_workspace
+
+    plain = tmp_path / "plain"
+    plain.mkdir()
+
+    state = describe_workspace(str(plain))
+
+    assert state["is_git_repository"] is False
+    assert state["ready"] is False
+    assert "branch" not in state
+
+
+def test_the_page_warns_before_writing_over_unfinished_work() -> None:
+    from baldr_router.console_service import console_asset_path
+
+    page = console_asset_path().read_text(encoding="utf-8")
+
+    assert "sin confirmar" in page
+    assert "state.dirty" in page
+    # And states the thing none of the three modes does.
+    assert "Las tres opciones escriben sobre esta carpeta." in page
+
+
 # --- whether the documentation setting can do anything -----------------------
 
 
