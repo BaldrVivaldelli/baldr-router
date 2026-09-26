@@ -71,6 +71,9 @@ def generated_typescript(contract: dict) -> str:
             f"    instruction: {item['instruction']!r},\n"
             "  }"
         )
+    # Joined outside the f-string: an expression part cannot contain a
+    # backslash before Python 3.12, and this package supports 3.11.
+    joined_blocks = ",\n".join(blocks)
     return f"""// Generated from contracts/facade-v1.json. Do not edit by hand.
 export type BaldrIntentId = {names};
 
@@ -86,7 +89,7 @@ export interface BaldrIntentDefinition {{
 }}
 
 export const BALDR_INTENTS: readonly BaldrIntentDefinition[] = [
-{',\n'.join(blocks)}
+{joined_blocks}
 ] as const;
 """
 

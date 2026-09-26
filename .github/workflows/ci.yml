@@ -10,17 +10,24 @@ permissions:
 
 jobs:
   test:
-    name: Test (${{ matrix.os }})
+    name: Test (${{ matrix.os }}, Python ${{ matrix.python }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ['3.12']
+        include:
+          # The packages declare requires-python >= 3.11, so the lowest
+          # supported interpreter has to run the suite as well. Testing only
+          # the newest one let 3.12-only syntax reach a released script.
+          - os: ubuntu-latest
+            python: '3.11'
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
-          python-version: '3.12'
+          python-version: ${{ matrix.python }}
       - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
