@@ -255,7 +255,11 @@ def _remove_verification_tree(root: Path) -> None:
             pass
         function(path)
 
-    deadline = time.monotonic() + 5.0
+    # Windows keeps a directory locked while any process still has it as its
+    # working directory, and the release lags behind the process exit the
+    # fixtures already waited for. Five seconds was calibrated on a developer
+    # machine; CI runs this suite several times slower and hit the ceiling.
+    deadline = time.monotonic() + 30.0
     while root.exists():
         try:
             # Git can create read-only object files on Windows.  Clearing that
