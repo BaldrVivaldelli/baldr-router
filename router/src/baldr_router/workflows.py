@@ -22,7 +22,7 @@ from .agent_gateway import (
     configured_agent_bindings_status,
     external_agent_catalog_status,
 )
-from .durability.recovery import recover_stale_runs
+from .durability.recovery import stale_run_report
 from .durability.store import DurableStore
 from .execution_profiles import role_execution_plan
 from .provider_registry import provider_status, run_provider_role
@@ -275,11 +275,8 @@ def run_workflow_impl(
 def workflow_status() -> dict[str, Any]:
     cfg = load_config()
     store = DurableStore()
-    recovery = (
-        recover_stale_runs(store)
-        if cfg.durability.enabled and cfg.durability.recovery_on_start
-        else {"ok": True, "count": 0, "runs": []}
-    )
+    # Reporting workflow status must not transition runs; see stale_run_report.
+    recovery = stale_run_report(store, enabled=cfg.durability.enabled)
     roles = list_roles()
     agents = {
         **external_agent_catalog_status(),

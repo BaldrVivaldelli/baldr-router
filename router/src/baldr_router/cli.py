@@ -1307,6 +1307,13 @@ def _register_facade(sub: SubParsers) -> None:
             "start-item",
             "cancel",
             "cancel-item",
+            # Settling is how an operator resolves runs whose process died.
+            # It used to happen as a side effect of reading status, which is
+            # why the CLI never needed to name it.
+            "settle",
+            "settle-item",
+            "settle-all",
+            "settle-workspace",
             "reconcile",
             "reconcile-item",
             "archive",

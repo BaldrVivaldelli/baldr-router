@@ -15,7 +15,7 @@ from .context7 import cache_status
 from .extensions import extension_status
 from .discovery.environment_probe import environment_probe
 from .discovery.workspace_profile import workspace_profile
-from .durability.recovery import recover_stale_runs
+from .durability.recovery import stale_run_report
 from .durability.identity import workspace_identity
 from .durability.store import DurableStore
 from .execution_profiles import role_execution_plan
@@ -49,11 +49,9 @@ def doctor(workspace_root: str | None = None) -> dict[str, Any]:
     agents = external_agent_catalog_status()
     implemented = providers.get("implemented_providers", [])
     store = DurableStore()
-    recovery = (
-        recover_stale_runs(store)
-        if cfg.durability.enabled and cfg.durability.recovery_on_start
-        else {"ok": True, "count": 0, "runs": []}
-    )
+    # A diagnostic read must not settle runs: recovery_on_start governs
+    # starting a workflow, and the engine already applies it there.
+    recovery = stale_run_report(store, enabled=cfg.durability.enabled)
     resolved_roles: dict[str, Any] = {}
     for role_name, role in cfg.roles.items():
         try:
