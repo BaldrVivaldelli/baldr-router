@@ -13,7 +13,7 @@ authors = [{ name = "Baldr" }]
 dependencies = [
   "baldr-router>=0.20.1,<0.21.0",
   # Same cap as the router: mcp 2.x is a breaking rename of the server API.
-  "mcp>=1.10.0,<2"
+  "mcp>=1.10.0,<3"
 ]
 
 [project.scripts]
