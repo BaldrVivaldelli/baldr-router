@@ -533,6 +533,26 @@ VS Code ejecuta/cachea una verificación rápida al preparar el runtime. El setu
 
 Detalle: [`docs/validation-lab-workspace-probe.md`](docs/validation-lab-workspace-probe.md)
 
+### Log de diagnóstico
+
+Baldr descarta deliberadamente los fallos que no deben abortar un workflow
+durable —por ejemplo, no poder registrar una transición o limpiar un shadow—. Esas
+degradaciones quedan en un log rotativo local en vez de desaparecer sin rastro:
+
+```text
+$XDG_STATE_HOME/baldr-router/router.log
+```
+
+El log pasa por la misma redacción que la telemetría y la evidencia, y nunca
+escribe en stdout, que pertenece al stream JSON-RPC del servidor MCP. Si el
+directorio de estado no se puede escribir, el logger degrada a un handler nulo
+en lugar de fallar la ejecución.
+
+```bash
+BALDR_ROUTER_LOG_LEVEL=DEBUG   # default: WARNING; "off" lo desactiva
+BALDR_ROUTER_LOG_FILE=/otra/ruta/router.log
+```
+
 ## Trusted workspaces
 
 Antes de que un provider lea o escriba un workspace, Baldr exige por defecto que:

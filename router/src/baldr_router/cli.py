@@ -50,6 +50,7 @@ from .workflows import (
 )
 from .context7 import cache_status, clear_cache, lookup_docs_for_library
 from .context7_setup import context7_onboarding_plan, enable_context7_env_source
+from .diagnostics import configure_logging
 from .extensions import extension_status
 from .facade import facade_run, facade_setup_plan, facade_status_report
 from .facade_contract import facade_contract_status
@@ -1950,6 +1951,7 @@ def main(argv: list[str] | None = None) -> int:
     # process-wide signal-handler mutation.
     if argv is None:
         os.environ.setdefault("BALDR_INSTALL_SIGNAL_HANDLERS", "1")
+    configure_logging()
     parser = build_parser()
     args = parser.parse_args(argv)
     return int(args.func(args))

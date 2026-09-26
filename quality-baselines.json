@@ -8,6 +8,7 @@
       "src/baldr_router/agent_api.py",
       "src/baldr_router/agent_http.py",
       "src/baldr_router/contract_schemas.py",
+      "src/baldr_router/diagnostics.py",
       "src/baldr_router/provider_errors.py",
       "src/baldr_router/redaction.py",
       "src/baldr_router/release_policy.py",
