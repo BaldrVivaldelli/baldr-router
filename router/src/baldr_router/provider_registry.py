@@ -37,11 +37,16 @@ class CodexProvider:
     def status(self) -> dict[str, Any]:
         cfg = load_config()
         path = codex_found()
+        login = codex_login_status()
         return {
             "implemented": True,
+            # Every other adapter answers whether it is usable; this one left
+            # each caller to infer it from `found` and a nested login result,
+            # and a caller that did not know to look read it as unavailable.
+            "ok": bool(path) and login.get("ok") is not False,
             "found": bool(path),
             "path": path,
-            "login": codex_login_status(),
+            "login": login,
             "version": codex_version(),
             "runner": cfg.codex.runner,
             "model": cfg.codex.model,

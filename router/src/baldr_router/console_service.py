@@ -46,12 +46,15 @@ from typing import Any, cast
 from urllib.parse import parse_qs, quote, urlparse
 
 from .agent_gateway import external_agent_catalog_status
+from .claude_cli import VALID_EFFORTS as CLAUDE_EFFORTS, claude_model_suggestions
+from .codex import codex_model_catalog
 from .context7_setup import context7_runtime_status
 from .diagnostics import get_logger, log_suppressed
 from .discovery.inventory import attachment_record, run_git, workspace_listing
 from .facade import facade_run, facade_status_report
 from .process_control import install_signal_handlers
 from .redaction import redact_text
+from .provider_registry import get_provider_registry
 from .team_resolution import role_candidates
 from .work_item_progress import compact_preferences
 from .durability.store import DurableStore
@@ -60,6 +63,7 @@ from .work_items import (
     ROLE_NAMES,
     WorkItemService,
     available_execution_profiles,
+    upsert_execution_profile,
     workbench_options,
 )
 from .workspace_policy import (
@@ -94,7 +98,11 @@ _PREFERENCES_ROUTE = "/v1/preferences"
 _COMPOSE_ROUTE = "/v1/compose"
 _CONTEXT_ROUTE = "/v1/context"
 _AGENTS_ROUTE = "/v1/agents"
-_API_ROUTES = frozenset({"/v1/workbench", _CONTEXT_ROUTE, _AGENTS_ROUTE})
+_PROVIDERS_ROUTE = "/v1/providers"
+_PROFILES_ROUTE = "/v1/profiles"
+_API_ROUTES = frozenset(
+    {"/v1/workbench", _CONTEXT_ROUTE, _AGENTS_ROUTE, _PROVIDERS_ROUTE}
+)
 _MAX_TASK = 16_384
 # A workflow runs for minutes, so the request that starts one cannot wait for
 # it. Each start gets a worker, and this bounds how many the console will hold
@@ -134,7 +142,10 @@ _PREFERENCE_FIELDS: dict[str, str] = {
 # Publishing them lets a page that outran its router say so, instead of
 # reporting a missing feature as an unknown route.
 _SERVED_ROUTES = tuple(
-    sorted(_API_ROUTES | {_ACTION_ROUTE, _PREFERENCES_ROUTE, _COMPOSE_ROUTE})
+    sorted(
+        _API_ROUTES
+        | {_ACTION_ROUTE, _PREFERENCES_ROUTE, _COMPOSE_ROUTE, _PROFILES_ROUTE}
+    )
 )
 _MAX_ACTION_BODY = 4096
 # A composed task is the one body that legitimately carries prose, so it gets
@@ -251,6 +262,80 @@ def describe_workspace(workspace_root: str) -> dict[str, Any]:
         len(status.splitlines()) if status_code == 0 and status else 0
     )
     return state
+
+
+def _codex_models() -> tuple[list[dict[str, Any]], str]:
+    """Return Codex's live model catalog, or nothing and why.
+
+    Enumerating it opens an app-server session, so this only ever runs behind
+    an explicit request. A provider that cannot be reached is not an error
+    here: the profile can still name a model by hand.
+    """
+    try:
+        catalog = codex_model_catalog()
+    except Exception:
+        log_suppressed(_LOG, "Could not list Codex models")
+        return [], "unavailable"
+    if not catalog.get("ok"):
+        return [], "unavailable"
+    models: list[dict[str, Any]] = []
+    for raw in catalog.get("models") or []:
+        if not isinstance(raw, Mapping):
+            continue
+        identifier = str(raw.get("id") or raw.get("model") or "").strip()
+        if not identifier:
+            continue
+        models.append(
+            {
+                "id": identifier,
+                "label": str(raw.get("display_name") or identifier),
+                "description": str(raw.get("description") or "")[:240],
+            }
+        )
+    return models[:60], "enumerated"
+
+
+def describe_providers() -> dict[str, Any]:
+    """Describe the providers a profile may name and what to configure on each.
+
+    Availability travels with each one because naming an uninstalled provider
+    in a profile is a mistake that only shows up when a phase runs. The models
+    are suggestions, never a closed list: Codex publishes its own catalog,
+    Claude documents aliases, and both accept a name typed by hand.
+    """
+    registry = get_provider_registry()
+    status = registry.status()
+    reported = status.get("providers") or {}
+    providers: list[dict[str, Any]] = []
+    for name in registry.canonical_names():
+        health = reported.get(name) or {}
+        entry: dict[str, Any] = {
+            "id": name,
+            "available": bool(health.get("ok")),
+            "reason": str(health.get("reason") or ""),
+            "enabled": health.get("enabled", True),
+            "models": [],
+            "model_source": "free-text",
+            "efforts": [],
+            # Kiro selects a named agent instead of a model, so a form that
+            # only offers models would leave it unconfigurable.
+            "configures": "model",
+        }
+        if name == "codex":
+            entry["models"], entry["model_source"] = _codex_models()
+            entry["efforts"] = ["low", "medium", "high"]
+        elif name == "claude":
+            entry["models"] = claude_model_suggestions()
+            entry["model_source"] = "aliases"
+            entry["efforts"] = list(CLAUDE_EFFORTS)
+        elif name == "kiro-cli":
+            entry["configures"] = "agent"
+        providers.append(entry)
+    return {
+        "ok": True,
+        "default_provider": str(status.get("default_provider") or ""),
+        "providers": providers,
+    }
 
 
 def describe_agents() -> dict[str, Any]:
@@ -387,6 +472,21 @@ class ConsoleHTTPServer(ThreadingHTTPServer):
                 lambda: describe_workspace(workspace_root),
             ),
         )
+
+    def providers(self) -> dict[str, Any]:
+        """Return the provider catalog, deliberately outside the polled view.
+
+        Listing Codex's models opens an app-server session and each adapter's
+        status shells out, so this answers its own request like the agent
+        catalog does.
+        """
+        return cast("dict[str, Any]", self._cached("providers", _AGENTS_TTL, describe_providers))
+
+    def forget_providers(self) -> None:
+        """Drop the cached catalog after a write that changes what it reports."""
+
+        with self._memo_lock:
+            self._memo.pop("providers", None)
 
     def agents(self) -> dict[str, Any]:
         """Return the agent catalog, deliberately outside the polled view.
@@ -894,6 +994,51 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             selected[role] = reference
         return selected, True
 
+    def _profiles(self) -> None:
+        """Create or replace one execution profile.
+
+        A profile names a provider and a model. That is a smaller thing than
+        trust or a credential, which stay out of the page: the worst a wrong
+        profile does is run a phase on the wrong model, and fixing it is
+        another save. The provider is still checked against the adapters that
+        exist, so a profile cannot name one that could never run.
+        """
+        payload = self._read_action_request()
+        if payload is None:
+            return
+        name = str(payload.get("name") or "").strip()
+        provider = str(payload.get("provider") or "").strip()
+        if not name or not provider:
+            self._error(400, "invalid_profile", "A profile needs a name and a provider.")
+            return
+        known = {
+            str(entry.get("id"))
+            for entry in self._console.providers().get("providers", [])
+        }
+        if provider not in known:
+            self._error(
+                400,
+                "invalid_profile",
+                f"{provider!r} is not an implemented provider.",
+            )
+            return
+        try:
+            result = upsert_execution_profile(
+                name,
+                provider=provider,
+                model=str(payload.get("model") or "").strip()[:128],
+                reasoning_effort=str(payload.get("reasoning_effort") or "").strip()[:64],
+                agent=str(payload.get("agent") or "").strip()[:128],
+                effort=str(payload.get("effort") or "").strip()[:64],
+                description=str(payload.get("description") or "").strip()[:400],
+            )
+        except (ValueError, OSError) as exc:
+            self._error(400, "invalid_profile", redact_text(str(exc)))
+            return
+        # The catalog it was built from now describes the world before this.
+        self._console.forget_providers()
+        self._json({"ok": True, "profile": result.get("profile"), "config": result.get("config")})
+
     def _preferences(self) -> None:
         payload = self._read_action_request()
         if payload is None:
@@ -1063,6 +1208,8 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 self._context(query)
             elif route == _AGENTS_ROUTE:
                 self._json(self._console.agents())
+            elif route == _PROVIDERS_ROUTE:
+                self._json(self._console.providers())
             else:
                 self._workbench(query)
             return
@@ -1084,6 +1231,9 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             return
         if route == _COMPOSE_ROUTE:
             self._compose()
+            return
+        if route == _PROFILES_ROUTE:
+            self._profiles()
             return
         self._error(404, "not_found", "Unknown console route.")
 

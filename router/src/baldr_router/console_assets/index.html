@@ -160,6 +160,7 @@ nav.tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: 
 .phase + .phase { margin-top: 8px; }
 .phase h4 { margin: 0; font-size: 13px; }
 .phase .role-desc { color: var(--muted); font-size: 12px; margin: 2px 0 8px; }
+.phase input.filter { margin-bottom: 2px; }
 .phase select {
   font: inherit; font-size: 13px; width: 100%; padding: 6px 8px;
   border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--ink);
@@ -305,6 +306,12 @@ let contextLoading = false;
 let agentsState = null;
 let agentsError = '';
 let agentsLoading = false;
+let providersState = null;
+let providersError = '';
+let providersLoading = false;
+// Which profile the editor is open on: a name to edit, '' for a new one, or
+// null for closed. Out here because the settings panel re-renders.
+let editingProfile = null;
 
 const sizeLabel = (value) => {
   if (!Number.isFinite(value)) return '';
@@ -340,6 +347,33 @@ async function loadAgents(force) {
     agentsState = null;
   } finally {
     agentsLoading = false;
+  }
+}
+
+// Also off the polled view: listing Codex's models opens an app-server
+// session, and each adapter's status shells out to its CLI.
+async function loadProviders(force) {
+  if (providersLoading) return;
+  if (!force && providersState) return;
+  providersLoading = true;
+  providersError = '';
+  try {
+    const response = await fetch(new URL('/v1/providers', location.origin), {
+      headers: { Accept: 'application/json', [TOKEN_HEADER]: token },
+      credentials: 'omit',
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      providersError = (payload.error && payload.error.message) || ('HTTP ' + response.status);
+      providersState = null;
+    } else {
+      providersState = payload;
+    }
+  } catch (error) {
+    providersError = error.message;
+    providersState = null;
+  } finally {
+    providersLoading = false;
   }
 }
 
@@ -926,6 +960,172 @@ function renderPhases(host, workbench) {
   host.append(group);
 }
 
+// Creating a profile is a smaller thing than granting trust or storing a key,
+// which is why it belongs here and those do not: the worst a wrong profile does
+// is run a phase on the wrong model, and fixing it is another save.
+function renderProfiles(host, workbench) {
+  const catalog = (workbench.profiles && workbench.profiles.execution_profiles) || {};
+  const group = el('div', { class: 'option-group' }, [
+    el('h3', { text: 'Modelos y perfiles' }),
+    el('p', { text: 'Un perfil es un proveedor con su modelo y su esfuerzo. Las etapas eligen entre estos.' }),
+  ]);
+
+  for (const [name, profile] of Object.entries(catalog)) {
+    const card = el('div', { class: 'phase' });
+    const edit = el('button', { class: 'ghost', type: 'button', text: 'Editar' });
+    edit.addEventListener('click', () => {
+      editingProfile = name;
+      loadProviders(false).then(() => renderSettings(lastWorkbench, true));
+      renderSettings(lastWorkbench, true);
+    });
+    card.append(el('div', { class: 'attach-bar' }, [
+      el('h4', { text: name }),
+      el('span', { class: 'meta', text: [profile.provider, profile.model, profile.reasoning_effort || profile.effort, profile.agent].filter(Boolean).join(' · ') }),
+      edit,
+    ]));
+    if (profile.description) card.append(el('p', { class: 'role-desc', text: profile.description }));
+    if (editingProfile === name) card.append(profileForm(name, profile));
+    group.append(card);
+  }
+
+  if (editingProfile === '') {
+    group.append(el('div', { class: 'phase' }, [
+      el('h4', { text: 'Perfil nuevo' }),
+      profileForm('', {}),
+    ]));
+  } else {
+    const add = el('button', { class: 'ghost', type: 'button', text: 'Nuevo perfil' });
+    add.addEventListener('click', () => {
+      editingProfile = '';
+      loadProviders(false).then(() => renderSettings(lastWorkbench, true));
+      renderSettings(lastWorkbench, true);
+    });
+    group.append(el('div', { class: 'attach-bar', style: 'margin-top:8px' }, [add]));
+  }
+  host.append(group);
+}
+
+function profileForm(name, profile) {
+  const box = el('div', { style: 'margin-top:10px' });
+  if (providersError) {
+    box.append(el('p', { class: 'action-error', text: 'No se pudo leer los proveedores: ' + providersError }));
+    return box;
+  }
+  if (!providersState) {
+    box.append(el('p', { class: 'action-hint', text: 'Leyendo los proveedores…' }));
+    return box;
+  }
+  const providers = providersState.providers || [];
+  const nameInput = el('input', { class: 'filter', type: 'text', placeholder: 'nombre-del-perfil', 'aria-label': 'Nombre' });
+  nameInput.value = name;
+  nameInput.disabled = Boolean(name);
+
+  const providerSelect = el('select', { 'aria-label': 'Proveedor' });
+  for (const provider of providers) {
+    providerSelect.append(el('option', {
+      value: provider.id,
+      text: provider.available ? provider.id : `${provider.id} (no disponible)`,
+    }));
+  }
+  providerSelect.value = profile.provider || providersState.default_provider || (providers[0] || {}).id || '';
+
+  // A datalist suggests without forbidding: a model that reached the CLI but
+  // not this list must still be usable.
+  const listId = 'models-' + (name || 'new');
+  const models = el('datalist', { id: listId });
+  const modelInput = el('input', { class: 'filter', type: 'text', list: listId, 'aria-label': 'Modelo' });
+  modelInput.value = profile.model || '';
+  const agentInput = el('input', { class: 'filter', type: 'text', 'aria-label': 'Agente' });
+  agentInput.value = profile.agent || '';
+  const effortSelect = el('select', { 'aria-label': 'Esfuerzo' });
+  const descInput = el('input', { class: 'filter', type: 'text', placeholder: 'Para qué es este perfil', 'aria-label': 'Descripción' });
+  descInput.value = profile.description || '';
+
+  const modelRow = el('div', {}, [el('label', { class: 'field', text: 'Modelo' }), modelInput, models]);
+  const agentRow = el('div', {}, [el('label', { class: 'field', text: 'Agente' }), agentInput]);
+  const effortRow = el('div', {}, [el('label', { class: 'field', text: 'Esfuerzo' }), effortSelect]);
+  const note = el('p', { class: 'action-hint' });
+
+  function syncProvider() {
+    const chosen = providers.find((p) => p.id === providerSelect.value) || {};
+    // Kiro picks a named agent instead of a model, so the form follows.
+    const wantsModel = chosen.configures !== 'agent';
+    modelRow.hidden = !wantsModel;
+    agentRow.hidden = wantsModel;
+    models.replaceChildren();
+    for (const model of chosen.models || []) {
+      models.append(el('option', { value: model.id, label: model.description || model.label || '' }));
+    }
+    effortSelect.replaceChildren(el('option', { value: '', text: 'Por defecto del proveedor' }));
+    for (const effort of chosen.efforts || []) {
+      effortSelect.append(el('option', { value: effort, text: effort }));
+    }
+    effortSelect.value = profile.reasoning_effort || profile.effort || '';
+    effortRow.hidden = !(chosen.efforts || []).length;
+    const bits = [];
+    if (!chosen.available && chosen.reason) bits.push('No disponible: ' + chosen.reason);
+    if (chosen.model_source === 'aliases') bits.push('Podés usar un alias o el nombre completo de un modelo.');
+    if (chosen.model_source === 'unavailable') bits.push('No se pudo listar los modelos; escribilo a mano.');
+    note.textContent = bits.join(' ');
+  }
+  providerSelect.addEventListener('change', syncProvider);
+
+  const save = el('button', { type: 'button', text: 'Guardar perfil' });
+  const cancel = el('button', { class: 'ghost', type: 'button', text: 'Cancelar' });
+  cancel.addEventListener('click', () => {
+    editingProfile = null;
+    renderSettings(lastWorkbench, true);
+  });
+  save.addEventListener('click', async () => {
+    const body = {
+      name: nameInput.value.trim(),
+      provider: providerSelect.value,
+      description: descInput.value.trim(),
+    };
+    const chosen = providers.find((p) => p.id === providerSelect.value) || {};
+    if (chosen.configures === 'agent') body.agent = agentInput.value.trim();
+    else {
+      body.model = modelInput.value.trim();
+      body.reasoning_effort = effortSelect.value;
+    }
+    const existing = box.querySelector('.action-error');
+    if (existing) existing.remove();
+    save.disabled = true;
+    try {
+      const response = await fetch(new URL('/v1/profiles', location.origin), {
+        method: 'POST',
+        credentials: 'omit',
+        headers: { 'Content-Type': 'application/json', [TOKEN_HEADER]: token },
+        body: JSON.stringify(body),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || payload.ok === false) {
+        box.append(el('div', { class: 'action-error', text: 'No se pudo guardar: '
+          + ((payload.error && payload.error.message) || ('HTTP ' + response.status)) }));
+        save.disabled = false;
+        return;
+      }
+      editingProfile = null;
+      await loadProviders(true);
+      await refresh();
+    } catch (error) {
+      box.append(el('div', { class: 'action-error', text: 'No se pudo guardar: ' + error.message }));
+      save.disabled = false;
+    }
+  });
+
+  box.append(
+    el('label', { class: 'field', text: 'Nombre' }), nameInput,
+    el('label', { class: 'field', text: 'Proveedor' }), providerSelect,
+    modelRow, agentRow, effortRow,
+    el('label', { class: 'field', text: 'Descripción' }), descInput,
+    note,
+    el('div', { class: 'actions' }, [save, cancel]),
+  );
+  syncProvider();
+  return box;
+}
+
 // Pinning an agent to a phase. An external agent is a registered version with
 // declared capabilities, so the page offers only what the resolver would accept
 // and says why it ruled the rest out.
@@ -1010,6 +1210,7 @@ function renderSettings(workbench, force) {
   const signature = JSON.stringify([
     preferences, options, workbench && workbench.profiles,
     context7State, workspaceState, agentsState, agentsError,
+    providersState, providersError, editingProfile,
   ]);
   if (!force && host.dataset.signature === signature) return;
   host.dataset.signature = signature;
@@ -1051,6 +1252,7 @@ function renderSettings(workbench, force) {
     if (note) group.append(note);
     host.append(group);
   }
+  renderProfiles(host, workbench);
   renderPhases(host, workbench);
   renderAgents(host, preferences);
   host.append(el('p', {
@@ -1282,6 +1484,7 @@ function renderNewTask() {
 const NEEDED_ROUTES = [
   '/v1/workbench', '/v1/context', '/v1/agents',
   '/v1/actions', '/v1/preferences', '/v1/compose',
+  '/v1/providers', '/v1/profiles',
 ];
 
 function checkRouterIsCurrent(routes) {
@@ -1308,6 +1511,7 @@ function showView(name) {
   // The catalog is read on arrival rather than with every poll, so the tab
   // asks for it and redraws once it lands.
   loadAgents(false).then(() => renderSettings(lastWorkbench, true));
+  loadProviders(false).then(() => renderSettings(lastWorkbench, true));
 }
 
 async function refresh() {

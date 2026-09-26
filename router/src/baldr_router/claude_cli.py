@@ -39,6 +39,20 @@ VALID_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 # Everything that edits a file. Denied by name for a read-only phase, because a
 # phase that plans must not be able to change what it is planning against.
 _WRITING_TOOLS = ("Write", "Edit", "NotebookEdit", "MultiEdit")
+# The CLI takes an alias for the newest model in a family, or a full model
+# name. These are published as suggestions rather than a closed list: a new
+# family reaches the CLI before it reaches this file, and refusing it here
+# would make Baldr the reason it cannot be used.
+MODEL_ALIASES: tuple[tuple[str, str], ...] = (
+    ("opus", "Opus — el más capaz, para trabajo difícil"),
+    ("sonnet", "Sonnet — equilibrio entre capacidad y costo"),
+    ("haiku", "Haiku — rápido y barato, para tareas simples"),
+    ("fable", "Fable — la familia más reciente"),
+)
+
+
+def claude_model_suggestions() -> list[dict[str, str]]:
+    return [{"id": alias, "description": description} for alias, description in MODEL_ALIASES]
 
 
 def claude_found(command: str | None = None) -> str | None:
