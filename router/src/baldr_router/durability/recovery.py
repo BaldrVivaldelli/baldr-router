@@ -127,6 +127,43 @@ def _recovery_owner() -> str:
     return f"recovery:{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
 
 
+def stale_run_report(store: DurableStore, *, enabled: bool = True) -> dict[str, Any]:
+    """Describe what a recovery pass would settle, without settling anything.
+
+    ``status`` and ``doctor`` are polled by clients and operators. Settling a
+    run acquires a lease and transitions durable state, which is a write, so it
+    belongs to an explicit start or settle request instead of a read. ``count``
+    and ``runs`` stay empty because this call recovers nothing; the pending
+    entries report what an explicit pass would act on.
+    """
+
+    if not enabled:
+        return {
+            "ok": True,
+            "count": 0,
+            "runs": [],
+            "settled": False,
+            "pending_count": 0,
+            "pending_stale_runs": [],
+        }
+    pending = [
+        {
+            "run_id": str(candidate["id"]),
+            "status": str(candidate.get("status") or ""),
+            "lease_expires_at": candidate.get("lease_expires_at"),
+        }
+        for candidate in store.stale_runs(datetime.now(timezone.utc))
+    ]
+    return {
+        "ok": True,
+        "count": 0,
+        "runs": [],
+        "settled": False,
+        "pending_count": len(pending),
+        "pending_stale_runs": pending,
+    }
+
+
 def recover_stale_runs(store: DurableStore) -> dict[str, Any]:
     """Classify workflows whose process lease expired under a fenced recovery lease.
 

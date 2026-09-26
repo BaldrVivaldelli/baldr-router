@@ -486,6 +486,15 @@ write attempt incierto
 
 La cancelación se persiste antes de terminar procesos; el resume está ligado a la ruta y a la identidad Git o manifest original; los worktrees borrados se reconstruyen desde checkpoints verificables y los shadows sobreviven reinicios en el estado durable de Baldr. Las sesiones expiran o se invalidan ante cambios de repositorio, provider o límites de turnos. `status` presenta runs no terminales, reconciliación, schema, maintenance y perfiles resueltos sin agregar nuevas intenciones públicas.
 
+`status`, `doctor` y `workflow-status` son lecturas: informan qué runs quedaron
+con su lease vencido en `durability.recovery.pending_stale_runs`, pero no los
+resuelven. Resolverlos es una escritura y ocurre solo en un arranque —el engine
+aplica `recovery_on_start` al iniciar un workflow— o ante un pedido explícito:
+
+```bash
+baldr-router facade run /path/to/repo --work-item-action settle-workspace
+```
+
 Detalle: [`docs/consistency-operator-control.md`](docs/consistency-operator-control.md)
 
 ## Autorización de cambios en el workspace
