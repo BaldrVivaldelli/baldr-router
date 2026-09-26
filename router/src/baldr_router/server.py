@@ -7,6 +7,7 @@ from mcp.server.fastmcp import FastMCP
 from .codex_config import install_context7_mcp_config, remove_context7_mcp_config
 from .config import load_config
 from .context7 import cache_status, clear_cache, lookup_docs_for_library
+from .diagnostics import configure_logging
 from .context7_setup import (
     context7_onboarding_plan,
     disable_context7,
@@ -375,5 +376,8 @@ def review_current_diff(
 
 
 def run_mcp() -> None:
+    # stdio carries the JSON-RPC stream, so diagnostics must be pinned to the
+    # redacted log file before anything can emit a record.
+    configure_logging()
     load_installed_extensions(mcp)
     mcp.run()
