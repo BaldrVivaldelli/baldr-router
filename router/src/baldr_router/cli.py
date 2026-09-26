@@ -299,6 +299,7 @@ def cmd_console(args: argparse.Namespace) -> int:
             port=args.port,
             workspace_root=args.workspace_root or None,
             allow_non_loopback=bool(args.allow_non_loopback),
+            token=args.token or None,
         )
     except ValueError as exc:
         print_json({"ok": False, "error": {"code": "unsafe_bind", "message": str(exc)}})
@@ -1573,6 +1574,11 @@ def _register_runtime(sub: SubParsers) -> None:
         "--allow-non-loopback",
         action="store_true",
         help="Bind a network address so another device can watch; redacted activity becomes reachable",
+    )
+    p.add_argument(
+        "--token",
+        default="",
+        help="Pin the session token instead of issuing a new one; BALDR_CONSOLE_TOKEN does the same",
     )
     p.set_defaults(func=cmd_console)
 

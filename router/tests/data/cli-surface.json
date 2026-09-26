@@ -2456,6 +2456,21 @@
             "required": false,
             "help": "Bind a network address so another device can watch; redacted activity becomes reachable",
             "metavar": null
+          },
+          {
+            "class": "_StoreAction",
+            "option_strings": [
+              "--token"
+            ],
+            "dest": "token",
+            "nargs": null,
+            "const": null,
+            "default": "",
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Pin the session token instead of issuing a new one; BALDR_CONSOLE_TOKEN does the same",
+            "metavar": null
           }
         ],
         "subcommands": {}

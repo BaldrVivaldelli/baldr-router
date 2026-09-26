@@ -3,6 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#14171a">
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="icon" href="./icon-192.png" type="image/png">
 <title>Baldr</title>
 <style>
 :root {
@@ -111,6 +114,17 @@ ol.timeline time { display: block; color: var(--muted); font-size: 11px; font-va
 .section + .section { margin-top: 18px; }
 .foot { padding: 0 16px 20px; color: var(--muted); font-size: 12px; }
 .stale { color: var(--attention); }
+button.ghost {
+  background: transparent; color: var(--muted); font: inherit; font-size: 12px;
+  border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px; cursor: pointer;
+}
+button.ghost:hover { color: var(--ink); border-color: var(--accent); }
+button.ghost[hidden] { display: none; }
+.locked { max-width: 640px; margin: 48px auto; }
+.locked code {
+  display: block; margin-top: 10px; padding: 10px; overflow-x: auto;
+  background: var(--bg); border: 1px solid var(--line); border-radius: 8px; font-size: 12px;
+}
 </style>
 </head>
 <body>
@@ -118,6 +132,7 @@ ol.timeline time { display: block; color: var(--muted); font-size: 11px; font-va
   <h1>Baldr</h1>
   <span class="scope" id="scope"></span>
   <div class="counts" id="counts"></div>
+  <button class="ghost" id="notify" type="button" hidden>Avisarme</button>
 </header>
 <main>
   <section class="panel" aria-label="Work items">
@@ -138,8 +153,29 @@ const STATE_NAMES = {
   skipped: 'omitido', archived: 'archivado',
 };
 
+const TOKEN_HEADER = 'X-Baldr-Console-Token';
+const TOKEN_KEY = 'baldr.console.token';
+
+// The command prints the token in the URL fragment, which the browser never
+// sends to a server and never writes to a log. Read it once, keep it in memory
+// for this tab, and clear it from the address bar so a screenshot or a pasted
+// link does not carry the session.
+function claimToken() {
+  const hash = new URLSearchParams(location.hash.replace(/^#/, ''));
+  const supplied = hash.get('token');
+  if (supplied) {
+    try { sessionStorage.setItem(TOKEN_KEY, supplied); } catch (_) { /* private mode */ }
+    history.replaceState(null, '', location.pathname + location.search);
+    return supplied;
+  }
+  try { return sessionStorage.getItem(TOKEN_KEY) || ''; } catch (_) { return ''; }
+}
+
+let token = claimToken();
 let selectedId = new URLSearchParams(location.search).get('work_item_id') || null;
 let timer = null;
+let lastStates = new Map();
+let notified = false;
 
 const el = (tag, props = {}, children = []) => {
   const node = document.createElement(tag);
@@ -327,12 +363,50 @@ function renderDetail(selected, selectedError) {
   host.append(panel);
 }
 
+function renderLocked() {
+  document.getElementById('counts').replaceChildren();
+  document.getElementById('items').replaceChildren();
+  document.getElementById('items-empty').hidden = true;
+  const host = document.getElementById('detail');
+  host.replaceChildren(el('div', { class: 'panel locked' }, [
+    el('h3', { text: 'Falta el token de esta sesión' }),
+    el('p', { class: 'empty', text: 'La consola no guarda credenciales en el navegador: el token viaja en el enlace que imprime el comando y vive solo en esta pestaña. Abrí ese enlace, o fijá uno estable:' }),
+    el('code', { text: 'BALDR_CONSOLE_TOKEN=tu-token baldr-router console' }),
+  ]));
+}
+
+function announce(items) {
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  for (const item of items) {
+    const state = (item.progress_summary || {}).overall_state || item.status;
+    const previous = lastStates.get(item.id);
+    lastStates.set(item.id, state);
+    if (!previous || previous === state) continue;
+    // Only the two transitions worth interrupting someone for.
+    if (state === 'attention') {
+      new Notification('Baldr necesita una decisión', { body: item.title || item.id, tag: item.id });
+    } else if (state === 'complete' && previous === 'running') {
+      new Notification('Baldr terminó', { body: item.title || item.id, tag: item.id });
+    }
+  }
+}
+
 async function refresh() {
   const foot = document.getElementById('foot');
   try {
     const url = new URL('/v1/workbench', location.origin);
     if (selectedId) url.searchParams.set('work_item_id', selectedId);
-    const response = await fetch(url, { headers: { Accept: 'application/json' } });
+    const response = await fetch(url, {
+      headers: { Accept: 'application/json', [TOKEN_HEADER]: token },
+      // No cookie is ever set, so nothing must be sent ambiently either.
+      credentials: 'omit',
+    });
+    if (response.status === 401 || response.status === 403) {
+      renderLocked();
+      foot.className = 'foot stale';
+      foot.textContent = 'Sesión no autorizada.';
+      return;
+    }
     if (!response.ok) throw new Error('HTTP ' + response.status);
     const payload = await response.json();
     const workbench = payload.workbench || {};
@@ -341,6 +415,7 @@ async function refresh() {
     renderCounts(workbench.counts, workbench.total);
     renderItems(workbench.items || []);
     renderDetail(workbench.selected, workbench.selected_error);
+    announce(workbench.items || []);
     foot.className = 'foot';
     foot.textContent = 'Solo lectura · actualizado ' + new Date().toLocaleTimeString()
       + ' · contrato ' + (payload.contract_version || '?');
@@ -355,7 +430,29 @@ function schedule() {
   timer = setInterval(() => { if (!document.hidden) refresh(); }, REFRESH_MS);
 }
 
+// Permission is requested from a click, never on load: browsers reject and
+// penalise an unprompted request, and so would anyone reading this page.
+function setUpNotifications() {
+  const button = document.getElementById('notify');
+  if (!('Notification' in window)) return;
+  if (Notification.permission === 'granted') { notified = true; return; }
+  if (Notification.permission === 'denied') return;
+  button.hidden = false;
+  button.addEventListener('click', async () => {
+    const result = await Notification.requestPermission();
+    notified = result === 'granted';
+    button.hidden = notified;
+  });
+}
+
+if ('serviceWorker' in navigator) {
+  // Registration is what makes the console installable as its own window; the
+  // worker deliberately caches nothing.
+  navigator.serviceWorker.register('./sw.js').catch(() => { /* not installable */ });
+}
+
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
+setUpNotifications();
 refresh();
 schedule();
 </script>

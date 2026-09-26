@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from baldr_router.console_service import (
+    TOKEN_HEADER,
     build_console_server,
     console_asset_path,
     is_loopback_host,
@@ -16,13 +17,15 @@ from baldr_router.console_service import (
 )
 from baldr_router.durability.store import DurableStore
 
+TOKEN = "service-test-token"
+
 
 @pytest.fixture
 def console(tmp_path: Path, monkeypatch) -> Iterator[str]:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
-    server = build_console_server(host="127.0.0.1", port=0)
+    server = build_console_server(host="127.0.0.1", port=0, token=TOKEN)
     serve_console_in_background(server)
     host, port = server.server_address[:2]
     try:
@@ -33,7 +36,9 @@ def console(tmp_path: Path, monkeypatch) -> Iterator[str]:
 
 
 def _get(url: str) -> tuple[int, str, str]:
-    with urllib.request.urlopen(url, timeout=10) as response:
+    # The token gates the API; test_console_auth.py owns the cases that omit it.
+    request = urllib.request.Request(url, headers={TOKEN_HEADER: TOKEN})
+    with urllib.request.urlopen(request, timeout=10) as response:
         return (
             int(response.status),
             response.read().decode("utf-8"),
@@ -96,7 +101,10 @@ def test_unknown_routes_are_not_found(console: str) -> None:
 @pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE"])
 def test_write_methods_are_refused(console: str, method: str) -> None:
     request = urllib.request.Request(
-        f"{console}/v1/workbench", data=b"{}", method=method
+        f"{console}/v1/workbench",
+        data=b"{}",
+        method=method,
+        headers={TOKEN_HEADER: TOKEN},
     )
 
     with pytest.raises(urllib.error.HTTPError) as error:
@@ -174,12 +182,18 @@ def test_the_page_script_parses() -> None:
 
 
 def test_the_page_loads_nothing_from_the_network() -> None:
+    """Every asset the page pulls must come from this server, never a CDN."""
+
+    import re
+
     page = console_asset_path().read_text(encoding="utf-8")
 
-    assert "http://" not in page.replace("http://localhost", "")
+    assert "http://" not in page
     assert "https://" not in page
-    assert "<script src" not in page
-    assert "<link" not in page
+    references = re.findall(r'(?:src|href)="([^"]+)"', page)
+    assert references, "the page should reference its manifest and icon"
+    for reference in references:
+        assert reference.startswith("./"), reference
 
 
 def test_a_wildcard_bind_reports_an_address_a_browser_can_open() -> None:

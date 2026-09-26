@@ -197,6 +197,7 @@ def lint_all() -> None:
         "runtimes/agent-runner/src",
     )
     _run(sys.executable, "scripts/generate_facades.py", "--check")
+    _run(sys.executable, "scripts/generate_console_icons.py", "--check")
     if not (EXTENSION / "node_modules").exists():
         _run(npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund", cwd=EXTENSION)
     _run(npm, "run", "check", cwd=EXTENSION)

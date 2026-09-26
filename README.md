@@ -551,10 +551,28 @@ corriendo con el editor cerrado y una barra lateral no puede avisarte cuando
 Baldr necesita una decisión.
 
 ```bash
-baldr-router console                                  # http://127.0.0.1:8787
+baldr-router console                                  # imprime el enlace con token
 baldr-router console --workspace-root /path/to/repo    # acotada a un repo
 baldr-router console --port 9000 --host 0.0.0.0 --allow-non-loopback
 ```
+
+El comando imprime la URL con un token de sesión en el fragmento
+(`http://127.0.0.1:8787/#token=…`). Abrí **ese** enlace: la página lee el token
+una vez, lo guarda solo en esa pestaña y lo borra de la barra de direcciones.
+Para fijar uno estable y poder marcarlo como favorito:
+`BALDR_CONSOLE_TOKEN=… baldr-router console`.
+
+Se puede instalar como app (ventana propia) y avisarte con una notificación del
+sistema cuando una tarea necesita una decisión o termina. El botón
+**Avisarme** pide el permiso; `localhost` cuenta como contexto seguro, así que
+funciona sin HTTPS. Desde otro dispositivo por IP no, porque ahí no lo es.
+
+**Modelo de seguridad.** Un puerto en localhost es alcanzable desde cualquier
+página que visites, así que la consola no lleva autoridad ambiente: no setea
+ninguna cookie. El token viaja en un header que un formulario cross-site no
+puede poner, y encima se validan `Origin`, `Sec-Fetch-Site` y `Host` —este
+último contra DNS rebinding—. Una petición cross-site falla por varias vías
+antes de tocar un read model.
 
 Responde solo esa pregunta de observación: muestra el estado de todas las tareas
 de un vistazo, la línea de tiempo narrativa de las tres fases, y las decisiones
