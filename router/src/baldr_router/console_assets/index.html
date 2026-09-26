@@ -760,7 +760,7 @@ async function refresh() {
     renderSettings(workbench);
     announce(workbench.items || []);
     foot.className = 'foot';
-    foot.textContent = 'Solo lectura · actualizado ' + new Date().toLocaleTimeString()
+    foot.textContent = 'Actualizado ' + new Date().toLocaleTimeString()
       + ' · contrato ' + (payload.contract_version || '?');
   } catch (error) {
     foot.className = 'foot stale';
