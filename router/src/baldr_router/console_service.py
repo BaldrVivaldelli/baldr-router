@@ -32,6 +32,7 @@ import os
 import secrets
 import socket
 import threading
+import time
 import webbrowser
 from collections.abc import Mapping
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -82,6 +83,8 @@ _MAX_TASK = 16_384
 # it. Each start gets a worker, and this bounds how many the console will hold
 # at once; the durable layer already refuses to start an item twice.
 _MAX_CONCURRENT_STARTS = 4
+# The list only changes when a repository is trusted or first worked in.
+_WORKSPACES_TTL = 10.0
 # Each of these is a per-workspace preference whose legal values the router
 # already publishes with human copy. Trust, secrets and the global config stay
 # out: granting trust from a page is an escalation, an API key needs a
@@ -200,7 +203,25 @@ class ConsoleHTTPServer(ThreadingHTTPServer):
         self.workspace_root = workspace_root
         self.token = token or new_console_token()
         self.starts = threading.BoundedSemaphore(_MAX_CONCURRENT_STARTS)
+        self._workspaces: tuple[float, list[dict[str, Any]]] | None = None
+        self._workspaces_lock = threading.Lock()
         super().__init__(address, handler_class)
+
+    def workspaces(self) -> list[dict[str, Any]]:
+        """Return the selectable workspaces, recomputed at most every few seconds.
+
+        The page polls, and this opens a durable store to answer. Doing that per
+        poll put an integrity check on a hot path for a list that only changes
+        when somebody trusts a repository or works in a new one.
+        """
+        with self._workspaces_lock:
+            cached = self._workspaces
+            if cached is not None and time.monotonic() - cached[0] < _WORKSPACES_TTL:
+                return cached[1]
+        fresh = selectable_workspaces()
+        with self._workspaces_lock:
+            self._workspaces = (time.monotonic(), fresh)
+        return fresh
 
 
 class ConsoleRequestHandler(BaseHTTPRequestHandler):
@@ -325,7 +346,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             return locked, None
         if not wanted:
             return None, None
-        if wanted not in {item["root"] for item in selectable_workspaces()}:
+        if wanted not in {item["root"] for item in self._console.workspaces()}:
             return None, "workspace_not_selectable"
         return wanted, None
 
@@ -380,7 +401,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 **report,
                 "workspace_root": workspace_root,
                 "workspace_locked": bool(self._console.workspace_root),
-                "workspaces": selectable_workspaces(),
+                "workspaces": self._console.workspaces(),
             }
         )
 

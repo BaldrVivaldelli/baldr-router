@@ -280,8 +280,8 @@ def _cancel_fixture(scratch: Path) -> dict[str, Any]:
         _close_process_streams(proc)
 
 
-def _remove_verification_tree(root: Path) -> None:
-    """Remove a verification tree after Windows attributes and handles settle."""
+def _remove_verification_tree(root: Path) -> dict[str, Any]:
+    """Remove a verification tree, reporting rather than raising when it is held."""
 
     def make_writable_and_retry(
         function: Callable[[str], Any],
@@ -299,9 +299,8 @@ def _remove_verification_tree(root: Path) -> None:
         function(path)
 
     # Windows keeps a directory locked while any process still has it as its
-    # working directory, and the release lags behind the process exit the
-    # fixtures already waited for. Five seconds was calibrated on a developer
-    # machine; CI runs this suite several times slower and hit the ceiling.
+    # working directory, and that release can lag behind the exit the fixtures
+    # already waited for.
     deadline = time.monotonic() + 30.0
     while root.exists():
         try:
@@ -309,20 +308,33 @@ def _remove_verification_tree(root: Path) -> None:
             # attribute is distinct from retrying a transient sharing lock;
             # the outer loop continues to handle the latter.
             shutil.rmtree(root, onerror=make_writable_and_retry)
-            return
-        except PermissionError:
+            return {"ok": True}
+        except PermissionError as exc:
             if time.monotonic() >= deadline:
-                raise
+                # Every scenario has already reported its verdict. Losing that
+                # because a temporary directory outlived them would hide the
+                # verification behind its own cleanup, so the failure becomes
+                # evidence instead: the operating system reclaims the temporary
+                # directory, and a lingering holder is worth seeing, not worth
+                # discarding a completed run over.
+                return {
+                    "ok": False,
+                    "reason": "scratch_tree_locked",
+                    "path": str(root),
+                    "error": redact_text(str(exc)),
+                }
             time.sleep(0.1)
+    return {"ok": True}
 
 
 @contextmanager
-def _temporary_verification_root() -> Iterator[Path]:
+def _temporary_verification_root() -> Iterator[tuple[Path, dict[str, Any]]]:
     root = Path(tempfile.mkdtemp(prefix="baldr-verify-"))
+    cleanup: dict[str, Any] = {"ok": True}
     try:
-        yield root
+        yield root, cleanup
     finally:
-        _remove_verification_tree(root)
+        cleanup.update(_remove_verification_tree(root))
 
 
 def _mcp_restart_fixture() -> dict[str, Any]:
@@ -470,7 +482,7 @@ def run_lifecycle_verification(
     if workspace_root:
         profile = workspace_profile(workspace_root)
 
-    with _temporary_verification_root() as verification_root:
+    with _temporary_verification_root() as (verification_root, scratch_cleanup):
         scratch = verification_root / "repo"
         _prepare_scratch(scratch)
         scenarios = [
@@ -511,6 +523,10 @@ def run_lifecycle_verification(
         "failed": len(failed),
         "scenarios": scenarios,
         "active_processes_after": active_processes(),
+        # A temporary tree nobody could remove points at something that
+        # outlived the run, which is worth reading next to the verdicts rather
+        # than raised in place of them.
+        "scratch_cleanup": dict(scratch_cleanup),
     }
     if result["active_processes_after"]:
         result["ok"] = False
