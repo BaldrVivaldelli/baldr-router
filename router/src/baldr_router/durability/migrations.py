@@ -686,24 +686,51 @@ def apply_migrations(
     connection: sqlite3.Connection,
     migrations: Iterable[Migration] = MIGRATIONS,
 ) -> int:
+    """Bring the schema to the latest version, safely against another migrator.
+
+    Each migration decides and applies inside one write transaction, and the
+    applied set is read after the write lock is held rather than before. Reading
+    first let two connections both conclude a migration was missing: the loser
+    replayed its statements, so an ALTER TABLE hit a duplicate column and the
+    insert hit the primary key. Every migration is missing on an empty database,
+    which is precisely when a first run opens two stores at once.
+    """
     _ensure_migrations_table(connection)
-    applied = applied_versions(connection)
     latest = 0
     for migration in migrations:
         latest = max(latest, migration.version)
-        if migration.version in applied:
-            _name, checksum = applied[migration.version]
-            if checksum != migration.checksum:
-                raise RuntimeError(
-                    f"SQLite migration {migration.version} checksum mismatch; "
-                    "the durable schema history was modified in place."
+        # A caller already inside a transaction owns the atomicity; taking a
+        # second one here would fail rather than protect anything.
+        owned = not connection.in_transaction
+        if owned:
+            connection.execute("BEGIN IMMEDIATE")
+        recorded: tuple[str, str] | None = None
+        try:
+            recorded = applied_versions(connection).get(migration.version)
+            if recorded is None:
+                for statement in migration.statements:
+                    connection.execute(statement)
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, name, checksum, applied_at)"
+                    " VALUES (?, ?, ?, ?)",
+                    (
+                        migration.version,
+                        migration.name,
+                        migration.checksum,
+                        utc_now_iso(),
+                    ),
                 )
-            continue
-        with connection:
-            for statement in migration.statements:
-                connection.execute(statement)
-            connection.execute(
-                "INSERT INTO schema_migrations(version, name, checksum, applied_at) VALUES (?, ?, ?, ?)",
-                (migration.version, migration.name, migration.checksum, utc_now_iso()),
+        except BaseException:
+            if owned:
+                connection.execute("ROLLBACK")
+            raise
+        if owned:
+            connection.execute("COMMIT")
+        # Raised after the lock is released: a rewritten history is a permanent
+        # condition, and holding the database while reporting it helps nobody.
+        if recorded is not None and recorded[1] != migration.checksum:
+            raise RuntimeError(
+                f"SQLite migration {migration.version} checksum mismatch; "
+                "the durable schema history was modified in place."
             )
     return latest

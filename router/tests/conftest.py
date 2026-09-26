@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import tempfile
+import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -39,3 +41,20 @@ def isolated_environment() -> Iterator[None]:
         finally:
             for key in applied:
                 os.environ.pop(key, None)
+
+
+# Composing from the console returns as soon as the item is durable, and the
+# workflow then runs on a daemon thread. The variables that name the state
+# directory are process-wide, so a thread that outlives its test opens a
+# database in the next test's fresh directory — the one place where every
+# migration is still missing and two migrators can collide. Draining here makes
+# that impossible for every test rather than for the ones that remembered.
+@pytest.fixture(autouse=True)
+def no_work_started_outlives_its_test() -> Iterator[None]:
+    yield
+    deadline = time.monotonic() + 60.0
+    for thread in list(threading.enumerate()):
+        if not thread.name.startswith("baldr-console-start-"):
+            continue
+        thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        assert not thread.is_alive(), f"{thread.name} outlived its test"

@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from pathlib import Path
 
 import pytest
 
-from baldr_router.durability.migrations import MIGRATIONS, apply_migrations
+from baldr_router.durability.migrations import (
+    MIGRATIONS,
+    applied_versions,
+    apply_migrations,
+)
 from baldr_router.durability.state import InvalidStateTransition, assert_transition
 from baldr_router.durability.store import DurableStore
 
@@ -24,6 +29,52 @@ def _create_run(store: DurableStore, run_id: str = "run-1") -> None:
         task_artifact_id=task,
         config_snapshot={"version": 1},
     )
+
+
+def test_concurrent_migrators_do_not_replay_each_other(tmp_path: Path):
+    """An empty database is where every migration is missing at once.
+
+    Two stores opening together is ordinary — a console request and the worker
+    it starts, an editor and a command — and reading the applied set before
+    taking the write lock let both conclude the same migration was missing. The
+    loser replayed it, so an ALTER TABLE hit a duplicate column and the record
+    hit the primary key, and a first run failed.
+    """
+    path = tmp_path / "state.sqlite3"
+    failures: list[BaseException] = []
+    ready = threading.Barrier(4)
+
+    def migrate() -> None:
+        connection = sqlite3.connect(path, timeout=10, isolation_level=None)
+        connection.execute("PRAGMA busy_timeout = 10000")
+        # Start together, or the first one finishes before the others look.
+        ready.wait(timeout=30)
+        try:
+            apply_migrations(connection)
+        except BaseException as exc:  # noqa: BLE001 - reported, not swallowed
+            failures.append(exc)
+        finally:
+            connection.close()
+
+    threads = [threading.Thread(target=migrate, name="migrator") for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+
+    assert not failures, [repr(failure) for failure in failures]
+    connection = sqlite3.connect(path)
+    try:
+        assert max(applied_versions(connection)) == max(
+            migration.version for migration in MIGRATIONS
+        )
+        # Applied once each, not once per migrator that raced for it.
+        recorded = connection.execute(
+            "SELECT COUNT(*) FROM schema_migrations"
+        ).fetchone()[0]
+        assert recorded == len(MIGRATIONS)
+    finally:
+        connection.close()
 
 
 def test_sqlite_migrations_upgrade_v1_to_latest(tmp_path: Path):

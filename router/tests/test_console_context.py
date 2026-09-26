@@ -110,6 +110,8 @@ def synthetic_provider(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def console(workspace: Path) -> Iterator[str]:
+    # Work this console starts is drained by an autouse fixture in conftest,
+    # before the next test's state directory replaces this one.
     server = build_console_server(
         host="127.0.0.1", port=0, token=TOKEN, workspace_root=str(workspace)
     )
