@@ -6,13 +6,14 @@ import json
 import os
 import re
 import shutil
+import tomllib
 import urllib.parse
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from .agent_api import AgentContractError, AgentManifest
+from .agent_api import AgentContractError, AgentManifest, AgentRef
 from .agent_http import JsonHttpClient
 from .agent_manager import HttpAgentManagerResolver
 from .config import AgentManagerConfig, load_config
@@ -930,3 +931,235 @@ def discover_sources(
     """Discover sources in caller-defined order; no source can execute an agent."""
 
     return tuple(source.discover(context=context) for source in sources)
+
+
+# --- agents declared as a file in a repository --------------------------------
+
+# An authoring file says what an agent is for; the registry needs a manifest
+# with a digest. Nobody can write a digest by hand, which is why the source
+# document format is a compilation target rather than something to edit.
+DECLARATIVE_SOURCE_KIND = "declarative"
+_DEFAULT_DECLARATIVE_PATH = "baldr-agents.toml"
+# Keys that describe the agent itself, and keys that describe how to reach it.
+# Splitting them here is what lets the file stay one flat table per agent.
+_MANIFEST_KEYS = frozenset(
+    {
+        "ref",
+        "owner",
+        "transport",
+        "capabilities",
+        "effect_mode",
+        "input_schema",
+        "output_schema",
+        "supports_sessions",
+        "supports_cancellation",
+        "label",
+        "description",
+    }
+)
+_TARGET_KEYS = (
+    "provider",
+    "model",
+    "reasoning_effort",
+    "agent",
+    "effort",
+    "runner",
+    "session_scope",
+    "tools",
+    "instructions",
+)
+
+
+def _declarative_bool(value: Any, *, field_name: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    raise AgentContractError(f"Agent field {field_name!r} must be true or false.")
+
+
+def _declarative_manifest(entry: Mapping[str, Any], *, index: int) -> AgentManifest:
+    where = f"agent #{index + 1}"
+    if not isinstance(entry, Mapping):
+        raise AgentContractError(f"{where} must be a table.")
+    unexpected = sorted(
+        str(key) for key in set(entry) - _MANIFEST_KEYS - set(_TARGET_KEYS) - {"target"}
+    )
+    if unexpected:
+        # Named rather than ignored: a typo in a security-relevant file should
+        # stop the plan, not quietly produce an agent that is missing a rule.
+        raise AgentContractError(
+            f"{where} has unknown fields: {', '.join(unexpected)}."
+        )
+    reference = str(entry.get("ref") or "").strip()
+    if not reference:
+        raise AgentContractError(f"{where} needs a ref.")
+
+    target: dict[str, str] = {}
+    declared_target = entry.get("target")
+    if declared_target is not None:
+        if not isinstance(declared_target, Mapping):
+            raise AgentContractError(f"{where} target must be a table.")
+        target.update({str(k): str(v) for k, v in declared_target.items()})
+    for key in _TARGET_KEYS:
+        if key in entry:
+            target[key] = str(entry[key])
+    if not target:
+        raise AgentContractError(f"{where} needs at least a provider.")
+
+    capabilities = entry.get("capabilities")
+    if capabilities is None:
+        # The floor every role needs, and the one that grants nothing else.
+        capabilities = ["workspace.read"]
+    if not isinstance(capabilities, list):
+        raise AgentContractError(f"{where} capabilities must be a list.")
+    # Read-only unless the file says otherwise: an agent that can change a
+    # workspace should be unmistakable in the diff that introduced it.
+    effect_mode = str(entry.get("effect_mode") or "read-only").strip()
+    declared = [str(value).strip().lower() for value in capabilities]
+    if effect_mode == "workspace-write" and "workspace.write" not in declared:
+        raise AgentContractError(
+            f"{where} declares workspace-write but not the workspace.write capability."
+        )
+    if "workspace.write" in declared and effect_mode != "workspace-write":
+        raise AgentContractError(
+            f"{where} declares the workspace.write capability but is not workspace-write."
+        )
+
+    try:
+        return AgentManifest(
+            reference=AgentRef.parse(reference),
+            owner=str(entry.get("owner") or ""),
+            transport=str(entry.get("transport") or "provider"),
+            target=target,
+            capabilities=tuple(str(value) for value in capabilities),
+            input_schema=str(entry.get("input_schema") or "baldr.Task/v1"),
+            output_schema=str(
+                entry.get("output_schema") or "baldr.StructuredReport/v1"
+            ),
+            effect_mode=effect_mode,
+            supports_sessions=_declarative_bool(
+                entry.get("supports_sessions", False),
+                field_name=f"{where}.supports_sessions",
+            ),
+            supports_cancellation=_declarative_bool(
+                entry.get("supports_cancellation", False),
+                field_name=f"{where}.supports_cancellation",
+            ),
+        )
+    except AgentContractError as exc:
+        raise AgentContractError(f"{where}: {exc}") from exc
+
+
+class DeclarativeAgentSource:
+    """Read agents a repository declares, and compile them into candidates.
+
+    The file is the thing a person edits and a reviewer reads in a diff: one
+    flat table per agent, saying what it is for and what it may touch. The
+    manifest and its digest are derived, never written, so the same file
+    produces the same catalog on every machine and `agent sync` can converge to
+    it without any new reconciliation logic.
+    """
+
+    def __init__(
+        self,
+        *,
+        path: Path | None = None,
+        expected_source_id: str = "",
+    ) -> None:
+        self.path = Path(path) if path is not None else Path(_DEFAULT_DECLARATIVE_PATH)
+        self.expected_source_id = (
+            _source_id(expected_source_id, field_name="expected_source_id")
+            if expected_source_id
+            else ""
+        )
+        self.info = AgentSourceInfo(
+            self.expected_source_id or "repo.agents",
+            DECLARATIVE_SOURCE_KIND,
+            "Agents declared in this repository",
+        )
+
+    def _document(self, *, context: AgentSourceContext) -> Mapping[str, Any]:
+        path = (
+            self.path if self.path.is_absolute() else context.workspace_root / self.path
+        )
+        if path.is_symlink() or not path.is_file():
+            raise AgentContractError(f"Agent file not found: {path}")
+        if path.stat().st_size > MAX_SOURCE_BYTES:
+            raise AgentContractError("Agent file exceeds the 2 MiB limit.")
+        raw = path.read_bytes()
+        try:
+            if path.suffix.lower() == ".json":
+                value = json.loads(raw.decode("utf-8"))
+            else:
+                value = tomllib.loads(raw.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError, tomllib.TOMLDecodeError) as exc:
+            raise AgentContractError(f"Agent file is not valid: {exc}") from exc
+        if not isinstance(value, Mapping):
+            raise AgentContractError("Agent file must contain a table.")
+        return value
+
+    def discover(self, *, context: AgentSourceContext) -> AgentSourceResult:
+        document = self._document(context=context)
+        unexpected = sorted(str(key) for key in set(document) - {"source", "agent"})
+        if unexpected:
+            raise AgentContractError(
+                f"Unknown top-level sections: {', '.join(unexpected)}."
+            )
+        declared_source = document.get("source")
+        if declared_source is not None:
+            if not isinstance(declared_source, Mapping):
+                raise AgentContractError("The source section must be a table.")
+            info = AgentSourceInfo(
+                str(declared_source.get("id") or self.info.identifier),
+                DECLARATIVE_SOURCE_KIND,
+                str(declared_source.get("label") or self.info.label),
+            )
+        else:
+            info = self.info
+        if self.expected_source_id and info.identifier != self.expected_source_id:
+            raise AgentContractError(
+                "Agent file identifier does not match the configured source."
+            )
+
+        entries = document.get("agent") or []
+        if not isinstance(entries, list):
+            raise AgentContractError("The agent section must be a list of tables.")
+        warnings: list[AgentSourceWarning] = []
+        if len(entries) > context.limit:
+            warnings.append(
+                AgentSourceWarning(
+                    "candidate-limit-reached",
+                    f"Declarative discovery stopped at {context.limit} agents.",
+                )
+            )
+            entries = entries[: context.limit]
+
+        located = str(
+            self.path if self.path.is_absolute() else context.workspace_root / self.path
+        )
+        candidates: list[AgentSourceCandidate] = []
+        seen: set[str] = set()
+        for index, entry in enumerate(entries):
+            manifest = _declarative_manifest(entry, index=index)
+            reference = str(manifest.reference)
+            if reference in seen:
+                raise AgentContractError(
+                    f"{reference} is declared more than once in this file."
+                )
+            seen.add(reference)
+            candidates.append(
+                AgentSourceCandidate(
+                    manifest=manifest,
+                    provenance=AgentSourceProvenance(
+                        source_id=info.identifier,
+                        source_kind=DECLARATIVE_SOURCE_KIND,
+                        locator=located,
+                        native_id=reference,
+                    ),
+                    state="available",
+                    label=str(entry.get("label") or manifest.reference.name),
+                    description=str(entry.get("description") or ""),
+                )
+            )
+        return AgentSourceResult(
+            source=info, candidates=tuple(candidates), warnings=tuple(warnings)
+        )

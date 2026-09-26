@@ -19,7 +19,10 @@ EXTENSION_DIR := facades/vscode-extension
 WORKSPACE ?=
 PORT ?= 8787
 
-.PHONY: up localhost down help deps test lint check ci build verify-release install install-agent-runtime
+# The agents a repository declares. Edit the file, read the plan, apply it.
+AGENTS ?= baldr-agents.toml
+
+.PHONY: up localhost down help deps test lint check ci build verify-release install install-agent-runtime agents agents-apply
 
 help:
 	@printf '%s\n' \
@@ -28,6 +31,10 @@ help:
 		'  make up [WORKSPACE=/path/to/repo] [PORT=8787]' \
 		'      Levanta la consola local y abre el navegador con su token.' \
 		'      Sin WORKSPACE solo observa; con WORKSPACE también crea y configura.' \
+		'' \
+		'  make agents [AGENTS=baldr-agents.toml]' \
+		'      Muestra qué cambiaría en el catálogo según el archivo declarado.' \
+		'      make agents-apply lo aplica; lo que sacaste del archivo se deshabilita.' \
 		'' \
 		'  make deps          Instala las dependencias de desarrollo' \
 		'  make test | lint   Corre la suite o el linter de todos los paquetes' \
@@ -52,6 +59,19 @@ localhost: up
 
 down:
 	@echo 'La consola corre en primer plano: cortala con Ctrl-C en su terminal.'
+
+# Reading the plan is the default because applying one changes which agents may
+# touch a workspace, and that is worth seeing before it happens.
+agents:
+	$(UV) run --project $(ROUTER_DIR) baldr-router agent sync \
+		--source declarative --path "$(AGENTS)" --workspace .
+
+# Disable rather than revoke what the file no longer declares: the catalog has
+# to converge on the file, and a removal somebody regrets should be reversible.
+agents-apply:
+	$(UV) run --project $(ROUTER_DIR) baldr-router agent sync \
+		--source declarative --path "$(AGENTS)" --workspace . \
+		--apply --missing-action disable
 
 deps:
 	$(UV) sync --project $(ROUTER_DIR) --extra dev

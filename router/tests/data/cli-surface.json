@@ -2801,6 +2801,7 @@
                     "manager",
                     "file",
                     "endpoint",
+                    "declarative",
                     "all"
                   ],
                   "required": false,
@@ -2967,6 +2968,7 @@
                     "manager",
                     "file",
                     "endpoint",
+                    "declarative",
                     "all"
                   ],
                   "required": false,

@@ -31,6 +31,7 @@ from .agent_sources import (
     AgentSource,
     AgentSourceContext,
     KiroAgentSource,
+    DeclarativeAgentSource,
     ManifestAgentSource,
 )
 from .agent_sync import (
@@ -375,6 +376,13 @@ def _agent_sources_from_args(args: argparse.Namespace) -> list[AgentSource]:
             sources.append(AgentManagerSource(cfg.agent_manager))
         elif selected == "manager":
             raise AgentNotFoundError("Agent Manager is not configured.")
+    if selected == "declarative":
+        sources.append(
+            DeclarativeAgentSource(
+                path=Path(args.path) if args.path else None,
+                expected_source_id=args.expected_source_id,
+            )
+        )
     if selected == "file":
         if not args.path:
             raise AgentContractError("--path is required for a file source.")
@@ -1670,7 +1678,7 @@ def _register_agents(sub: SubParsers) -> None:
     )
     p.add_argument(
         "--source",
-        choices=["kiro", "manager", "file", "endpoint", "all"],
+        choices=["kiro", "manager", "file", "endpoint", "declarative", "all"],
         default="kiro",
     )
     p.add_argument("--workspace", default=".")
@@ -1689,7 +1697,7 @@ def _register_agents(sub: SubParsers) -> None:
     )
     p.add_argument(
         "--source",
-        choices=["kiro", "manager", "file", "endpoint", "all"],
+        choices=["kiro", "manager", "file", "endpoint", "declarative", "all"],
         default="kiro",
     )
     p.add_argument("--workspace", default=".")

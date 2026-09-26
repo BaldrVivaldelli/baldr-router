@@ -210,6 +210,57 @@ The manifest is still immutable per exact version. Changing what an agent may
 touch means publishing a new version, which is what keeps a durable run's
 record of who did what true after the fact.
 
+### Declaring them in the repository
+
+A manifest carries a digest, and nobody writes one of those by hand. The
+authoring file is what a person edits and a reviewer reads in a diff; the
+manifest is compiled from it.
+
+```toml
+# baldr-agents.toml
+[source]
+id = "repo.agents"
+label = "Agentes de este repositorio"
+
+[[agent]]
+ref = "local://equipo/revisor-seguridad@1.0.0"
+owner = "equipo-plataforma"
+description = "Revisa la superficie pública buscando problemas de seguridad"
+capabilities = ["workspace.read", "role.reviewer"]
+provider = "claude"
+model = "opus"
+tools = "Read,Grep"
+instructions = "Mirá autenticación y manejo de secretos."
+```
+
+One flat table per agent. Keys that describe the agent stay at the manifest
+level and keys that describe how to reach it become its `target`; an unknown
+key stops the plan rather than being ignored, because a typo in this file is a
+rule that silently went missing. `transport` defaults to `provider`, and an
+agent is read-only unless the file says otherwise — an agent that can change a
+workspace should be unmistakable in the diff that introduced it, and both
+halves of that permission have to agree before the file is accepted.
+
+```bash
+make agents         # what would change, and nothing else
+make agents-apply   # converge the catalog on the file
+```
+
+Reading the plan is the default because applying one changes which agents may
+touch a workspace. What the file no longer declares is disabled rather than
+revoked, so a removal somebody regrets is reversible.
+
+The reconciliation underneath is the one that already existed:
+
+```bash
+baldr-router agent sync --source declarative --path baldr-agents.toml [--apply]
+```
+
+Editing an agent in place is a conflict, not an update. An exact version is
+immutable, so a changed `tools` line under the same reference is refused and
+the plan says so; publishing `@1.1.0` instead registers the new agent and
+reports the old one as absent, to be disabled or kept by `--missing-action`.
+
 ## Local registry
 
 The default path is:
