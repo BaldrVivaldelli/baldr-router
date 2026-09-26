@@ -554,8 +554,18 @@ Desde el checkout alcanza con un comando, que además abre el navegador con el
 token ya puesto:
 
 ```bash
-make up                                # solo observa
-make up WORKSPACE=/path/to/repo        # también crea y configura
+make up                                # elegís el workspace en la página
+make up WORKSPACE=/path/to/repo        # abre fijada a ese repo
+```
+
+Sin `WORKSPACE`, la consola trae un selector con los workspaces que Baldr ya
+conoce: los que confiaste y los que tienen tareas o preferencias guardadas.
+Elegir ahí habilita configurar y crear. La página **no** puede nombrar una ruta
+nueva: el router solo acepta las que él mismo publicó, así que confiar un
+repositorio sigue siendo un acto explícito tuyo.
+
+```bash
+baldr-router trust-workspace /path/to/repo   # una vez, y aparece en el selector
 ```
 
 Con el CLI instalado, el equivalente directo:

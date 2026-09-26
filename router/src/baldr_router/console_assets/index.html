@@ -58,6 +58,11 @@ h1 { font-size: 17px; margin: 0; letter-spacing: .2px; }
 h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .8px; color: var(--muted); margin: 0 0 10px; }
 h3 { font-size: 14px; margin: 0 0 6px; }
 .scope { color: var(--muted); font-size: 13px; }
+select.picker {
+  font: inherit; font-size: 13px; color: var(--ink); background: var(--bg);
+  border: 1px solid var(--line); border-radius: 8px; padding: 4px 8px; max-width: 46vw;
+}
+select.picker:hover { border-color: var(--accent); }
 .counts { display: flex; gap: 8px; flex-wrap: wrap; margin-left: auto; }
 .pill {
   border: 1px solid var(--line); border-radius: 999px;
@@ -176,6 +181,7 @@ nav.tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: 
 <header>
   <h1>Baldr</h1>
   <span class="scope" id="scope"></span>
+  <select class="picker" id="workspace" aria-label="Workspace" hidden></select>
   <div class="counts" id="counts"></div>
   <nav class="tabs" id="tabs" role="tablist">
     <button type="button" role="tab" data-view="tasks" aria-selected="true">Tareas</button>
@@ -231,7 +237,35 @@ let lastStates = new Map();
 let notified = false;
 let lastWorkbench = null;
 let canCompose = false;
+let workspaceRoot = new URLSearchParams(location.search).get('workspace_root') || '';
 const drafts = new Map();
+
+// Every write names the workspace it acts on; the router matches it against the
+// list it published and refuses anything else.
+const scoped = (body) => (workspaceRoot ? { ...body, workspace_root: workspaceRoot } : body);
+
+function renderWorkspaces(workspaces, locked) {
+  const picker = document.getElementById('workspace');
+  if (locked) {
+    // Started for one repository on purpose; offering a switch would lie.
+    picker.hidden = true;
+    return;
+  }
+  picker.hidden = false;
+  const signature = JSON.stringify([workspaces, workspaceRoot]);
+  if (picker.dataset.signature === signature) return;
+  picker.dataset.signature = signature;
+  picker.replaceChildren();
+  picker.append(el('option', { value: '', text: workspaces.length ? 'Todas las tareas' : 'Sin workspaces conocidos' }));
+  for (const workspace of workspaces) {
+    picker.append(el('option', {
+      value: workspace.root,
+      text: workspace.trusted ? workspace.label : `${workspace.label} (sin confiar)`,
+      title: workspace.root,
+    }));
+  }
+  picker.value = workspaceRoot;
+}
 
 const el = (tag, props = {}, children = []) => {
   const node = document.createElement(tag);
@@ -316,7 +350,7 @@ async function submitAction(itemId, action, label, button) {
       method: 'POST',
       credentials: 'omit',
       headers: { 'Content-Type': 'application/json', [TOKEN_HEADER]: token },
-      body: JSON.stringify({ work_item_id: itemId, action }),
+      body: JSON.stringify(scoped({ work_item_id: itemId, action })),
     });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok || payload.ok === false) {
@@ -545,7 +579,7 @@ async function savePreference(field, value, option, group) {
       method: 'POST',
       credentials: 'omit',
       headers: { 'Content-Type': 'application/json', [TOKEN_HEADER]: token },
-      body: JSON.stringify({ [field]: value, allow_non_git: Boolean(option.requires_confirmation) }),
+      body: JSON.stringify(scoped({ [field]: value, allow_non_git: Boolean(option.requires_confirmation) })),
     });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok || payload.ok === false) {
@@ -633,7 +667,7 @@ function composer({ itemId, placeholder, submitLabel, hint }) {
         method: 'POST',
         credentials: 'omit',
         headers: { 'Content-Type': 'application/json', [TOKEN_HEADER]: token },
-        body: JSON.stringify(itemId ? { task, work_item_id: itemId } : { task }),
+        body: JSON.stringify(scoped(itemId ? { task, work_item_id: itemId } : { task })),
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok || payload.ok === false) {
@@ -699,6 +733,7 @@ async function refresh() {
   try {
     const url = new URL('/v1/workbench', location.origin);
     if (selectedId) url.searchParams.set('work_item_id', selectedId);
+    if (workspaceRoot) url.searchParams.set('workspace_root', workspaceRoot);
     const response = await fetch(url, {
       headers: { Accept: 'application/json', [TOKEN_HEADER]: token },
       // No cookie is ever set, so nothing must be sent ambiently either.
@@ -719,6 +754,7 @@ async function refresh() {
     renderItems(workbench.items || []);
     renderDetail(workbench.selected, workbench.selected_error);
     lastWorkbench = workbench;
+    renderWorkspaces(payload.workspaces || [], payload.workspace_locked);
     canCompose = Boolean(workbench.preferences);
     renderNewTask();
     renderSettings(workbench);
@@ -761,6 +797,19 @@ if ('serviceWorker' in navigator) {
 for (const button of document.querySelectorAll('#tabs button')) {
   button.addEventListener('click', () => showView(button.dataset.view));
 }
+
+document.getElementById('workspace').addEventListener('change', (event) => {
+  workspaceRoot = event.target.value;
+  // Changing workspace changes which items exist, so the selection cannot
+  // survive the switch.
+  selectedId = null;
+  const url = new URL(location.href);
+  url.searchParams.delete('work_item_id');
+  if (workspaceRoot) url.searchParams.set('workspace_root', workspaceRoot);
+  else url.searchParams.delete('workspace_root');
+  history.replaceState(null, '', url);
+  refresh();
+});
 
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
 setUpNotifications();

@@ -44,8 +44,13 @@ from .facade import facade_run, facade_status_report
 from .process_control import install_signal_handlers
 from .redaction import redact_text
 from .work_item_progress import compact_preferences
+from .durability.store import DurableStore
 from .work_items import RECONCILIATION_ACTION_ORDER, WorkItemService, workbench_options
-from .workspace_policy import WorkspacePolicyError
+from .workspace_policy import (
+    WorkspacePolicyError,
+    configured_trusted_roots,
+    inspect_workspace,
+)
 
 _LOG = get_logger(__name__)
 
@@ -114,6 +119,57 @@ def bound_address(server: ConsoleHTTPServer) -> tuple[str, int]:
     raw_host, port = address[0], address[1]
     host = raw_host.decode("utf-8") if isinstance(raw_host, bytes) else str(raw_host)
     return host, int(port)
+
+
+def selectable_workspaces() -> list[dict[str, Any]]:
+    """List the workspaces the console may be pointed at.
+
+    Only places Baldr already knows: roots the operator trusted, and workspaces
+    that already carry durable records. A path typed into the page is never
+    resolved, so the browser can choose among these but cannot introduce one —
+    granting trust stays a deliberate act at the machine.
+    """
+    candidates: dict[str, bool] = {}
+    for root in configured_trusted_roots():
+        candidates[str(root)] = True
+    try:
+        store = DurableStore()
+        try:
+            rows = store.connect().execute(
+                "SELECT DISTINCT workspace_root FROM workspace_preferences "
+                "UNION SELECT DISTINCT workspace_root FROM work_items"
+            )
+            for row in rows:
+                recorded = str(row["workspace_root"] or "").strip()
+                if recorded:
+                    candidates.setdefault(recorded, False)
+        finally:
+            store.close()
+    except Exception:
+        log_suppressed(_LOG, "Could not read known workspaces")
+    workspaces: list[dict[str, Any]] = []
+    for raw, trusted in sorted(candidates.items()):
+        path = Path(raw)
+        if not path.is_dir():
+            # A repository that moved or was deleted is not selectable.
+            continue
+        workspaces.append(
+            {
+                "root": str(path),
+                "label": path.name or str(path),
+                # An untrusted workspace can be watched but not worked in, and
+                # saying so beats a policy error after the first click.
+                "trusted": bool(trusted) or is_trusted_workspace(path),
+            }
+        )
+    return workspaces
+
+
+def is_trusted_workspace(path: Path) -> bool:
+    try:
+        return bool(inspect_workspace(path, access="write").get("ok"))
+    except Exception:
+        return False
 
 
 def new_console_token() -> str:
@@ -252,6 +308,53 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             return False
         return True
 
+    def _scope(self, supplied: str | None) -> tuple[str | None, str | None]:
+        """Resolve which workspace a request acts on.
+
+        Returns the workspace and an error code, never both. A value from the
+        request is matched against the selectable list rather than resolved as
+        a path, so a crafted request cannot name a directory Baldr was never
+        pointed at. Starting the console with --workspace-root locks the scope,
+        because a window opened for one repository should stay on it.
+        """
+        locked = self._console.workspace_root
+        wanted = (supplied or "").strip()
+        if locked:
+            if wanted and str(Path(wanted)) != str(Path(locked)):
+                return None, "workspace_locked"
+            return locked, None
+        if not wanted:
+            return None, None
+        if wanted not in {item["root"] for item in selectable_workspaces()}:
+            return None, "workspace_not_selectable"
+        return wanted, None
+
+    def _scope_or_error(
+        self, supplied: str | None, *, required: bool
+    ) -> tuple[str | None, bool]:
+        """Return (workspace, ok). When ok is False the response was sent."""
+
+        workspace_root, problem = self._scope(supplied)
+        if problem == "workspace_locked":
+            self._error(
+                409,
+                problem,
+                "This console was started for one workspace and stays on it.",
+            )
+            return None, False
+        if problem == "workspace_not_selectable":
+            self._error(
+                403,
+                problem,
+                "Baldr does not know that workspace. Trust it first with "
+                "baldr-router trust-workspace <path>.",
+            )
+            return None, False
+        if required and not workspace_root:
+            self._error(409, "workspace_scope_required", "Choose a workspace first.")
+            return None, False
+        return workspace_root, True
+
     def _selected_item_id(self, query: Mapping[str, list[str]]) -> str | None:
         raw = (query.get("work_item_id") or [""])[0].strip()
         if not raw or len(raw) > _MAX_ITEM_ID:
@@ -259,15 +362,27 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         return raw
 
     def _workbench(self, query: Mapping[str, list[str]]) -> None:
-        # The workspace scope is fixed when the server starts. Taking it from the
-        # query string would let a request name any path on disk.
+        workspace_root, ok = self._scope_or_error(
+            (query.get("workspace_root") or [""])[0], required=False
+        )
+        if not ok:
+            return
         report = facade_status_report(
-            self._console.workspace_root,
+            workspace_root,
             client=CONSOLE_CLIENT,
             work_item_id=self._selected_item_id(query),
             workbench_only=True,
         )
-        self._json(report)
+        # The picker and the current scope travel with the view so the page
+        # never has to guess where it is pointed.
+        self._json(
+            {
+                **report,
+                "workspace_root": workspace_root,
+                "workspace_locked": bool(self._console.workspace_root),
+                "workspaces": selectable_workspaces(),
+            }
+        )
 
     def _read_action_request(self) -> dict[str, Any] | None:
         # A cross-site form can only send a handful of content types, none of
@@ -294,7 +409,9 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             return None
         return payload
 
-    def _permitted_actions(self, work_item_id: str) -> set[str] | None:
+    def _permitted_actions(
+        self, work_item_id: str, workspace_root: str | None
+    ) -> set[str] | None:
         """Ask the router which actions this item allows right now.
 
         The page is told what to render, but nothing it sends is trusted: the
@@ -302,7 +419,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         only ever name an action the item already permits.
         """
         report = facade_status_report(
-            self._console.workspace_root,
+            workspace_root,
             client=CONSOLE_CLIENT,
             work_item_id=work_item_id,
             workbench_only=True,
@@ -314,10 +431,12 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         allowed = selected.get("allowed_actions")
         return {str(action) for action in allowed} if isinstance(allowed, list) else set()
 
-    def _run_action(self, work_item_id: str, action: str) -> dict[str, Any]:
+    def _run_action(
+        self, work_item_id: str, action: str, workspace_root: str | None
+    ) -> dict[str, Any]:
         if action == "cancel":
             return facade_run(
-                self._console.workspace_root or "",
+                workspace_root or "",
                 "",
                 client=CONSOLE_CLIENT,
                 work_item_action="cancel-item",
@@ -325,7 +444,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 cancel_reason="Cancelled from the Baldr console.",
             )
         return facade_run(
-            self._console.workspace_root or "",
+            workspace_root or "",
             "",
             client=CONSOLE_CLIENT,
             work_item_action="reconcile-item",
@@ -336,6 +455,13 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
     def _actions(self) -> None:
         payload = self._read_action_request()
         if payload is None:
+            return
+        # Acting by item id alone would reach across a lock, so the scope
+        # constrains the lookup the same way it constrains the view.
+        workspace_root, ok = self._scope_or_error(
+            str(payload.get("workspace_root") or ""), required=False
+        )
+        if not ok:
             return
         work_item_id = str(payload.get("work_item_id") or "").strip()
         action = str(payload.get("action") or "").strip()
@@ -349,7 +475,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 f"{action!r} is not one of the decisions the console offers.",
             )
             return
-        permitted = self._permitted_actions(work_item_id)
+        permitted = self._permitted_actions(work_item_id, workspace_root)
         if permitted is None:
             self._error(404, "work_item_not_found", "No such work item.")
             return
@@ -363,7 +489,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             )
             return
         try:
-            result = self._run_action(work_item_id, action)
+            result = self._run_action(work_item_id, action, workspace_root)
         except Exception as exc:
             log_suppressed(
                 _LOG,
@@ -376,16 +502,13 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         self._json({"ok": bool(result.get("ok", True)), "action": action, "result": result})
 
     def _preferences(self) -> None:
-        workspace_root = self._console.workspace_root
-        if not workspace_root:
-            self._error(
-                409,
-                "workspace_scope_required",
-                "Start the console with --workspace-root to configure a workspace.",
-            )
-            return
         payload = self._read_action_request()
         if payload is None:
+            return
+        workspace_root, ok = self._scope_or_error(
+            str(payload.get("workspace_root") or ""), required=True
+        )
+        if not ok or workspace_root is None:
             return
         options = workbench_options()
         requested: dict[str, str] = {}
@@ -448,16 +571,13 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         ).start()
 
     def _compose(self) -> None:
-        workspace_root = self._console.workspace_root
-        if not workspace_root:
-            self._error(
-                409,
-                "workspace_scope_required",
-                "Start the console with --workspace-root to create work here.",
-            )
-            return
         payload = self._read_action_request()
         if payload is None:
+            return
+        workspace_root, ok = self._scope_or_error(
+            str(payload.get("workspace_root") or ""), required=True
+        )
+        if not ok or workspace_root is None:
             return
         task = str(payload.get("task") or "").strip()
         work_item_id = str(payload.get("work_item_id") or "").strip()
