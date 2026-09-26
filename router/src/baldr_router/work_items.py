@@ -2347,8 +2347,20 @@ def upsert_execution_profile(
             "Profile name must be 1-64 letters, numbers, dots, underscores, or dashes."
         )
     cfg = load_config()
+    selected_provider = provider.strip() or cfg.router.default_provider
+    # Refused here rather than at run time. A profile naming a provider that has
+    # no adapter was accepted and stored, and the phase using it failed on its
+    # first real task, long after the choice could be connected to the failure.
+    from .provider_registry import get_provider_registry
+
+    registry = get_provider_registry()
+    if registry.resolve(selected_provider) is None:
+        raise ValueError(
+            f"Unknown provider: {selected_provider!r}. Implemented providers: "
+            f"{', '.join(registry.canonical_names())}."
+        )
     cfg.execution_profiles[clean] = ExecutionProfileConfig(
-        provider=provider.strip() or cfg.router.default_provider,
+        provider=selected_provider,
         model=model.strip(),
         reasoning_effort=reasoning_effort.strip(),
         agent=agent.strip(),

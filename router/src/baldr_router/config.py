@@ -60,6 +60,27 @@ class KiroCliConfig:
 
 
 @dataclass
+class ClaudeConfig:
+    """Claude Code driven headlessly as one more provider.
+
+    Off by default, like every optional provider: it is only useful once the
+    CLI is installed and signed in, and enabling it silently would make a phase
+    fail at run time rather than at configuration time.
+    """
+
+    enabled: bool = False
+    command: str = "claude"
+    model: str = ""
+    # low | medium | high | xhigh | max, as the CLI accepts them. Empty keeps
+    # whatever the session default is.
+    default_effort: str = ""
+    timeout_seconds: int = 1800
+    # Bounds a headless run that would otherwise loop on its own tool calls.
+    max_turns: int = 40
+    api_key_env: str = "ANTHROPIC_API_KEY"
+
+
+@dataclass
 class AgentManagerConfig:
     enabled: bool = False
     registry: str = "manager"
@@ -313,6 +334,7 @@ class AppConfig:
     router: RouterConfig
     codex: CodexConfig
     kiro_cli: KiroCliConfig
+    claude: ClaudeConfig
     agent_manager: AgentManagerConfig
     context7: Context7Config
     workspace: WorkspaceConfig
@@ -341,6 +363,7 @@ class AppConfig:
             router=RouterConfig(),
             codex=CodexConfig(),
             kiro_cli=KiroCliConfig(),
+            claude=ClaudeConfig(),
             agent_manager=AgentManagerConfig(),
             context7=Context7Config(),
             workspace=WorkspaceConfig(),
@@ -427,6 +450,7 @@ def load_config(path: Path | None = None) -> AppConfig:
         "router": "router",
         "codex": "codex",
         "kiro_cli": "kiro_cli",
+        "claude": "claude",
         "agent_manager": "agent_manager",
         "context7": "context7",
         "workspace": "workspace",
@@ -504,6 +528,7 @@ def dump_config(cfg: AppConfig) -> str:
     lines += _dump_dataclass_table("router", cfg.router)
     lines += _dump_dataclass_table("codex", cfg.codex)
     lines += _dump_dataclass_table("kiro_cli", cfg.kiro_cli)
+    lines += _dump_dataclass_table("claude", cfg.claude)
     lines += _dump_dataclass_table("agent_manager", cfg.agent_manager)
     lines += _dump_dataclass_table("context7", cfg.context7)
     lines += _dump_dataclass_table("workspace", cfg.workspace)

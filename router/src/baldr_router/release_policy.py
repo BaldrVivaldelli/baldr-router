@@ -33,7 +33,11 @@ FROZEN_CORE_MCP_TOOLS = (
 
 FROZEN_CORE_MCP_PROMPTS = ("run", "setup", "status")
 FROZEN_FACADE_INTENTS = ("setup", "status", "run")
-FROZEN_BUILTIN_PROVIDERS = ("codex", "kiro-cli")
+# Amended during the v0.20 freeze to admit Claude Code. The freeze defers new
+# providers, and this one was added deliberately rather than by drift: it adds
+# no tool, prompt, intent, role or workflow, and ships disabled, so nothing an
+# existing client calls changes shape. See the amendment in FEATURE_FREEZE.md.
+FROZEN_BUILTIN_PROVIDERS = ("claude", "codex", "kiro-cli")
 FROZEN_ROLES = ("architect", "implementer", "reviewer")
 FROZEN_WORKFLOWS = ("architect-implement-review",)
 

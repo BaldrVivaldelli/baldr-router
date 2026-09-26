@@ -6,7 +6,7 @@ Baldr permanece bajo **congelación funcional**. v0.20 agrega la plataforma de a
 
 - MCP server sobre stdio;
 - launcher opcional host-first con fallback automático a WSL;
-- providers: Codex CLI y Kiro CLI opcional;
+- providers: Codex CLI, Kiro CLI opcional y Claude Code opcional (ver Enmiendas);
 - roles: architect, implementer y reviewer;
 - workflow: `architect-implement-review`;
 - tools directas: `delegate_task` y `review_current_diff`;
@@ -36,9 +36,23 @@ La lista exacta de tools, prompts, providers, roles y workflows está declarada 
 - read models y proyecciones de presentación aditivas, acotadas y redactadas, sin cambiar la superficie de orquestación congelada.
 - turnos conversacionales durables y acciones internas de `run` para continuar un work item, sin agregar intenciones públicas.
 
+## Enmiendas
+
+Una enmienda es una excepción deliberada y registrada. Sin este registro, la
+única evidencia de que la superficie congelada cambió sería un test actualizado,
+que es indistinguible de haberlo silenciado.
+
+- **Claude Code como provider opcional.** La congelación posterga nuevos
+  providers, y este entró igual porque no toca lo que la congelación protege: no
+  agrega tools, prompts, intenciones, roles ni workflows, y llega deshabilitado,
+  así que ninguna llamada existente cambia de forma. Las fases de solo lectura
+  corren sin las herramientas que ejecutan comandos ni las que editan archivos,
+  verificado contra el CLI. `router_provider_status` ya devolvía los providers
+  presentes; ahora devuelve uno más.
+
 ## Cambios postergados
 
-- nuevos providers o familias de modelos;
+- nuevos providers o familias de modelos, salvo enmienda registrada arriba;
 - nuevos roles o workflows;
 - delegación autónoma provider-to-provider;
 - dashboard o GUI standalone;

@@ -15,6 +15,7 @@ from .agent_api import (
     AgentRef,
     AgentTransportError,
 )
+from .claude_cli import claude_status
 from .codex import codex_model_catalog
 from .agent_gateway import external_agent_catalog_status
 from .agent_manager import (
@@ -851,6 +852,38 @@ def cmd_enable_kiro_cli(args: argparse.Namespace) -> int:
             "note": "The kiro-cli provider is best used as an architect/reviewer/second-opinion provider. Avoid enabling baldr-router re-entry in child agents.",
         }
     )
+    return 0
+
+
+def cmd_enable_claude(args: argparse.Namespace) -> int:
+    cfg = load_config()
+    cfg.claude.enabled = True
+    cfg.claude.command = args.command
+    cfg.claude.model = args.model
+    cfg.claude.default_effort = args.effort
+    cfg.claude.max_turns = args.max_turns
+    saved = save_config(cfg)
+    print_json(
+        {
+            "ok": True,
+            "config_path": str(saved),
+            "claude": cfg.claude.__dict__,
+            "status": claude_status(),
+            "note": (
+                "Read-only phases run with the command-running and editing tools "
+                "removed. Avoid using Claude as the implementer when Baldr itself "
+                "was invoked from Claude Code."
+            ),
+        }
+    )
+    return 0
+
+
+def cmd_disable_claude(args: argparse.Namespace) -> int:
+    cfg = load_config()
+    cfg.claude.enabled = False
+    saved = save_config(cfg)
+    print_json({"ok": True, "config_path": str(saved), "claude": cfg.claude.__dict__})
     return 0
 
 
@@ -1872,6 +1905,18 @@ def _register_workflows(sub: SubParsers) -> None:
 
     p = sub.add_parser("disable-kiro-cli", help="Disable Kiro CLI provider")
     p.set_defaults(func=cmd_disable_kiro_cli)
+
+    p = sub.add_parser(
+        "enable-claude", help="Enable Claude Code as an optional provider"
+    )
+    p.add_argument("--command", default="claude")
+    p.add_argument("--model", default="")
+    p.add_argument("--effort", default="")
+    p.add_argument("--max-turns", type=int, default=40)
+    p.set_defaults(func=cmd_enable_claude)
+
+    p = sub.add_parser("disable-claude", help="Disable the Claude Code provider")
+    p.set_defaults(func=cmd_disable_claude)
 
     p = sub.add_parser(
         "run-workflow", help="Run a multi-agent workflow through baldr-router"

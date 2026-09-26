@@ -5,6 +5,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from .claude_cli import claude_status, run_claude_role_prompt
 from .codex import codex_found, codex_login_status, codex_version, run_codex_role_prompt
 from .config import RoleConfig, load_config
 from .kiro_cli import kiro_cli_status, run_kiro_role_prompt
@@ -96,6 +97,43 @@ class KiroCliProvider:
             agent=request.agent or request.role.agent or None,
             effort=request.effort or request.role.effort or None,
             can_write=bool(request.role.can_write),
+            report_kind=request.report_kind,
+            extra_env=request.extra_env,
+        )
+
+
+class ClaudeProvider:
+    name = "claude"
+    aliases: tuple[str, ...] = ("claude-code", "anthropic-claude")
+    capabilities = ProviderCapabilities(
+        supports_read_only=True,
+        supports_workspace_write=True,
+        supports_structured_output=True,
+        # Every invocation is one headless print; nothing is resumed yet.
+        supports_sessions=False,
+        # Verified against the CLI rather than assumed: a read-only phase runs
+        # with the command-running tools removed and the editing tools denied,
+        # so the capability is absent rather than discouraged.
+        read_only_enforcement="enforced",
+        # Writes are scoped to the working directory by the CLI's own rules,
+        # which is a weaker guarantee than a sandbox, so it is not claimed as
+        # one.
+        write_enforcement="advisory",
+    )
+
+    def status(self) -> dict[str, Any]:
+        return {"implemented": True, **claude_status(), "capabilities": self.capabilities.to_dict()}
+
+    def run(self, request: ProviderRunRequest) -> dict[str, Any]:
+        return run_claude_role_prompt(
+            cwd=request.cwd,
+            prompt=request.prompt,
+            role=request.role_name,
+            workflow=request.workflow,
+            can_write=bool(request.role.can_write),
+            model=request.model,
+            # A profile may say either; Claude spends one vocabulary on both.
+            effort=request.reasoning_effort or request.effort,
             report_kind=request.report_kind,
             extra_env=request.extra_env,
         )
@@ -254,7 +292,9 @@ _DEFAULT_REGISTRY: ProviderRegistry | None = None
 def get_provider_registry() -> ProviderRegistry:
     global _DEFAULT_REGISTRY
     if _DEFAULT_REGISTRY is None:
-        _DEFAULT_REGISTRY = ProviderRegistry([CodexProvider(), KiroCliProvider()])
+        _DEFAULT_REGISTRY = ProviderRegistry(
+            [CodexProvider(), KiroCliProvider(), ClaudeProvider()]
+        )
     return _DEFAULT_REGISTRY
 
 

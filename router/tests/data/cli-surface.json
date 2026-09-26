@@ -66,6 +66,8 @@
       "set-role-provider",
       "enable-kiro-cli",
       "disable-kiro-cli",
+      "enable-claude",
+      "disable-claude",
       "run-workflow",
       "set-codex-runner",
       "setup-context7",
@@ -109,6 +111,8 @@
       "set-role-provider": "Set a role provider, e.g. architect=kiro-cli implementer=codex",
       "enable-kiro-cli": "Enable Kiro CLI as an optional provider",
       "disable-kiro-cli": "Disable Kiro CLI provider",
+      "enable-claude": "Enable Claude Code as an optional provider",
+      "disable-claude": "Disable the Claude Code provider",
       "run-workflow": "Run a multi-agent workflow through baldr-router",
       "set-codex-runner": "Set Codex runner: exec-json, app-server, or sdk",
       "setup-context7": "Enable Context7 for the Codex provider and/or router prefetch cache",
@@ -5077,6 +5081,116 @@
         "prog": "baldr-router disable-kiro-cli",
         "defaults": {
           "func": "cmd_disable_kiro_cli"
+        },
+        "arguments": [
+          {
+            "class": "_HelpAction",
+            "option_strings": [
+              "-h",
+              "--help"
+            ],
+            "dest": "help",
+            "nargs": 0,
+            "const": null,
+            "default": "==SUPPRESS==",
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "show this help message and exit",
+            "metavar": null
+          }
+        ],
+        "subcommands": {}
+      },
+      "enable-claude": {
+        "prog": "baldr-router enable-claude",
+        "defaults": {
+          "func": "cmd_enable_claude"
+        },
+        "arguments": [
+          {
+            "class": "_HelpAction",
+            "option_strings": [
+              "-h",
+              "--help"
+            ],
+            "dest": "help",
+            "nargs": 0,
+            "const": null,
+            "default": "==SUPPRESS==",
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "show this help message and exit",
+            "metavar": null
+          },
+          {
+            "class": "_StoreAction",
+            "option_strings": [
+              "--command"
+            ],
+            "dest": "command",
+            "nargs": null,
+            "const": null,
+            "default": "claude",
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": null,
+            "metavar": null
+          },
+          {
+            "class": "_StoreAction",
+            "option_strings": [
+              "--model"
+            ],
+            "dest": "model",
+            "nargs": null,
+            "const": null,
+            "default": "",
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": null,
+            "metavar": null
+          },
+          {
+            "class": "_StoreAction",
+            "option_strings": [
+              "--effort"
+            ],
+            "dest": "effort",
+            "nargs": null,
+            "const": null,
+            "default": "",
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": null,
+            "metavar": null
+          },
+          {
+            "class": "_StoreAction",
+            "option_strings": [
+              "--max-turns"
+            ],
+            "dest": "max_turns",
+            "nargs": null,
+            "const": null,
+            "default": 40,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": null,
+            "metavar": null
+          }
+        ],
+        "subcommands": {}
+      },
+      "disable-claude": {
+        "prog": "baldr-router disable-claude",
+        "defaults": {
+          "func": "cmd_disable_claude"
         },
         "arguments": [
           {
