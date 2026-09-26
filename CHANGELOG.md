@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- Added Claude Code as an optional provider, amending the v0.20 feature freeze
+  as recorded in `FEATURE_FREEZE.md`. A read-only phase runs with the
+  command-running and editing tools removed, which was verified against the CLI
+  before the capability was declared enforced; the report is validated at the
+  source through the CLI's own schema flag rather than scraped from prose. The
+  provider ships disabled and adds no tool, prompt, intent, role or workflow.
+- Fixed two migrators replaying the same migration. `apply_migrations` read the
+  applied set before taking the write lock, so two connections could both apply
+  one migration and the loser failed on a duplicate column or the primary key —
+  most likely on the first run, where every migration is still missing.
+- Refused an execution profile naming a provider with no adapter. It used to be
+  stored and fail on its first real task instead.
+- Gave the web console the configuration surfaces it was missing: a context
+  picker that attaches workspace paths as pointers, a per-phase team screen, and
+  the state behind the documentation and protection settings.
+
 ## 0.20.1 — Reliability Hardening
 
 - Eliminated the remaining 50 mypy findings across the Router and lowered the
