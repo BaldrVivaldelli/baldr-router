@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import shutil
 import stat
 import subprocess
@@ -187,6 +188,36 @@ def _stream_fixture(scratch: Path) -> dict[str, Any]:
     }
 
 
+def _kill_recorded_child(pid_file: Path) -> dict[str, Any]:
+    """Stop a child that appeared too late to be part of the terminated tree.
+
+    Killing the parent walks its tree at that instant. A child spawned just
+    before, or orphaned because the parent exited on the signal first, is no
+    longer in anyone's tree, and on Windows it keeps the scratch directory it
+    was started in locked for as long as it lives.
+    """
+    try:
+        recorded = json.loads(pid_file.read_text(encoding="utf-8"))
+        child_pid = int(recorded.get("child_pid") or 0)
+    except (OSError, ValueError, TypeError):
+        return {"checked": False}
+    if child_pid <= 0 or not _pid_alive(child_pid):
+        return {"checked": True, "alive": False}
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(child_pid), "/T", "/F"],
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+    else:
+        try:
+            os.kill(child_pid, signal.SIGKILL)
+        except OSError:
+            pass
+    return {"checked": True, "alive": True, "killed": not _pid_alive(child_pid)}
+
+
 def _cancel_fixture(scratch: Path) -> dict[str, Any]:
     pid_file = scratch / "fixture-pids.json"
     proc = managed_popen(
@@ -199,7 +230,11 @@ def _cancel_fixture(scratch: Path) -> dict[str, Any]:
         env={**os.environ, "BALDR_VERIFY_DISABLE": "1"},
     )
     try:
-        deadline = time.monotonic() + 8
+        # The fixture has to start Python, spawn a child and write the file.
+        # Eight seconds was enough locally but not on a loaded CI runner, and
+        # missing the window is how a child gets spawned without ever being
+        # recorded.
+        deadline = time.monotonic() + 30
         while (
             time.monotonic() < deadline
             and not pid_file.exists()
@@ -212,6 +247,7 @@ def _cancel_fixture(scratch: Path) -> dict[str, Any]:
                 "ok": False,
                 "reason": "fixture did not expose its process ids",
                 "termination": termination,
+                "stranded": _kill_recorded_child(pid_file),
             }
         pids = json.loads(pid_file.read_text(encoding="utf-8"))
         child_pid = int(pids.get("child_pid") or 0)
@@ -220,7 +256,7 @@ def _cancel_fixture(scratch: Path) -> dict[str, Any]:
         time.sleep(0.15)
         parent_alive = _pid_alive(parent_pid)
         child_alive = _pid_alive(child_pid)
-        return {
+        outcome = {
             "ok": bool(
                 termination.get("terminated")
                 and not parent_alive
@@ -232,6 +268,13 @@ def _cancel_fixture(scratch: Path) -> dict[str, Any]:
             "child_alive_after": child_alive,
             "termination": termination,
         }
+        if child_alive:
+            # The observation above is the scenario's verdict and is already
+            # recorded. Leaving the survivor running would also keep the
+            # scratch directory locked, which fails the run for a second,
+            # unrelated reason.
+            outcome["stranded"] = _kill_recorded_child(pid_file)
+        return outcome
     finally:
         unregister_process(proc)
         _close_process_streams(proc)
