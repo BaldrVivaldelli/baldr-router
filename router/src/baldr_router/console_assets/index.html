@@ -61,6 +61,7 @@ h3 { font-size: 14px; margin: 0 0 6px; }
 }
 .pill b { color: var(--ink); font-weight: 600; }
 main { display: grid; grid-template-columns: minmax(240px, 320px) 1fr; gap: 16px; padding: 16px; align-items: start; }
+#view-settings { grid-template-columns: minmax(0, 720px); }
 @media (max-width: 760px) { main { grid-template-columns: 1fr; } header { padding: 12px 16px; } }
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px; }
 ul.items { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
@@ -129,6 +130,24 @@ button.ghost[hidden] { display: none; }
 .actions button:disabled { opacity: .5; cursor: progress; }
 .actions button.danger { border-color: var(--stopped); color: var(--stopped); }
 .action-error { margin-top: 10px; font-size: 13px; color: var(--stopped); }
+nav.tabs { display: flex; gap: 4px; margin-left: auto; }
+nav.tabs button {
+  font: inherit; font-size: 13px; cursor: pointer; background: transparent; color: var(--muted);
+  border: 0; border-bottom: 2px solid transparent; padding: 4px 10px;
+}
+nav.tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); }
+.option-group + .option-group { margin-top: 20px; }
+.option-group h3 { font-size: 13px; margin-bottom: 2px; }
+.option-group > p { margin: 0 0 10px; font-size: 12px; color: var(--muted); }
+.option { display: flex; gap: 10px; align-items: flex-start; padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px; cursor: pointer; }
+.option + .option { margin-top: 6px; }
+.option:hover { border-color: var(--accent); }
+.option[data-selected="true"] { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 9%, transparent); }
+.option input { margin-top: 3px; }
+.option .label { font-weight: 600; font-size: 13px; }
+.option .desc { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.option .flag { font-size: 11px; color: var(--accent); margin-left: 6px; font-weight: 600; }
+.option .flag.warn { color: var(--attention); }
 .action-hint { margin-top: 8px; font-size: 12px; color: var(--muted); }
 .locked { max-width: 640px; margin: 48px auto; }
 .locked code {
@@ -142,15 +161,22 @@ button.ghost[hidden] { display: none; }
   <h1>Baldr</h1>
   <span class="scope" id="scope"></span>
   <div class="counts" id="counts"></div>
+  <nav class="tabs" id="tabs" role="tablist">
+    <button type="button" role="tab" data-view="tasks" aria-selected="true">Tareas</button>
+    <button type="button" role="tab" data-view="settings" aria-selected="false">Configuración</button>
+  </nav>
   <button class="ghost" id="notify" type="button" hidden>Avisarme</button>
 </header>
-<main>
+<main id="view-tasks">
   <section class="panel" aria-label="Work items">
     <h2>Tareas</h2>
     <ul class="items" id="items"></ul>
     <p class="empty" id="items-empty" hidden>Todavía no hay tareas en este alcance.</p>
   </section>
   <section id="detail" aria-live="polite"></section>
+</main>
+<main id="view-settings" hidden>
+  <section class="panel" id="settings" aria-label="Configuración"></section>
 </main>
 <p class="foot" id="foot"></p>
 <script>
@@ -186,6 +212,7 @@ let selectedId = new URLSearchParams(location.search).get('work_item_id') || nul
 let timer = null;
 let lastStates = new Map();
 let notified = false;
+let lastWorkbench = null;
 
 const el = (tag, props = {}, children = []) => {
   const node = document.createElement(tag);
@@ -462,6 +489,97 @@ function announce(items) {
   }
 }
 
+// Field -> the options key that lists its legal values, with the heading the
+// VS Code console already uses for the same choice.
+const SETTINGS_GROUPS = [
+  ['safety_mode', 'safety_modes', 'Protección de cambios', 'Cuánto te pregunta Baldr antes de tocar el repositorio.'],
+  ['preset', 'presets', 'Nivel de detalle', 'Cuánto análisis dedica a cada tarea.'],
+  ['context_mode', 'context_modes', 'Ayuda adicional', 'Si consulta documentación externa con Context7.'],
+  ['team_mode', 'team_modes', 'Equipo', 'Cómo elige qué agente cubre cada fase.'],
+];
+
+async function savePreference(field, value, option, group) {
+  if (option.requires_confirmation
+      && !confirm(`«${option.label}» quita la protección de Git. ¿Confirmás?`)) {
+    renderSettings(lastWorkbench);
+    return;
+  }
+  const error = document.getElementById('settings-error');
+  if (error) error.remove();
+  group.querySelectorAll('input').forEach((i) => { i.disabled = true; });
+  try {
+    const response = await fetch(new URL('/v1/preferences', location.origin), {
+      method: 'POST',
+      credentials: 'omit',
+      headers: { 'Content-Type': 'application/json', [TOKEN_HEADER]: token },
+      body: JSON.stringify({ [field]: value, allow_non_git: Boolean(option.requires_confirmation) }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || payload.ok === false) {
+      const detail = (payload.error && payload.error.message) || ('HTTP ' + response.status);
+      document.getElementById('settings').append(
+        el('div', { class: 'action-error', id: 'settings-error', text: 'No se pudo guardar: ' + detail }));
+      renderSettings(lastWorkbench);
+      return;
+    }
+    await refresh();
+  } catch (err) {
+    document.getElementById('settings').append(
+      el('div', { class: 'action-error', id: 'settings-error', text: 'No se pudo guardar: ' + err.message }));
+    renderSettings(lastWorkbench);
+  }
+}
+
+function renderSettings(workbench) {
+  const host = document.getElementById('settings');
+  host.replaceChildren();
+  const preferences = (workbench && workbench.preferences) || null;
+  const options = (workbench && workbench.options) || {};
+  if (!preferences) {
+    host.append(el('p', { class: 'empty', text: 'Arrancá la consola con --workspace-root para configurar un workspace.' }));
+    return;
+  }
+  for (const [field, optionKey, title, description] of SETTINGS_GROUPS) {
+    const choices = options[optionKey] || [];
+    if (!choices.length) continue;
+    const group = el('div', { class: 'option-group' }, [
+      el('h3', { text: title }),
+      el('p', { text: description }),
+    ]);
+    for (const option of choices) {
+      const selected = preferences[field] === option.id;
+      const input = el('input', { type: 'radio', name: field });
+      input.checked = selected;
+      const label = el('label', { class: 'option', 'data-selected': String(selected) }, [
+        input,
+        el('div', {}, [
+          el('div', { class: 'label' }, [
+            document.createTextNode(option.label || option.id),
+            option.recommended ? el('span', { class: 'flag', text: 'recomendada' }) : null,
+            option.requires_confirmation ? el('span', { class: 'flag warn', text: 'sin protección' }) : null,
+          ]),
+          option.description ? el('div', { class: 'desc', text: option.description }) : null,
+        ]),
+      ]);
+      input.addEventListener('change', () => savePreference(field, option.id, option, group));
+      group.append(label);
+    }
+    host.append(group);
+  }
+  host.append(el('p', {
+    class: 'action-hint',
+    text: 'La confianza del workspace, las claves y la configuración global del router se cambian desde la CLI: no se editan desde el navegador.',
+  }));
+}
+
+function showView(name) {
+  document.getElementById('view-tasks').hidden = name !== 'tasks';
+  document.getElementById('view-settings').hidden = name !== 'settings';
+  for (const button of document.querySelectorAll('#tabs button')) {
+    button.setAttribute('aria-selected', String(button.dataset.view === name));
+  }
+}
+
 async function refresh() {
   const foot = document.getElementById('foot');
   try {
@@ -486,6 +604,8 @@ async function refresh() {
     renderCounts(workbench.counts, workbench.total);
     renderItems(workbench.items || []);
     renderDetail(workbench.selected, workbench.selected_error);
+    lastWorkbench = workbench;
+    renderSettings(workbench);
     announce(workbench.items || []);
     foot.className = 'foot';
     foot.textContent = 'Solo lectura · actualizado ' + new Date().toLocaleTimeString()
@@ -520,6 +640,10 @@ if ('serviceWorker' in navigator) {
   // Registration is what makes the console installable as its own window; the
   // worker deliberately caches nothing.
   navigator.serviceWorker.register('./sw.js').catch(() => { /* not installable */ });
+}
+
+for (const button of document.querySelectorAll('#tabs button')) {
+  button.addEventListener('click', () => showView(button.dataset.view));
 }
 
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });

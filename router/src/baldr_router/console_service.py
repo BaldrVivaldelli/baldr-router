@@ -41,7 +41,9 @@ from urllib.parse import parse_qs, quote, urlparse
 from .diagnostics import get_logger, log_suppressed
 from .facade import facade_run, facade_status_report
 from .redaction import redact_text
-from .work_items import RECONCILIATION_ACTION_ORDER
+from .work_item_progress import compact_preferences
+from .work_items import RECONCILIATION_ACTION_ORDER, WorkItemService, workbench_options
+from .workspace_policy import WorkspacePolicyError
 
 _LOG = get_logger(__name__)
 
@@ -66,6 +68,17 @@ _PUBLIC_ASSETS: dict[str, tuple[str, str]] = {
 }
 _API_ROUTES = frozenset({"/v1/workbench"})
 _ACTION_ROUTE = "/v1/actions"
+_PREFERENCES_ROUTE = "/v1/preferences"
+# Each of these is a per-workspace preference whose legal values the router
+# already publishes with human copy. Trust, secrets and the global config stay
+# out: granting trust from a page is an escalation, an API key needs a
+# different review, and config.toml decides whether the router runs at all.
+_PREFERENCE_FIELDS: dict[str, str] = {
+    "safety_mode": "safety_modes",
+    "preset": "presets",
+    "context_mode": "context_modes",
+    "team_mode": "team_modes",
+}
 _MAX_ACTION_BODY = 4096
 # The console offers the decisions an operator makes while watching: answer a
 # blocked run, or stop one. Creating and continuing work needs the composer and
@@ -353,6 +366,59 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             return
         self._json({"ok": bool(result.get("ok", True)), "action": action, "result": result})
 
+    def _preferences(self) -> None:
+        workspace_root = self._console.workspace_root
+        if not workspace_root:
+            self._error(
+                409,
+                "workspace_scope_required",
+                "Start the console with --workspace-root to configure a workspace.",
+            )
+            return
+        payload = self._read_action_request()
+        if payload is None:
+            return
+        options = workbench_options()
+        requested: dict[str, str] = {}
+        for field, option_key in _PREFERENCE_FIELDS.items():
+            if field not in payload:
+                continue
+            value = str(payload.get(field) or "").strip()
+            # The page is handed these ids, but the legal set is rebuilt here
+            # so a crafted body cannot introduce a mode the router never offers.
+            legal = {str(item.get("id")) for item in options.get(option_key, [])}
+            if value not in legal:
+                self._error(
+                    400,
+                    "invalid_preference",
+                    f"{value!r} is not a valid {field}.",
+                )
+                return
+            requested[field] = value
+        if not requested:
+            self._error(400, "invalid_preference", "No preference was supplied.")
+            return
+        try:
+            # Named one by one rather than splatted: these four are the whole
+            # surface, and set_preferences keeps the current value for a None.
+            preferences = WorkItemService().set_preferences(
+                workspace_root,
+                safety_mode=requested.get("safety_mode"),
+                preset=requested.get("preset"),
+                context_mode=requested.get("context_mode"),
+                team_mode=requested.get("team_mode"),
+                allow_non_git=bool(payload.get("allow_non_git")),
+            )
+        except WorkspacePolicyError as exc:
+            # Choosing a mode without Git protection needs consent the page has
+            # to collect, so the refusal is reported rather than worked around.
+            self._error(409, exc.code or "workspace_policy", str(exc))
+            return
+        except (ValueError, OSError) as exc:
+            self._error(400, "preference_rejected", redact_text(str(exc)))
+            return
+        self._json({"ok": True, "preferences": compact_preferences(preferences)})
+
     def _asset(self, name: str, content_type: str) -> None:
         try:
             # Read per request on purpose: editing the page and refreshing the
@@ -394,6 +460,9 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             return
         if route == _ACTION_ROUTE:
             self._actions()
+            return
+        if route == _PREFERENCES_ROUTE:
+            self._preferences()
             return
         self._error(404, "not_found", "Unknown console route.")
 

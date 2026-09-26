@@ -582,8 +582,18 @@ tiene efectos: cada `GET` pasa por la intención `status` congelada en su forma
 Las decisiones sí se pueden responder desde la página: contestar una ejecución
 bloqueada o detener una en curso. **Nada de lo que manda el navegador decide**:
 el router recalcula qué acciones permite ese item y rechaza el resto con `409`.
-Crear y continuar trabajo necesita el composer y la superficie de configuración,
-así que sigue siendo de la CLI y el editor.
+Crear y continuar trabajo necesita el composer, así que sigue siendo de la CLI
+y el editor.
+
+La pestaña **Configuración** ajusta las cuatro preferencias por workspace
+—protección de cambios, nivel de detalle, ayuda adicional y equipo— con las
+mismas opciones, etiquetas y descripciones que publica el router. Elegir
+**Sin protección** pide confirmación, igual que en la extensión.
+
+Lo que deliberadamente **no** se configura desde el navegador: confiar un
+workspace (otorgar confianza desde una página sería una escalada de
+privilegios), la API key de Context7 (un secreto merece otra revisión) y
+`config.toml` (decide si el router arranca). Todo eso sigue en la CLI.
 
 El bind es loopback por defecto. Exponerla a la red requiere
 `--allow-non-loopback` de forma explícita: el contenido está redactado, pero
