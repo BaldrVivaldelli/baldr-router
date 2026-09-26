@@ -265,3 +265,20 @@ def test_hidden_beats_an_author_display_rule() -> None:
     page = console_asset_path().read_text(encoding="utf-8")
 
     assert "[hidden] { display: none !important; }" in page
+
+
+def test_the_view_publishes_the_routes_this_router_serves() -> None:
+    """A page read from disk can outrun the process that serves it.
+
+    index.html is re-read on every request so it can be edited and refreshed,
+    but routes live in the running process and only a restart moves them. The
+    page compares the two and asks for a restart instead of reporting a missing
+    feature as an unknown route.
+    """
+    from baldr_router.console_service import _SERVED_ROUTES, console_asset_path
+
+    page = console_asset_path().read_text(encoding="utf-8")
+
+    for route in _SERVED_ROUTES:
+        assert f"'{route}'" in page, f"{route} is served but the page never names it"
+    assert "Reiniciá la consola" in page

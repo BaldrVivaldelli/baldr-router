@@ -173,6 +173,7 @@ nav.tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: 
   background: color-mix(in srgb, var(--attention) 8%, transparent);
   padding: 8px 10px; margin: 0 0 10px; font-size: 12px;
 }
+.stale-router { margin: 16px 16px -4px; font-size: 13px; }
 .composer { display: flex; gap: 8px; align-items: flex-end; margin-top: 14px; }
 .composer textarea {
   flex: 1; font: inherit; font-size: 14px; resize: vertical; min-height: 44px;
@@ -238,6 +239,7 @@ ul.entries .meta { color: var(--muted); font-size: 11px; margin-left: auto; whit
   </nav>
   <button class="ghost" id="notify" type="button" hidden>Avisarme</button>
 </header>
+<p class="notice stale-router" id="stale-router" hidden></p>
 <main id="view-tasks">
   <section class="panel" aria-label="Work items">
     <h2>Tareas</h2>
@@ -1273,6 +1275,29 @@ function renderNewTask() {
   }));
 }
 
+// The page is re-read from disk on every request; the routes are not, because
+// they live in the running process. So editing the console and refreshing the
+// browser can leave a page asking for something its router does not serve yet,
+// and the honest answer is "restart", not "unknown route".
+const NEEDED_ROUTES = [
+  '/v1/workbench', '/v1/context', '/v1/agents',
+  '/v1/actions', '/v1/preferences', '/v1/compose',
+];
+
+function checkRouterIsCurrent(routes) {
+  const banner = document.getElementById('stale-router');
+  // A router old enough not to publish its routes is old enough to warn about.
+  const missing = Array.isArray(routes)
+    ? NEEDED_ROUTES.filter((route) => !routes.includes(route))
+    : NEEDED_ROUTES;
+  banner.hidden = missing.length === 0;
+  if (missing.length) {
+    banner.textContent = 'Esta página es más nueva que el router que la sirve, '
+      + 'así que algunas secciones no van a funcionar. Reiniciá la consola (make up). '
+      + 'Falta: ' + missing.join(', ');
+  }
+}
+
 function showView(name) {
   document.getElementById('view-tasks').hidden = name !== 'tasks';
   document.getElementById('view-settings').hidden = name !== 'settings';
@@ -1307,6 +1332,7 @@ async function refresh() {
     const workbench = payload.workbench || {};
     context7State = payload.context7 || null;
     workspaceState = payload.workspace_state || null;
+    checkRouterIsCurrent(payload.routes);
     document.getElementById('scope').textContent = workbench.items && workbench.items.length
       ? 'tareas durables' : '';
     renderCounts(workbench.counts, workbench.total);

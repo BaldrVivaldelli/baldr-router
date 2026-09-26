@@ -129,6 +129,13 @@ _PREFERENCE_FIELDS: dict[str, str] = {
     "context_mode": "context_modes",
     "team_mode": "team_modes",
 }
+# The page is read from disk on every request so it can be edited and
+# refreshed, but the routes live in this process and only a restart moves them.
+# Publishing them lets a page that outran its router say so, instead of
+# reporting a missing feature as an unknown route.
+_SERVED_ROUTES = tuple(
+    sorted(_API_ROUTES | {_ACTION_ROUTE, _PREFERENCES_ROUTE, _COMPOSE_ROUTE})
+)
 _MAX_ACTION_BODY = 4096
 # A composed task is the one body that legitimately carries prose, so it gets
 # room for the task text plus its attachment paths. Sharing the action limit
@@ -572,6 +579,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 "workspace_root": workspace_root,
                 "workspace_locked": bool(self._console.workspace_root),
                 "workspaces": self._console.workspaces(),
+                "routes": list(_SERVED_ROUTES),
                 "context7": self._console.context7(),
                 "workspace_state": (
                     self._console.workspace_state(workspace_root)
