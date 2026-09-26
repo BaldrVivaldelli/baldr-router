@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Baldr</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --line: #dfe3e8;
+  --ink: #1b1f24;
+  --muted: #5c6773;
+  --accent: #3d5afe;
+  --running: #0b72d4;
+  --done: #1f8a4c;
+  --attention: #b26a00;
+  --stopped: #8a1f1f;
+  --idle: #8b95a1;
+  --radius: 10px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171a;
+    --panel: #1c2024;
+    --line: #2c3238;
+    --ink: #e8eaed;
+    --muted: #9aa5b1;
+    --accent: #8c9eff;
+    --running: #4ea3f0;
+    --done: #56c07f;
+    --attention: #e0a145;
+    --stopped: #e07a7a;
+    --idle: #7b848f;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+header {
+  display: flex; flex-wrap: wrap; gap: 12px; align-items: baseline;
+  padding: 16px; border-bottom: 1px solid var(--line); background: var(--panel);
+  position: sticky; top: 0; z-index: 5;
+}
+h1 { font-size: 17px; margin: 0; letter-spacing: .2px; }
+h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .8px; color: var(--muted); margin: 0 0 10px; }
+h3 { font-size: 14px; margin: 0 0 6px; }
+.scope { color: var(--muted); font-size: 13px; }
+.counts { display: flex; gap: 8px; flex-wrap: wrap; margin-left: auto; }
+.pill {
+  border: 1px solid var(--line); border-radius: 999px;
+  padding: 3px 10px; font-size: 12px; color: var(--muted); white-space: nowrap;
+}
+.pill b { color: var(--ink); font-weight: 600; }
+main { display: grid; grid-template-columns: minmax(240px, 320px) 1fr; gap: 16px; padding: 16px; align-items: start; }
+@media (max-width: 760px) { main { grid-template-columns: 1fr; } header { padding: 12px 16px; } }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px; }
+ul.items { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+ul.items button {
+  width: 100%; text-align: left; background: transparent; color: inherit;
+  border: 1px solid transparent; border-radius: 8px; padding: 9px 10px; cursor: pointer; font: inherit;
+}
+ul.items button:hover { border-color: var(--line); }
+ul.items button[aria-current="true"] { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 9%, transparent); }
+.row { display: flex; gap: 8px; align-items: center; }
+.dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--idle); }
+.dot.running { background: var(--running); animation: pulse 1.4s ease-in-out infinite; }
+.dot.complete { background: var(--done); }
+.dot.attention { background: var(--attention); }
+.dot.cancelled, .dot.archived { background: var(--stopped); }
+@keyframes pulse { 50% { opacity: .35; } }
+.title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sub { color: var(--muted); font-size: 12px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attention-card {
+  border: 1px solid var(--attention); border-left-width: 4px; border-radius: var(--radius);
+  background: color-mix(in srgb, var(--attention) 10%, transparent);
+  padding: 14px; margin-bottom: 16px;
+}
+.attention-card h3 { color: var(--attention); }
+.waiting { font-size: 12px; color: var(--muted); margin-top: 10px; }
+.stages { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+@media (max-width: 620px) { .stages { grid-template-columns: 1fr; } }
+.stage { border: 1px solid var(--line); border-radius: 8px; padding: 11px; border-top: 3px solid var(--idle); }
+.stage.running { border-top-color: var(--running); }
+.stage.complete { border-top-color: var(--done); }
+.stage.attention { border-top-color: var(--attention); }
+.stage.cancelled, .stage.skipped { border-top-color: var(--stopped); }
+.stage .name { font-weight: 600; font-size: 13px; text-transform: capitalize; }
+.stage .state { font-size: 12px; color: var(--muted); }
+.stage p { margin: 8px 0 0; font-size: 13px; }
+.activity { display: flex; gap: 8px; align-items: center; font-size: 13px; color: var(--muted); margin-bottom: 14px; }
+ol.timeline { list-style: none; margin: 0; padding: 0 0 0 14px; border-left: 2px solid var(--line); }
+ol.timeline li { position: relative; padding: 0 0 12px 12px; font-size: 13px; }
+ol.timeline li::before {
+  content: ""; position: absolute; left: -21px; top: 6px;
+  width: 8px; height: 8px; border-radius: 50%; background: var(--idle); border: 2px solid var(--panel);
+}
+ol.timeline li.complete::before { background: var(--done); }
+ol.timeline li.running::before { background: var(--running); }
+ol.timeline li.attention::before { background: var(--attention); }
+ol.timeline time { display: block; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.report dt { font-size: 12px; color: var(--muted); margin-top: 10px; }
+.report dd { margin: 3px 0 0; font-size: 13px; }
+.report ul { margin: 3px 0 0; padding-left: 18px; font-size: 13px; }
+.empty { color: var(--muted); font-size: 13px; }
+.section + .section { margin-top: 18px; }
+.foot { padding: 0 16px 20px; color: var(--muted); font-size: 12px; }
+.stale { color: var(--attention); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Baldr</h1>
+  <span class="scope" id="scope"></span>
+  <div class="counts" id="counts"></div>
+</header>
+<main>
+  <section class="panel" aria-label="Work items">
+    <h2>Tareas</h2>
+    <ul class="items" id="items"></ul>
+    <p class="empty" id="items-empty" hidden>Todavía no hay tareas en este alcance.</p>
+  </section>
+  <section id="detail" aria-live="polite"></section>
+</main>
+<p class="foot" id="foot"></p>
+<script>
+'use strict';
+const REFRESH_MS = 3000;
+const STAGE_NAMES = { planning: 'Planificación', execution: 'Ejecución', review: 'Revisión' };
+const STATE_NAMES = {
+  pending: 'en espera', running: 'trabajando', complete: 'listo',
+  attention: 'necesita una decisión', cancelled: 'cancelado',
+  skipped: 'omitido', archived: 'archivado',
+};
+
+let selectedId = new URLSearchParams(location.search).get('work_item_id') || null;
+let timer = null;
+
+const el = (tag, props = {}, children = []) => {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(props)) {
+    if (key === 'class') node.className = value;
+    else if (key === 'text') node.textContent = value;
+    else if (value !== null && value !== undefined) node.setAttribute(key, value);
+  }
+  for (const child of children) if (child) node.append(child);
+  return node;
+};
+
+const when = (value) => {
+  if (!value) return '';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? '' : date.toLocaleString();
+};
+
+const ago = (value) => {
+  if (!value) return '';
+  const seconds = Math.round((Date.now() - new Date(value).getTime()) / 1000);
+  if (!Number.isFinite(seconds)) return '';
+  if (seconds < 60) return 'hace instantes';
+  if (seconds < 3600) return `hace ${Math.floor(seconds / 60)} min`;
+  if (seconds < 86400) return `hace ${Math.floor(seconds / 3600)} h`;
+  return `hace ${Math.floor(seconds / 86400)} d`;
+};
+
+function renderCounts(counts, total) {
+  const box = document.getElementById('counts');
+  box.replaceChildren();
+  const entries = Object.entries(counts || {});
+  if (!entries.length) return;
+  box.append(el('span', { class: 'pill' }, [el('b', { text: String(total || 0) }), document.createTextNode(' en total')]));
+  for (const [status, count] of entries.sort((a, b) => a[0].localeCompare(b[0]))) {
+    box.append(el('span', { class: 'pill' }, [el('b', { text: String(count) }), document.createTextNode(' ' + status)]));
+  }
+}
+
+function renderItems(items) {
+  const list = document.getElementById('items');
+  const empty = document.getElementById('items-empty');
+  list.replaceChildren();
+  empty.hidden = items.length > 0;
+  for (const item of items) {
+    const progress = item.progress_summary || {};
+    const state = progress.overall_state || item.status || 'pending';
+    const button = el('button', { type: 'button', 'aria-current': String(item.id === selectedId) }, [
+      el('div', { class: 'row' }, [
+        el('span', { class: 'dot ' + state }),
+        el('span', { class: 'title', text: item.title || item.id }),
+      ]),
+      el('div', { class: 'sub', text: progress.activity || STATE_NAMES[state] || state }),
+      el('div', { class: 'sub', text: ago(progress.last_event_at || item.updated_at) }),
+    ]);
+    button.addEventListener('click', () => {
+      selectedId = item.id;
+      const url = new URL(location.href);
+      url.searchParams.set('work_item_id', item.id);
+      history.replaceState(null, '', url);
+      refresh();
+    });
+    list.append(el('li', {}, [button]));
+  }
+}
+
+function renderAttention(attention) {
+  if (!attention || !attention.required) return null;
+  const card = el('div', { class: 'attention-card' }, [
+    el('h3', { text: 'Baldr necesita una decisión' }),
+    el('div', { text: attention.summary || 'Hay una decisión pendiente.' }),
+  ]);
+  const blockers = (attention.blockers || []).filter(Boolean);
+  if (blockers.length) {
+    card.append(el('ul', {}, blockers.map((text) => el('li', { text }))));
+  }
+  const actions = (attention.actions || []).filter((action) => action && action.label);
+  if (actions.length) {
+    card.append(el('div', { class: 'waiting', text: 'Opciones disponibles: ' + actions.map((a) => a.label).join(' · ') }));
+  }
+  card.append(el('div', {
+    class: 'waiting',
+    text: 'Esta vista es de solo lectura. Respondé desde la consola de VS Code o con baldr-router facade run.',
+  }));
+  return card;
+}
+
+function renderStages(stages) {
+  const box = el('div', { class: 'stages' });
+  for (const stage of stages || []) {
+    const state = stage.state || 'pending';
+    const card = el('div', { class: 'stage ' + state }, [
+      el('div', { class: 'name', text: STAGE_NAMES[stage.id] || stage.id }),
+      el('div', { class: 'state', text: STATE_NAMES[state] || state }),
+    ]);
+    if (stage.round_count > 1) {
+      card.append(el('div', { class: 'state', text: `${stage.round_count} rondas` }));
+    }
+    const summary = stage.report && stage.report.summary;
+    if (summary) card.append(el('p', { text: summary }));
+    if (stage.outcome) card.append(el('div', { class: 'state', text: 'resultado: ' + stage.outcome }));
+    box.append(card);
+  }
+  return box;
+}
+
+function renderMilestones(milestones) {
+  const list = el('ol', { class: 'timeline' });
+  for (const milestone of (milestones || []).slice().reverse()) {
+    if (!milestone || !milestone.message) continue;
+    list.append(el('li', { class: milestone.state || '' }, [
+      document.createTextNode(milestone.message),
+      el('time', { text: [STAGE_NAMES[milestone.stage] || milestone.stage, when(milestone.at)].filter(Boolean).join(' · ') }),
+    ]));
+  }
+  return list.childElementCount ? list : null;
+}
+
+const REPORT_FIELDS = [
+  ['summary', 'Resumen'],
+  ['interpretation', 'Qué entendió'],
+  ['work_completed', 'Qué hizo'],
+  ['findings', 'Hallazgos'],
+  ['verification_evidence', 'Qué comprobó'],
+  ['files_modified', 'Archivos modificados'],
+  ['files_added', 'Archivos nuevos'],
+  ['follow_up', 'Pendiente'],
+];
+
+function renderReport(report) {
+  if (!report) return null;
+  const list = el('dl', { class: 'report' });
+  for (const [key, label] of REPORT_FIELDS) {
+    const value = report[key];
+    if (!value || (Array.isArray(value) && !value.length)) continue;
+    list.append(el('dt', { text: label }));
+    if (Array.isArray(value)) {
+      list.append(el('dd', {}, [el('ul', {}, value.filter(Boolean).map((v) => el('li', { text: String(v) })))]));
+    } else {
+      list.append(el('dd', { text: String(value) }));
+    }
+  }
+  return list.childElementCount ? list : null;
+}
+
+function renderDetail(selected, selectedError) {
+  const host = document.getElementById('detail');
+  host.replaceChildren();
+  if (selectedError) {
+    host.append(el('div', { class: 'panel' }, [el('p', { class: 'empty', text: 'No se encontró esa tarea en este alcance.' })]));
+    return;
+  }
+  if (!selected) {
+    host.append(el('div', { class: 'panel' }, [el('p', { class: 'empty', text: 'Elegí una tarea para ver qué está haciendo Baldr.' })]));
+    return;
+  }
+  const progress = selected.progress || {};
+  const panel = el('div', { class: 'panel' });
+  panel.append(el('h3', { text: selected.title || selected.id }));
+  if (selected.task) panel.append(el('p', { class: 'sub', style: 'white-space:normal', text: selected.task }));
+
+  const attention = renderAttention(progress.attention);
+  if (attention) panel.append(attention);
+
+  const activity = progress.activity || {};
+  if (activity.message) {
+    panel.append(el('div', { class: 'activity' }, [
+      el('span', { class: 'dot ' + (activity.state || progress.overall_state || '') }),
+      el('span', { text: activity.message }),
+      el('span', { text: ago(activity.since) }),
+    ]));
+  }
+
+  panel.append(el('div', { class: 'section' }, [el('h2', { text: 'Fases' }), renderStages(progress.stages)]));
+
+  const milestones = renderMilestones(progress.milestones);
+  if (milestones) {
+    panel.append(el('div', { class: 'section' }, [el('h2', { text: 'Qué pasó' }), milestones]));
+  }
+
+  const report = renderReport(progress.final_report);
+  if (report) {
+    panel.append(el('div', { class: 'section' }, [el('h2', { text: 'Resultado' }), report]));
+  }
+  host.append(panel);
+}
+
+async function refresh() {
+  const foot = document.getElementById('foot');
+  try {
+    const url = new URL('/v1/workbench', location.origin);
+    if (selectedId) url.searchParams.set('work_item_id', selectedId);
+    const response = await fetch(url, { headers: { Accept: 'application/json' } });
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+    const payload = await response.json();
+    const workbench = payload.workbench || {};
+    document.getElementById('scope').textContent = workbench.items && workbench.items.length
+      ? 'tareas durables' : '';
+    renderCounts(workbench.counts, workbench.total);
+    renderItems(workbench.items || []);
+    renderDetail(workbench.selected, workbench.selected_error);
+    foot.className = 'foot';
+    foot.textContent = 'Solo lectura · actualizado ' + new Date().toLocaleTimeString()
+      + ' · contrato ' + (payload.contract_version || '?');
+  } catch (error) {
+    foot.className = 'foot stale';
+    foot.textContent = 'Sin contacto con el router (' + error.message + '). Reintentando…';
+  }
+}
+
+function schedule() {
+  if (timer) clearInterval(timer);
+  timer = setInterval(() => { if (!document.hidden) refresh(); }, REFRESH_MS);
+}
+
+document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
+refresh();
+schedule();
+</script>
+</body>
+</html>

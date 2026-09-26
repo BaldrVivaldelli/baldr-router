@@ -290,6 +290,22 @@ def cmd_mcp(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_console(args: argparse.Namespace) -> int:
+    from .console_service import serve_console
+
+    try:
+        serve_console(
+            host=args.host,
+            port=args.port,
+            workspace_root=args.workspace_root or None,
+            allow_non_loopback=bool(args.allow_non_loopback),
+        )
+    except ValueError as exc:
+        print_json({"ok": False, "error": {"code": "unsafe_bind", "message": str(exc)}})
+        return 2
+    return 0
+
+
 def cmd_set_provider(args: argparse.Namespace) -> int:
     cfg = load_config()
     cfg.router.default_provider = args.provider
@@ -1541,6 +1557,24 @@ def _register_runtime(sub: SubParsers) -> None:
 
     p = sub.add_parser("mcp", help="Run the MCP server over stdio")
     p.set_defaults(func=cmd_mcp)
+
+    p = sub.add_parser(
+        "console",
+        help="Serve the read-only local web console over the status intent",
+    )
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=8787)
+    p.add_argument(
+        "--workspace-root",
+        default="",
+        help="Limit the console to one workspace; omit to watch every work item",
+    )
+    p.add_argument(
+        "--allow-non-loopback",
+        action="store_true",
+        help="Bind a network address so another device can watch; redacted activity becomes reachable",
+    )
+    p.set_defaults(func=cmd_console)
 
     p = sub.add_parser(
         "set-provider", help="Set the default provider used by direct tasks"

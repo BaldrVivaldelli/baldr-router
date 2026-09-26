@@ -41,6 +41,7 @@ packages = ["src/baldr_router"]
 "src/baldr_router/contracts/agent-team-resolution-v1.schema.json" = "baldr_router/contracts/agent-team-resolution-v1.schema.json"
 "src/baldr_router/contracts/orchestration-policy-v1.schema.json" = "baldr_router/contracts/orchestration-policy-v1.schema.json"
 "src/baldr_router/contracts/agent-execution-v1.schema.json" = "baldr_router/contracts/agent-execution-v1.schema.json"
+"src/baldr_router/console_assets/index.html" = "baldr_router/console_assets/index.html"
 "src/baldr_router/qualification/profiles-v1.json" = "baldr_router/qualification/profiles-v1.json"
 "src/baldr_router/qualification/canaries-v1.json" = "baldr_router/qualification/canaries-v1.json"
 

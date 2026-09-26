@@ -542,6 +542,31 @@ VS Code ejecuta/cachea una verificación rápida al preparar el runtime. El setu
 
 Detalle: [`docs/validation-lab-workspace-probe.md`](docs/validation-lab-workspace-probe.md)
 
+### Consola web local (solo lectura)
+
+La consola de VS Code es la superficie correcta para *actuar sobre el código*:
+abre el archivo modificado en el workspace confiado y revisa el diff. Es la
+superficie equivocada para *mirar una cola*, porque el trabajo durable sigue
+corriendo con el editor cerrado y una barra lateral no puede avisarte cuando
+Baldr necesita una decisión.
+
+```bash
+baldr-router console                                  # http://127.0.0.1:8787
+baldr-router console --workspace-root /path/to/repo    # acotada a un repo
+baldr-router console --port 9000 --host 0.0.0.0 --allow-non-loopback
+```
+
+Responde solo esa pregunta de observación: muestra el estado de todas las tareas
+de un vistazo, la línea de tiempo narrativa de las tres fases, y las decisiones
+pendientes como tarjetas. No agrega orquestación —llama a la intención `status`
+congelada en su forma `workbench`, la misma que usa la extensión— y solo rutea
+`GET`, así que no puede escribir estado durable ni por accidente. Los métodos de
+escritura responden `405`.
+
+El bind es loopback por defecto. Exponerla a la red requiere
+`--allow-non-loopback` de forma explícita: el contenido está redactado, pero
+describe trabajo real. Con eso podés aprobar desde el celular en la misma red.
+
 ### Log de diagnóstico
 
 Baldr descarta deliberadamente los fallos que no deben abortar un workflow

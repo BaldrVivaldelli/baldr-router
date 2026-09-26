@@ -52,6 +52,7 @@
       "qualification",
       "extensions",
       "mcp",
+      "console",
       "set-provider",
       "provider-status",
       "kiro-mcp-status",
@@ -94,6 +95,7 @@
       "qualification": "Prepare, run, and inspect real-environment qualification receipts",
       "extensions": "Show installed client-adapter extensions",
       "mcp": "Run the MCP server over stdio",
+      "console": "Serve the read-only local web console over the status intent",
       "set-provider": "Set the default provider used by direct tasks",
       "provider-status": "Show implemented provider availability and auth status",
       "kiro-mcp-status": "Explicitly diagnose Kiro MCP registry and local configuration",
@@ -2368,6 +2370,91 @@
             "choices": null,
             "required": false,
             "help": "show this help message and exit",
+            "metavar": null
+          }
+        ],
+        "subcommands": {}
+      },
+      "console": {
+        "prog": "baldr-router console",
+        "defaults": {
+          "func": "cmd_console"
+        },
+        "arguments": [
+          {
+            "class": "_HelpAction",
+            "option_strings": [
+              "-h",
+              "--help"
+            ],
+            "dest": "help",
+            "nargs": 0,
+            "const": null,
+            "default": "==SUPPRESS==",
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "show this help message and exit",
+            "metavar": null
+          },
+          {
+            "class": "_StoreAction",
+            "option_strings": [
+              "--host"
+            ],
+            "dest": "host",
+            "nargs": null,
+            "const": null,
+            "default": "127.0.0.1",
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": null,
+            "metavar": null
+          },
+          {
+            "class": "_StoreAction",
+            "option_strings": [
+              "--port"
+            ],
+            "dest": "port",
+            "nargs": null,
+            "const": null,
+            "default": 8787,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": null,
+            "metavar": null
+          },
+          {
+            "class": "_StoreAction",
+            "option_strings": [
+              "--workspace-root"
+            ],
+            "dest": "workspace_root",
+            "nargs": null,
+            "const": null,
+            "default": "",
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Limit the console to one workspace; omit to watch every work item",
+            "metavar": null
+          },
+          {
+            "class": "_StoreTrueAction",
+            "option_strings": [
+              "--allow-non-loopback"
+            ],
+            "dest": "allow_non_loopback",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Bind a network address so another device can watch; redacted activity becomes reachable",
             "metavar": null
           }
         ],

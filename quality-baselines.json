@@ -7,6 +7,7 @@
     "strict_modules": [
       "src/baldr_router/agent_api.py",
       "src/baldr_router/agent_http.py",
+      "src/baldr_router/console_service.py",
       "src/baldr_router/contract_schemas.py",
       "src/baldr_router/diagnostics.py",
       "src/baldr_router/provider_errors.py",
