@@ -169,6 +169,38 @@ nav.tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: 
 }
 .composer button:disabled { opacity: .55; cursor: progress; }
 .composer-hint { font-size: 12px; color: var(--muted); margin: 6px 0 0; }
+.attach { margin-top: 10px; }
+.attach-bar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.attach-bar + .attach-bar { margin-top: 6px; }
+.chip {
+  display: inline-flex; align-items: center; gap: 4px; max-width: 100%;
+  border: 1px solid var(--line); border-radius: 999px; padding: 2px 4px 2px 10px;
+  font-size: 12px; background: var(--bg);
+}
+.chip .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip button {
+  border: 0; background: transparent; color: var(--muted); cursor: pointer;
+  font: inherit; line-height: 1; padding: 2px 6px; border-radius: 999px;
+}
+.chip button:hover { color: var(--stopped); }
+.picker-panel {
+  margin-top: 8px; border: 1px solid var(--line); border-radius: 8px;
+  padding: 10px; background: var(--bg);
+}
+.picker-panel input.filter {
+  width: 100%; font: inherit; font-size: 13px; padding: 7px 9px;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink);
+}
+.picker-panel input.filter:focus { outline: none; border-color: var(--accent); }
+ul.entries { list-style: none; margin: 8px 0 0; padding: 0; max-height: 240px; overflow-y: auto; }
+ul.entries label {
+  display: flex; gap: 8px; align-items: baseline; width: 100%;
+  padding: 4px 6px; border-radius: 6px; cursor: pointer; font-size: 13px;
+}
+ul.entries label:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+ul.entries .path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+ul.entries .path.dir { font-weight: 600; }
+ul.entries .meta { color: var(--muted); font-size: 11px; margin-left: auto; white-space: nowrap; padding-left: 8px; }
 .action-hint { margin-top: 8px; font-size: 12px; color: var(--muted); }
 .locked { max-width: 640px; margin: 48px auto; }
 .locked code {
@@ -239,6 +271,55 @@ let lastWorkbench = null;
 let canCompose = false;
 let workspaceRoot = new URLSearchParams(location.search).get('workspace_root') || '';
 const drafts = new Map();
+
+// A task points at context; it never carries file content. The selection and
+// the picker's own state live out here for the same reason an unsent draft
+// does: the view re-renders, and neither should vanish mid-decision.
+const attachments = new Map();
+const pickerState = new Map();
+const ENTRY_ROWS = 200;
+let contextListing = null;
+let contextError = '';
+let contextLoading = false;
+
+const sizeLabel = (value) => {
+  if (!Number.isFinite(value)) return '';
+  if (value < 1024) return value + ' B';
+  if (value < 1024 * 1024) return Math.round(value / 1024) + ' KB';
+  return (value / (1024 * 1024)).toFixed(1) + ' MB';
+};
+
+const maxAttachments = () => (contextListing && contextListing.max_attachments) || 25;
+
+// Fetched when a picker first opens rather than with the view: enumerating a
+// repository costs a Git call, and most visits never attach anything.
+async function loadContext(force) {
+  if (!workspaceRoot) return;
+  if (contextLoading) return;
+  if (!force && contextListing && contextListing.root === workspaceRoot) return;
+  contextLoading = true;
+  contextError = '';
+  try {
+    const url = new URL('/v1/context', location.origin);
+    url.searchParams.set('workspace_root', workspaceRoot);
+    const response = await fetch(url, {
+      headers: { Accept: 'application/json', [TOKEN_HEADER]: token },
+      credentials: 'omit',
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || payload.ok === false) {
+      contextError = (payload.error && payload.error.message) || ('HTTP ' + response.status);
+      contextListing = null;
+    } else {
+      contextListing = { ...payload, root: workspaceRoot };
+    }
+  } catch (error) {
+    contextError = error.message;
+    contextListing = null;
+  } finally {
+    contextLoading = false;
+  }
+}
 
 // Every write names the workspace it acts on; the router matches it against the
 // list it published and refuses anything else.
@@ -466,6 +547,12 @@ function renderReport(report) {
 
 function renderDetail(selected, selectedError) {
   const host = document.getElementById('detail');
+  // The view polls, and rebuilding identical state would take the caret out of
+  // a half-written follow-up and close an open context picker every few
+  // seconds. A rebuild happens when something actually changed.
+  const signature = JSON.stringify([selected, selectedError, canCompose]);
+  if (host.dataset.signature === signature) return;
+  host.dataset.signature = signature;
   host.replaceChildren();
   if (selectedError) {
     host.append(el('div', { class: 'panel' }, [el('p', { class: 'empty', text: 'No se encontró esa tarea en este alcance.' })]));
@@ -639,6 +726,133 @@ function renderSettings(workbench) {
   }));
 }
 
+// Attaching context is a pointer, not an upload: the task carries paths and the
+// agent reads them itself, inside the workspace it was already authorized for.
+//
+// The three regions redraw independently on purpose. Ticking a file must not
+// rebuild the list you are scrolling, and typing a filter must not rebuild the
+// input you are typing into.
+function attachControl(draftKey) {
+  const selected = attachments.get(draftKey) || new Set();
+  attachments.set(draftKey, selected);
+  const state = pickerState.get(draftKey) || { open: false, filter: '' };
+  pickerState.set(draftKey, state);
+
+  const chipBar = el('div', { class: 'attach-bar' });
+  const toggle = el('button', { class: 'ghost', type: 'button' });
+  const panelHost = el('div', {});
+  const host = el('div', { class: 'attach' }, [
+    chipBar,
+    el('div', { class: 'attach-bar' }, [toggle]),
+    panelHost,
+  ]);
+
+  const list = el('ul', { class: 'entries' });
+  const note = el('p', { class: 'composer-hint' });
+  const filter = el('input', {
+    class: 'filter', type: 'search', 'aria-label': 'Filtrar contexto',
+    placeholder: 'Filtrar archivos y carpetas…',
+  });
+
+  function drawChips() {
+    toggle.textContent = selected.size ? `Contexto (${selected.size})` : 'Adjuntar contexto';
+    toggle.setAttribute('aria-expanded', String(state.open));
+    chipBar.replaceChildren();
+    for (const path of [...selected].sort()) {
+      const remove = el('button', { type: 'button', 'aria-label': 'Quitar ' + path, text: '✕' });
+      remove.addEventListener('click', () => {
+        selected.delete(path);
+        drawChips();
+        drawEntries();
+      });
+      chipBar.append(el('span', { class: 'chip', title: path }, [
+        el('span', { class: 'name', text: path }),
+        remove,
+      ]));
+    }
+  }
+
+  function drawEntries() {
+    list.replaceChildren();
+    const entries = (contextListing && contextListing.entries) || [];
+    const needle = state.filter.trim().toLowerCase();
+    const matches = needle
+      ? entries.filter((entry) => entry.path.toLowerCase().includes(needle))
+      : entries;
+    for (const entry of matches.slice(0, ENTRY_ROWS)) {
+      const box = el('input', { type: 'checkbox' });
+      box.checked = selected.has(entry.path);
+      box.addEventListener('change', () => {
+        if (box.checked) {
+          if (selected.size >= maxAttachments()) {
+            box.checked = false;
+            note.textContent = `Podés adjuntar hasta ${maxAttachments()} rutas.`;
+            return;
+          }
+          selected.add(entry.path);
+        } else {
+          selected.delete(entry.path);
+        }
+        // Only the chips change; the list keeps its scroll and the filter its focus.
+        drawChips();
+      });
+      const isDirectory = entry.kind === 'directory';
+      const meta = isDirectory
+        ? `${entry.file_count} archivo${entry.file_count === 1 ? '' : 's'}`
+        : [entry.language, sizeLabel(entry.bytes)].filter(Boolean).join(' · ');
+      list.append(el('li', {}, [el('label', {}, [
+        box,
+        el('span', {
+          class: isDirectory ? 'path dir' : 'path',
+          text: isDirectory ? entry.path + '/' : entry.path,
+          title: entry.path,
+        }),
+        meta ? el('span', { class: 'meta', text: meta }) : null,
+      ])]));
+    }
+    if (contextLoading) note.textContent = 'Leyendo el workspace…';
+    else if (contextError) note.textContent = 'No se pudo leer el workspace: ' + contextError;
+    else if (!entries.length) note.textContent = 'No hay nada para adjuntar en este workspace.';
+    else if (!matches.length) note.textContent = 'Ningún archivo coincide con ese filtro.';
+    else {
+      const extra = matches.length > ENTRY_ROWS
+        ? ` · mostrando ${ENTRY_ROWS}, seguí filtrando para ver el resto`
+        : '';
+      const truncated = contextListing && contextListing.truncated
+        ? ' · el repositorio es grande y la lista está recortada'
+        : '';
+      note.textContent = `${matches.length} de ${entries.length}${extra}${truncated}`;
+    }
+  }
+
+  function drawPanel() {
+    panelHost.replaceChildren();
+    if (!state.open) return;
+    filter.value = state.filter;
+    panelHost.append(el('div', { class: 'picker-panel' }, [filter, list, note]));
+    drawEntries();
+  }
+
+  filter.addEventListener('input', () => {
+    state.filter = filter.value;
+    drawEntries();
+  });
+
+  toggle.addEventListener('click', async () => {
+    state.open = !state.open;
+    drawChips();
+    drawPanel();
+    if (!state.open) return;
+    await loadContext(false);
+    // The panel may have been closed again while the listing was in flight.
+    if (state.open) drawEntries();
+  });
+
+  drawChips();
+  drawPanel();
+  return host;
+}
+
 // The composer is the same control in two places: at the top it starts a new
 // task, inside a finished item it adds a durable turn to that one. There is no
 // separate idea of a conversation, because the item already is one.
@@ -653,6 +867,7 @@ function composer({ itemId, placeholder, submitLabel, hint }) {
   const box = el('div', {}, [
     el('div', { class: 'composer' }, [textarea, button]),
     hint ? el('p', { class: 'composer-hint', text: hint }) : null,
+    attachControl(draftKey),
   ]);
 
   async function send() {
@@ -662,12 +877,17 @@ function composer({ itemId, placeholder, submitLabel, hint }) {
     if (existing) existing.remove();
     button.disabled = true;
     textarea.disabled = true;
+    const attached = [...(attachments.get(draftKey) || [])];
     try {
       const response = await fetch(new URL('/v1/compose', location.origin), {
         method: 'POST',
         credentials: 'omit',
         headers: { 'Content-Type': 'application/json', [TOKEN_HEADER]: token },
-        body: JSON.stringify(scoped(itemId ? { task, work_item_id: itemId } : { task })),
+        body: JSON.stringify(scoped({
+          task,
+          ...(itemId ? { work_item_id: itemId } : {}),
+          ...(attached.length ? { attachments: attached } : {}),
+        })),
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok || payload.ok === false) {
@@ -677,6 +897,8 @@ function composer({ itemId, placeholder, submitLabel, hint }) {
       }
       textarea.value = '';
       drafts.delete(draftKey);
+      attachments.delete(draftKey);
+      pickerState.delete(draftKey);
       if (payload.work_item_id) {
         selectedId = payload.work_item_id;
         const url = new URL(location.href);
@@ -752,10 +974,12 @@ async function refresh() {
       ? 'tareas durables' : '';
     renderCounts(workbench.counts, workbench.total);
     renderItems(workbench.items || []);
+    // Before the detail renders, not after: the composer it may show depends on
+    // this, and reading last poll's value delayed it by a whole refresh.
+    canCompose = Boolean(workbench.preferences);
     renderDetail(workbench.selected, workbench.selected_error);
     lastWorkbench = workbench;
     renderWorkspaces(payload.workspaces || [], payload.workspace_locked);
-    canCompose = Boolean(workbench.preferences);
     renderNewTask();
     renderSettings(workbench);
     announce(workbench.items || []);
@@ -801,8 +1025,15 @@ for (const button of document.querySelectorAll('#tabs button')) {
 document.getElementById('workspace').addEventListener('change', (event) => {
   workspaceRoot = event.target.value;
   // Changing workspace changes which items exist, so the selection cannot
-  // survive the switch.
+  // survive the switch. Neither can attached paths: they named files in the
+  // repository being left behind.
   selectedId = null;
+  contextListing = null;
+  contextError = '';
+  attachments.clear();
+  pickerState.clear();
+  document.getElementById('detail').dataset.signature = '';
+  document.getElementById('new-task').dataset.ready = '';
   const url = new URL(location.href);
   url.searchParams.delete('work_item_id');
   if (workspaceRoot) url.searchParams.set('workspace_root', workspaceRoot);

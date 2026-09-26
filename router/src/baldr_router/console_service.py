@@ -1,27 +1,32 @@
-"""Read-only local web console over the frozen ``status`` intent.
+"""Local web console over the frozen intents.
 
 The VS Code console is the right surface for acting on code: it opens a changed
 file inside the trusted workspace and reviews a diff. It is the wrong surface
 for watching a queue, because durable work runs while the editor is closed and
-a sidebar cannot reach the operator who has to decide something.
+a sidebar cannot reach the operator who has to decide something. So this serves
+the whole loop an operator runs from outside the editor: watch a run, answer it,
+configure the workspace, and ask for the next thing.
 
-Reading stays free of side effects: every GET goes through ``status`` in its
+Reading stays free of side effects. Every GET goes through ``status`` in its
 cheap workbench form and serves the already redacted
 ``baldr-work-item-progress`` projection, and settles nothing.
 
-One narrow write exists, because the moment worth interrupting an operator for
-is the moment a run is blocked on their decision. ``POST /v1/actions`` answers
-a blocked run or stops a running one, and nothing it receives is trusted: the
-router recomputes which actions the item allows and refuses anything else.
-Creating and continuing work needs a composer and a configuration surface, so
-those still belong to the CLI and the editor.
+The writes share one rule: the page proposes and the router disposes. Nothing a
+request carries is trusted as authorization for itself. ``POST /v1/actions``
+recomputes which actions the item allows from durable state before it runs one.
+``POST /v1/preferences`` rebuilds the legal value set rather than believing the
+ids it handed out. ``POST /v1/compose`` re-checks every attached path against
+the rules that produced the listing, so a stale or invented entry buys nothing.
+Trust, secrets and the global config are absent by design: granting a workspace
+trust is an escalation, an API key needs a different review, and config.toml
+decides whether the router runs at all.
 
-The authentication model is built for the surface that will write. A localhost
-port is reachable from every page the operator visits, so the defence is to
-carry no ambient authority at all: the console sets no cookie, the session
-token lives in the page's memory, and it travels in a header a cross-site form
-cannot set. Origin, Host and Sec-Fetch-Site are checked on top of that, so a
-cross-site request fails several ways before it reaches a read model.
+The authentication model assumes the surface writes. A localhost port is
+reachable from every page the operator visits, so the defence is to carry no
+ambient authority at all: the console sets no cookie, the session token lives
+in the page's memory, and it travels in a header a cross-site form cannot set.
+Origin, Host and Sec-Fetch-Site are checked on top of that, so a cross-site
+request fails several ways before it reaches a read model.
 """
 
 from __future__ import annotations
@@ -41,6 +46,7 @@ from typing import Any, cast
 from urllib.parse import parse_qs, quote, urlparse
 
 from .diagnostics import get_logger, log_suppressed
+from .discovery.inventory import attachment_record, workspace_listing
 from .facade import facade_run, facade_status_report
 from .process_control import install_signal_handlers
 from .redaction import redact_text
@@ -74,10 +80,11 @@ _PUBLIC_ASSETS: dict[str, tuple[str, str]] = {
     "/icon-192.png": ("icon-192.png", "image/png"),
     "/icon-512.png": ("icon-512.png", "image/png"),
 }
-_API_ROUTES = frozenset({"/v1/workbench"})
 _ACTION_ROUTE = "/v1/actions"
 _PREFERENCES_ROUTE = "/v1/preferences"
 _COMPOSE_ROUTE = "/v1/compose"
+_CONTEXT_ROUTE = "/v1/context"
+_API_ROUTES = frozenset({"/v1/workbench", _CONTEXT_ROUTE})
 _MAX_TASK = 16_384
 # A workflow runs for minutes, so the request that starts one cannot wait for
 # it. Each start gets a worker, and this bounds how many the console will hold
@@ -85,6 +92,13 @@ _MAX_TASK = 16_384
 _MAX_CONCURRENT_STARTS = 4
 # The list only changes when a repository is trusted or first worked in.
 _WORKSPACES_TTL = 10.0
+# Enumerating a repository shells out to Git, and the picker is reopened and
+# refiltered far more often than a working tree changes shape.
+_LISTING_TTL = 15.0
+# A task points at context; it does not carry it. Each attachment costs one
+# path in the prompt, and a task that needs more than this wants a narrower
+# request or a directory.
+_MAX_ATTACHMENTS = 25
 # Each of these is a per-workspace preference whose legal values the router
 # already publishes with human copy. Trust, secrets and the global config stay
 # out: granting trust from a page is an escalation, an API key needs a
@@ -96,10 +110,13 @@ _PREFERENCE_FIELDS: dict[str, str] = {
     "team_mode": "team_modes",
 }
 _MAX_ACTION_BODY = 4096
-# The console offers the decisions an operator makes while watching: answer a
-# blocked run, or stop one. Creating and continuing work needs the composer and
-# the configuration surface, so those actions stay with the CLI and the editor
-# until that exists.
+# A composed task is the one body that legitimately carries prose, so it gets
+# room for the task text plus its attachment paths. Sharing the action limit
+# capped a 16k task at 4k and reported it as an oversized request.
+_MAX_COMPOSE_BODY = _MAX_TASK + 8192
+# The decisions an operator makes about a run that already exists: answer a
+# blocked one, or stop one. Starting and continuing work goes through the
+# composer instead, because those carry a task and its context.
 CONSOLE_ACTIONS = frozenset({"cancel", *RECONCILIATION_ACTION_ORDER})
 
 
@@ -205,6 +222,8 @@ class ConsoleHTTPServer(ThreadingHTTPServer):
         self.starts = threading.BoundedSemaphore(_MAX_CONCURRENT_STARTS)
         self._workspaces: tuple[float, list[dict[str, Any]]] | None = None
         self._workspaces_lock = threading.Lock()
+        self._listings: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._listings_lock = threading.Lock()
         super().__init__(address, handler_class)
 
     def workspaces(self) -> list[dict[str, Any]]:
@@ -221,6 +240,28 @@ class ConsoleHTTPServer(ThreadingHTTPServer):
         fresh = selectable_workspaces()
         with self._workspaces_lock:
             self._workspaces = (time.monotonic(), fresh)
+        return fresh
+
+    def listing(self, workspace_root: str) -> dict[str, Any]:
+        """Return this workspace's attachable paths, recomputed now and then.
+
+        Only the picker reads this, and it is a view: whether a path may really
+        be attached is decided per path when a task is composed, so a listing
+        that went a few seconds stale can mislead nobody.
+        """
+        now = time.monotonic()
+        with self._listings_lock:
+            cached = self._listings.get(workspace_root)
+            if cached is not None and now - cached[0] < _LISTING_TTL:
+                return cached[1]
+        fresh = workspace_listing(workspace_root)
+        with self._listings_lock:
+            self._listings = {
+                root: value
+                for root, value in self._listings.items()
+                if now - value[0] < _LISTING_TTL
+            }
+            self._listings[workspace_root] = (time.monotonic(), fresh)
         return fresh
 
 
@@ -405,7 +446,83 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             }
         )
 
-    def _read_action_request(self) -> dict[str, Any] | None:
+    def _context(self, query: Mapping[str, list[str]]) -> None:
+        """Publish the paths a task in this workspace may be pointed at.
+
+        The page needs this to offer a choice, and offering it is all this does.
+        Nothing here authorizes an attachment; composing one re-checks every
+        path against the same rules, so the page cannot attach a file by
+        inventing an entry that this listing never contained.
+        """
+        workspace_root, ok = self._scope_or_error(
+            (query.get("workspace_root") or [""])[0], required=True
+        )
+        if not ok or workspace_root is None:
+            return
+        listing = self._console.listing(workspace_root)
+        if not listing.get("ok"):
+            self._error(
+                403,
+                str(listing.get("code") or "workspace_not_readable"),
+                str(listing.get("reason") or "Baldr cannot read this workspace."),
+            )
+            return
+        self._json({**listing, "max_attachments": _MAX_ATTACHMENTS})
+
+    def _attachments(
+        self, payload: Mapping[str, Any], workspace_root: str
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Resolve the attached paths, or answer the request and return not-ok.
+
+        A refused path fails the whole compose rather than being dropped: a task
+        that runs with less context than the operator attached is worse than one
+        that does not start.
+        """
+        raw = payload.get("attachments")
+        if raw is None or raw == []:
+            return [], True
+        if not isinstance(raw, list):
+            self._error(
+                400,
+                "invalid_attachments",
+                "attachments must be a list of workspace-relative paths.",
+            )
+            return [], False
+        if len(raw) > _MAX_ATTACHMENTS:
+            self._error(
+                400,
+                "too_many_attachments",
+                f"A task can point at {_MAX_ATTACHMENTS} paths at most.",
+            )
+            return [], False
+        attachments: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        refused: list[str] = []
+        for value in raw:
+            # Accepts the plain path the page sends, and the object shape the
+            # editor clients already use for the same field.
+            supplied = value.get("path") if isinstance(value, Mapping) else value
+            relative = str(supplied or "").strip()
+            record = attachment_record(workspace_root, relative) if relative else None
+            if record is None:
+                refused.append(relative[:120] or "(vacío)")
+                continue
+            if record["label"] in seen:
+                continue
+            seen.add(record["label"])
+            attachments.append(record)
+        if refused:
+            self._error(
+                403,
+                "attachment_not_allowed",
+                "Baldr will not point a task at these paths: " + ", ".join(refused),
+            )
+            return [], False
+        return attachments, True
+
+    def _read_action_request(
+        self, *, max_bytes: int = _MAX_ACTION_BODY
+    ) -> dict[str, Any] | None:
         # A cross-site form can only send a handful of content types, none of
         # them JSON, so requiring it is one more wall before the token check
         # even matters.
@@ -417,7 +534,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             length = -1
-        if length < 0 or length > _MAX_ACTION_BODY:
+        if length < 0 or length > max_bytes:
             self._error(413, "body_too_large", "The action request is too large.")
             return None
         try:
@@ -592,7 +709,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         ).start()
 
     def _compose(self) -> None:
-        payload = self._read_action_request()
+        payload = self._read_action_request(max_bytes=_MAX_COMPOSE_BODY)
         if payload is None:
             return
         workspace_root, ok = self._scope_or_error(
@@ -607,6 +724,9 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             return
         if len(task) > _MAX_TASK or len(work_item_id) > _MAX_ITEM_ID:
             self._error(413, "body_too_large", "The request is too long.")
+            return
+        attachments, allowed = self._attachments(payload, workspace_root)
+        if not allowed:
             return
         if not self._console.starts.acquire(blocking=False):
             self._error(
@@ -624,6 +744,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                     work_item_id,
                     workspace_root=workspace_root,
                     request=task,
+                    attachments=attachments,
                     source=CONSOLE_CLIENT,
                 )
             else:
@@ -632,6 +753,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 item = service.create(
                     workspace_root=workspace_root,
                     task=task,
+                    attachments=attachments,
                     source=CONSOLE_CLIENT,
                 )
         except WorkspacePolicyError as exc:
@@ -674,7 +796,10 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         if route in _API_ROUTES:
             if not self._authorize_api():
                 return
-            self._workbench(query)
+            if route == _CONTEXT_ROUTE:
+                self._context(query)
+            else:
+                self._workbench(query)
             return
         self._error(404, "not_found", "Unknown console route.")
 
@@ -797,7 +922,6 @@ def serve_console(
                 "ok": True,
                 "console": console_url(server, with_token=True),
                 "workspace_root": workspace_root,
-                "read_only": True,
                 "token_env": TOKEN_ENV,
             },
             ensure_ascii=False,

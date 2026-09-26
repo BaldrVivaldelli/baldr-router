@@ -10,6 +10,7 @@
       "src/baldr_router/console_service.py",
       "src/baldr_router/contract_schemas.py",
       "src/baldr_router/diagnostics.py",
+      "src/baldr_router/discovery/inventory.py",
       "src/baldr_router/provider_errors.py",
       "src/baldr_router/redaction.py",
       "src/baldr_router/release_policy.py",

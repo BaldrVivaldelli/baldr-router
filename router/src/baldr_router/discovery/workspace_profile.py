@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import shutil
-import subprocess
 import time
 import tomllib
 from collections import Counter
@@ -17,13 +15,9 @@ from baldr_router.telemetry import app_cache_dir
 from baldr_router.platforming import normalize_path_for_runtime
 from baldr_router.workspace_policy import inspect_workspace
 
-from .exclusions import (
-    LANGUAGE_EXTENSIONS,
-    excluded_directory,
-    is_manifest,
-    is_sensitive_file,
-)
+from .exclusions import LANGUAGE_EXTENSIONS, is_manifest
 from .fingerprint import file_sha256, path_id, stable_json_hash
+from .inventory import git_listed_files, relative_path, run_git, walk_files
 
 SCHEMA_VERSION = 1
 
@@ -82,28 +76,11 @@ def _read_json(path: Path) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
-def _run_git(root: Path, *args: str, timeout: int = 10) -> tuple[int, str]:
-    git = shutil.which("git")
-    if not git:
-        return 127, ""
-    try:
-        completed = subprocess.run(
-            [git, "-C", str(root), *args],
-            text=True,
-            capture_output=True,
-            timeout=timeout,
-            check=False,
-        )
-    except Exception:
-        return 1, ""
-    return completed.returncode, completed.stdout.strip()
-
-
 def _git_metadata(root: Path) -> dict[str, Any]:
-    branch_code, branch = _run_git(root, "branch", "--show-current")
-    head_code, head = _run_git(root, "rev-parse", "--short=12", "HEAD")
-    status_code, status = _run_git(root, "status", "--porcelain=v1", "-uno")
-    count_code, count = _run_git(root, "ls-files")
+    branch_code, branch = run_git(root, "branch", "--show-current")
+    head_code, head = run_git(root, "rev-parse", "--short=12", "HEAD")
+    status_code, status = run_git(root, "status", "--porcelain=v1", "-uno")
+    count_code, count = run_git(root, "ls-files")
     tracked_count = len(count.splitlines()) if count_code == 0 else None
     return {
         "available": bool(shutil.which("git")),
@@ -112,67 +89,6 @@ def _git_metadata(root: Path) -> dict[str, Any]:
         "dirty": bool(status) if status_code == 0 else None,
         "tracked_files": tracked_count,
     }
-
-
-def _git_files(root: Path, max_files: int) -> list[Path] | None:
-    code, output = _run_git(
-        root,
-        "ls-files",
-        "--cached",
-        "--others",
-        "--exclude-standard",
-        "-z",
-        timeout=30,
-    )
-    if code != 0:
-        return None
-    entries = [entry for entry in output.split("\x00") if entry]
-    files: list[Path] = []
-    for entry in entries[:max_files]:
-        path = root / entry
-        if path.is_symlink():
-            continue
-        try:
-            path.resolve().relative_to(root)
-        except (OSError, ValueError):
-            continue
-        if path.is_file() and not is_sensitive_file(path):
-            files.append(path)
-    return files
-
-
-def _walk_files(root: Path, *, max_files: int, max_depth: int) -> list[Path]:
-    files: list[Path] = []
-    for current, dirs, names in os.walk(root):
-        current_path = Path(current)
-        try:
-            depth = len(current_path.relative_to(root).parts)
-        except ValueError:
-            continue
-        dirs[:] = [
-            name
-            for name in dirs
-            if not excluded_directory(name) and depth < max_depth
-        ]
-        for name in names:
-            path = current_path / name
-            if path.is_symlink() or is_sensitive_file(path):
-                continue
-            try:
-                path.resolve().relative_to(root)
-            except (OSError, ValueError):
-                continue
-            files.append(path)
-            if len(files) >= max_files:
-                return files
-    return files
-
-
-def _relative(root: Path, path: Path) -> str:
-    try:
-        return path.relative_to(root).as_posix()
-    except ValueError:
-        return path.name
 
 
 def _read_text(path: Path, max_bytes: int) -> str:
@@ -430,7 +346,7 @@ def _manifest_fingerprint(root: Path, manifests: list[Path], git: dict[str, Any]
             continue
         items.append(
             {
-                "path": _relative(root, path),
+                "path": relative_path(root, path),
                 "size": stat.st_size,
                 "mtime_ns": stat.st_mtime_ns,
                 "sha256": digest,
@@ -485,17 +401,17 @@ def workspace_profile(
             }
             return cached
 
-    files = _git_files(root, cfg.probe.max_files)
+    files = git_listed_files(root, cfg.probe.max_files)
     source = "git-ls-files"
     if files is None:
-        files = _walk_files(
+        files = walk_files(
             root,
             max_files=cfg.probe.max_files,
             max_depth=cfg.probe.scan_max_depth,
         )
         source = "bounded-filesystem-walk"
 
-    manifests = sorted((path for path in files if is_manifest(path)), key=lambda p: _relative(root, p))
+    manifests = sorted((path for path in files if is_manifest(path)), key=lambda p: relative_path(root, p))
     parsed: list[dict[str, Any]] = []
     manifest_records: list[dict[str, Any]] = []
     dependency_names: set[str] = set()
@@ -505,14 +421,14 @@ def workspace_profile(
             cfg.probe.max_manifest_bytes,
             cfg.probe.max_dependency_names,
         )
-        item["path"] = _relative(root, path)
+        item["path"] = relative_path(root, path)
         parsed.append(item)
         values = item.get("dependencies")
         if isinstance(values, list):
             dependency_names.update(str(value) for value in values)
         manifest_records.append(
             {
-                "path": _relative(root, path),
+                "path": relative_path(root, path),
                 "kind": item.get("kind"),
                 "parse_error": bool(item.get("parse_error")),
             }
