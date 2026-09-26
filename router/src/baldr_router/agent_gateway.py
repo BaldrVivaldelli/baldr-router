@@ -457,6 +457,12 @@ def external_agent_catalog_status(
             )
     except (AgentContractError, AgentNotFoundError):
         pass
+    finally:
+        # The store exists only to answer these diagnostics. Leaving it open
+        # holds the database file, which blocks removing a temporary state root
+        # on Windows.
+        if lifecycle_store is not None:
+            lifecycle_store.close()
 
     combined: dict[str, dict[str, Any]] = {}
     for item in local.get("agents") or []:
