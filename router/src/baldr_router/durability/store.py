@@ -68,6 +68,11 @@ class DurableStore(
         self.path = path or database_path(self.config)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._local = threading.local()
+        # connect() caches one connection per thread, so the store has to know
+        # every handle it opened in order to release them all in close().
+        self._connections: list[sqlite3.Connection] = []
+        self._connections_lock = threading.Lock()
+        self._generation = 0
         connection = self.connect()
         before = applied_versions(connection)
         integrity = self._integrity_check_connection(connection, quick=True)
@@ -93,6 +98,12 @@ class DurableStore(
 
     def connect(self) -> sqlite3.Connection:
         connection = getattr(self._local, "connection", None)
+        # A close() in another thread already shut this handle down, so the
+        # cached object is unusable and the caller needs a fresh one.
+        if connection is not None and getattr(self._local, "generation", -1) != (
+            self._generation
+        ):
+            connection = None
         if connection is None:
             connection = sqlite3.connect(
                 self.path,
@@ -114,13 +125,30 @@ class DurableStore(
                 sync = "FULL"
             connection.execute(f"PRAGMA synchronous = {sync}")
             self._local.connection = connection
+            with self._connections_lock:
+                self._local.generation = self._generation
+                self._connections.append(connection)
         return connection
 
     def close(self) -> None:
-        connection = getattr(self._local, "connection", None)
-        if connection is not None:
-            connection.close()
-            self._local.connection = None
+        """Release every connection this store opened, not just the caller's.
+
+        A store used from a worker pool holds one handle per thread. Closing
+        only the calling thread's handle leaked the rest until garbage
+        collection, which POSIX hides because an open file can still be
+        unlinked, and which Windows reports as a locked database file.
+        """
+        with self._connections_lock:
+            connections = list(self._connections)
+            self._connections.clear()
+            self._generation += 1
+        for connection in connections:
+            try:
+                connection.close()
+            except sqlite3.Error:
+                # A handle another thread already closed must not mask the rest.
+                pass
+        self._local.connection = None
 
     def count_attempts_for_run(self, run_id: str) -> int:
         """Return durable participant attempts consumed by one workflow run."""
