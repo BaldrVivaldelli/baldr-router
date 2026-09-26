@@ -39,6 +39,10 @@
   }
 }
 * { box-sizing: border-box; }
+/* An author `display` beats the user agent's [hidden] rule, so a grid or flex
+   container would stay visible while marked hidden. Making it authoritative
+   once is what keeps every future container from repeating that bug. */
+[hidden] { display: none !important; }
 body {
   margin: 0;
   background: var(--bg);
@@ -120,7 +124,6 @@ button.ghost {
   border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px; cursor: pointer;
 }
 button.ghost:hover { color: var(--ink); border-color: var(--accent); }
-button.ghost[hidden] { display: none; }
 .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .actions button {
   font: inherit; font-size: 13px; cursor: pointer; border-radius: 8px;

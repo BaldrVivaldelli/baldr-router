@@ -254,3 +254,14 @@ def test_opening_a_browser_uses_the_tokened_link(tmp_path: Path, monkeypatch) ->
         thread.join(timeout=10)
 
     assert opened and opened[0].endswith("#token=open-token")
+
+
+def test_hidden_beats_an_author_display_rule() -> None:
+    """Switching tabs has to actually hide the other view.
+
+    The views are grid containers, and an author `display` outranks the user
+    agent's [hidden] rule, so marking one hidden left both on screen at once.
+    """
+    page = console_asset_path().read_text(encoding="utf-8")
+
+    assert "[hidden] { display: none !important; }" in page
