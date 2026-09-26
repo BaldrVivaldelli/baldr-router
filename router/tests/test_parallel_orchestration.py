@@ -119,14 +119,33 @@ def test_read_only_all_participants_run_with_bounded_parallelism_and_stable_redu
     peak_writers = 0
     delays = {"review-1": 0.18, "review-2": 0.05, "review-3": 0.01}
 
+    # Sleeping and hoping the pool overlaps two reviewers is a race: a slow
+    # runner can let the first finish before the second starts. The first two
+    # arrivals hand off explicitly, so the overlap is a fact rather than a
+    # scheduling accident, and a serial engine fails instead of passing by luck.
+    arrivals = 0
+    first_inside = threading.Event()
+    second_inside = threading.Event()
+
     def provider(**kwargs):
         nonlocal active_reviewers, peak_reviewers, active_writers, peak_writers
+        nonlocal arrivals
         role = kwargs["role_name"]
         profile = kwargs["profile_name"]
         if role == "reviewer":
             with lock:
+                ordinal = arrivals
+                arrivals += 1
                 active_reviewers += 1
                 peak_reviewers = max(peak_reviewers, active_reviewers)
+            if ordinal == 0:
+                first_inside.set()
+                second_inside.wait(timeout=_SYNC_TIMEOUT)
+            elif ordinal == 1:
+                first_inside.wait(timeout=_SYNC_TIMEOUT)
+                second_inside.set()
+            # The delays stay so completion order differs from ordinal order,
+            # which is what makes the reduction assertion meaningful.
             time.sleep(delays[profile])
             with lock:
                 active_reviewers -= 1
