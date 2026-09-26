@@ -52,7 +52,13 @@ from .process_control import install_signal_handlers
 from .redaction import redact_text
 from .work_item_progress import compact_preferences
 from .durability.store import DurableStore
-from .work_items import RECONCILIATION_ACTION_ORDER, WorkItemService, workbench_options
+from .work_items import (
+    RECONCILIATION_ACTION_ORDER,
+    ROLE_NAMES,
+    WorkItemService,
+    available_execution_profiles,
+    workbench_options,
+)
 from .workspace_policy import (
     WorkspacePolicyError,
     configured_trusted_roots,
@@ -99,6 +105,9 @@ _LISTING_TTL = 15.0
 # path in the prompt, and a task that needs more than this wants a narrower
 # request or a directory.
 _MAX_ATTACHMENTS = 25
+# A phase runs its profiles in order until one succeeds. More than a handful is
+# a configuration problem rather than a chain.
+_MAX_ROLE_PROFILES = 12
 # Each of these is a per-workspace preference whose legal values the router
 # already publishes with human copy. Trust, secrets and the global config stay
 # out: granting trust from a page is an escalation, an API key needs a
@@ -639,6 +648,60 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             return
         self._json({"ok": bool(result.get("ok", True)), "action": action, "result": result})
 
+    def _role_profiles(
+        self, payload: Mapping[str, Any]
+    ) -> tuple[dict[str, list[str]] | None, bool]:
+        """Validate which execution profiles cover each phase.
+
+        Every phase has to be named. ``set_preferences`` replaces the stored map
+        rather than merging into it, so accepting a partial one here would let a
+        screen that edits the architect silently empty the reviewer.
+
+        The legal profile names are rebuilt from the router's configuration, not
+        taken from the request, exactly as the mode fields below are.
+        """
+        raw = payload.get("role_profiles")
+        if raw is None:
+            return None, True
+        if not isinstance(raw, Mapping):
+            self._error(
+                400,
+                "invalid_role_profiles",
+                "role_profiles must be an object keyed by phase.",
+            )
+            return None, False
+        unexpected = sorted(str(key) for key in set(raw) - set(ROLE_NAMES))
+        if unexpected:
+            self._error(
+                400, "invalid_role_profiles", "Unknown phases: " + ", ".join(unexpected)
+            )
+            return None, False
+        known = set(available_execution_profiles().get("execution_profiles") or {})
+        selected: dict[str, list[str]] = {}
+        for role in ROLE_NAMES:
+            values = raw.get(role)
+            if not isinstance(values, list) or not values:
+                self._error(
+                    400,
+                    "invalid_role_profiles",
+                    f"Every phase needs at least one profile; {role} has none.",
+                )
+                return None, False
+            names: list[str] = []
+            for value in values[:_MAX_ROLE_PROFILES]:
+                name = str(value or "").strip()
+                if name not in known:
+                    self._error(
+                        400,
+                        "invalid_role_profiles",
+                        f"{name!r} is not a configured execution profile.",
+                    )
+                    return None, False
+                if name not in names:
+                    names.append(name)
+            selected[role] = names
+        return selected, True
+
     def _preferences(self) -> None:
         payload = self._read_action_request()
         if payload is None:
@@ -647,6 +710,9 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             str(payload.get("workspace_root") or ""), required=True
         )
         if not ok or workspace_root is None:
+            return
+        role_profiles, ok = self._role_profiles(payload)
+        if not ok:
             return
         options = workbench_options()
         requested: dict[str, str] = {}
@@ -665,18 +731,19 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 )
                 return
             requested[field] = value
-        if not requested:
+        if not requested and role_profiles is None:
             self._error(400, "invalid_preference", "No preference was supplied.")
             return
         try:
-            # Named one by one rather than splatted: these four are the whole
-            # surface, and set_preferences keeps the current value for a None.
+            # Named one by one rather than splatted: this is the whole surface,
+            # and set_preferences keeps the current value for a None.
             preferences = WorkItemService().set_preferences(
                 workspace_root,
                 safety_mode=requested.get("safety_mode"),
                 preset=requested.get("preset"),
                 context_mode=requested.get("context_mode"),
                 team_mode=requested.get("team_mode"),
+                role_profiles=role_profiles,
                 allow_non_git=bool(payload.get("allow_non_git")),
             )
         except WorkspacePolicyError as exc:

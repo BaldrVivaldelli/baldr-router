@@ -156,6 +156,23 @@ nav.tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: 
 .option .desc { color: var(--muted); font-size: 12px; margin-top: 2px; }
 .option .flag { font-size: 11px; color: var(--accent); margin-left: 6px; font-weight: 600; }
 .option .flag.warn { color: var(--attention); }
+.phase { border: 1px solid var(--line); border-radius: 8px; padding: 11px; }
+.phase + .phase { margin-top: 8px; }
+.phase h4 { margin: 0; font-size: 13px; }
+.phase .role-desc { color: var(--muted); font-size: 12px; margin: 2px 0 8px; }
+.phase select {
+  font: inherit; font-size: 13px; width: 100%; padding: 6px 8px;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--ink);
+}
+.phase select:focus { outline: none; border-color: var(--accent); }
+.phase .field { display: block; font-size: 12px; color: var(--muted); margin: 8px 0 4px; }
+.fallbacks { display: flex; flex-wrap: wrap; gap: 12px; }
+.fallbacks label { display: inline-flex; gap: 6px; align-items: center; font-size: 13px; cursor: pointer; }
+.notice {
+  border-left: 3px solid var(--attention); border-radius: 0 6px 6px 0;
+  background: color-mix(in srgb, var(--attention) 8%, transparent);
+  padding: 8px 10px; margin: 0 0 10px; font-size: 12px;
+}
 .composer { display: flex; gap: 8px; align-items: flex-end; margin-top: 14px; }
 .composer textarea {
   flex: 1; font: inherit; font-size: 14px; resize: vertical; min-height: 44px;
@@ -652,45 +669,165 @@ const SETTINGS_GROUPS = [
   ['team_mode', 'team_modes', 'Equipo', 'Cómo elige qué agente cubre cada fase.'],
 ];
 
-async function savePreference(field, value, option, group) {
-  if (option.requires_confirmation
-      && !confirm(`«${option.label}» quita la protección de Git. ¿Confirmás?`)) {
-    renderSettings(lastWorkbench);
-    return;
-  }
+// Every phase runs its profiles in order until one succeeds, so the primary is
+// simply the first. The router replaces the whole map rather than merging, so a
+// save always names all three phases.
+const PHASES = [
+  ['architect', 'Planificación', 'Entiende el pedido, arma el plan y define qué hay que verificar.'],
+  ['implementer', 'Ejecución', 'Escribe el código y corre las verificaciones del plan.'],
+  ['reviewer', 'Revisión', 'Lee el diff contra el plan y marca lo que bloquea.'],
+];
+
+function reportSaveError(detail) {
+  // Rendered first and then annotated: re-rendering afterwards would clear the
+  // very message that explains why the control snapped back.
+  renderSettings(lastWorkbench, true);
+  document.getElementById('settings').append(el('div', {
+    class: 'action-error', id: 'settings-error', text: 'No se pudo guardar: ' + detail,
+  }));
+}
+
+async function postPreferences(body, group) {
   const error = document.getElementById('settings-error');
   if (error) error.remove();
-  group.querySelectorAll('input').forEach((i) => { i.disabled = true; });
+  if (group) group.querySelectorAll('input, select').forEach((i) => { i.disabled = true; });
   try {
     const response = await fetch(new URL('/v1/preferences', location.origin), {
       method: 'POST',
       credentials: 'omit',
       headers: { 'Content-Type': 'application/json', [TOKEN_HEADER]: token },
-      body: JSON.stringify(scoped({ [field]: value, allow_non_git: Boolean(option.requires_confirmation) })),
+      body: JSON.stringify(scoped(body)),
     });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok || payload.ok === false) {
-      const detail = (payload.error && payload.error.message) || ('HTTP ' + response.status);
-      document.getElementById('settings').append(
-        el('div', { class: 'action-error', id: 'settings-error', text: 'No se pudo guardar: ' + detail }));
-      renderSettings(lastWorkbench);
+      reportSaveError((payload.error && payload.error.message) || ('HTTP ' + response.status));
       return;
     }
     await refresh();
   } catch (err) {
-    document.getElementById('settings').append(
-      el('div', { class: 'action-error', id: 'settings-error', text: 'No se pudo guardar: ' + err.message }));
-    renderSettings(lastWorkbench);
+    reportSaveError(err.message);
   }
 }
 
-function renderSettings(workbench) {
+async function savePreference(field, value, option, group) {
+  if (option.requires_confirmation
+      && !confirm(`«${option.label}» quita la protección de Git. ¿Confirmás?`)) {
+    renderSettings(lastWorkbench, true);
+    return;
+  }
+  await postPreferences(
+    { [field]: value, allow_non_git: Boolean(option.requires_confirmation) },
+    group,
+  );
+}
+
+function profileLabel(name, profile) {
+  const parts = [profile.provider, profile.model, profile.agent].filter(Boolean);
+  return parts.length ? `${name} · ${parts.join(' · ')}` : name;
+}
+
+// The per-phase team, which is what the "A medida" preset has always meant and
+// never showed. Rendered only when there is a choice to make.
+function renderPhases(host, workbench) {
+  const preferences = workbench.preferences || {};
+  const catalog = (workbench.profiles && workbench.profiles.execution_profiles) || {};
+  const names = Object.keys(catalog).filter((name) => catalog[name].enabled !== false);
+  if (!names.length) return;
+
+  const group = el('div', { class: 'option-group' }, [
+    el('h3', { text: 'Equipo por etapa' }),
+    el('p', { text: 'Qué configuración de agente cubre cada etapa, y a qué recurre si falla.' }),
+  ]);
+
+  if (names.length === 1) {
+    group.append(el('p', {
+      class: 'action-hint',
+      text: `Hay una sola configuración definida («${names[0]}»), así que cubre las tres etapas. `
+        + 'Para elegir entre varias, definilas en config.toml.',
+    }));
+    host.append(group);
+    return;
+  }
+
+  // The preset overwrites what these profiles say about effort, so choosing here
+  // without knowing that would look like the choice was ignored.
+  const preset = preferences.preset;
+  if (preset && preset !== 'custom') {
+    const consequence = preset === 'fast'
+      ? 'El nivel «Rápido» corre sólo el perfil principal de cada etapa y le fija el esfuerzo más bajo.'
+      : 'El nivel de detalle elegido le fija el esfuerzo a todas las etapas, por encima de lo que diga cada perfil.';
+    group.append(el('p', {
+      class: 'notice',
+      text: `${consequence} Para que manden estos perfiles, elegí «A medida» en Nivel de detalle.`,
+    }));
+  }
+
+  // The draft holds all three phases because a save replaces all three.
+  const draft = {};
+  for (const [role] of PHASES) {
+    const stored = (preferences.role_profiles || {})[role] || [];
+    const kept = stored.filter((name) => names.includes(name));
+    draft[role] = kept.length ? kept : [names[0]];
+  }
+
+  for (const [role, title, description] of PHASES) {
+    const card = el('div', { class: 'phase' }, [
+      el('h4', { text: title }),
+      el('p', { class: 'role-desc', text: description }),
+    ]);
+    const primary = draft[role][0];
+
+    const select = el('select', { 'aria-label': `Configuración principal de ${title}` });
+    for (const name of names) {
+      select.append(el('option', { value: name, text: profileLabel(name, catalog[name]) }));
+    }
+    select.value = primary;
+    select.addEventListener('change', () => {
+      const chosen = select.value;
+      draft[role] = [chosen, ...draft[role].filter((name) => name !== chosen)];
+      postPreferences({ role_profiles: draft }, card);
+    });
+    card.append(el('label', { class: 'field', text: 'Principal' }), select);
+
+    const detail = catalog[primary] && catalog[primary].description;
+    if (detail) card.append(el('p', { class: 'role-desc', text: detail }));
+
+    const others = names.filter((name) => name !== primary);
+    if (others.length) {
+      const boxes = el('div', { class: 'fallbacks' });
+      for (const name of others) {
+        const box = el('input', { type: 'checkbox' });
+        box.checked = draft[role].includes(name);
+        box.addEventListener('change', () => {
+          draft[role] = box.checked
+            ? [...draft[role], name]
+            : draft[role].filter((value) => value !== name);
+          postPreferences({ role_profiles: draft }, card);
+        });
+        boxes.append(el('label', {}, [box, el('span', { text: name })]));
+      }
+      card.append(
+        el('label', { class: 'field', text: 'Si falla, probar también' }),
+        boxes,
+      );
+    }
+    group.append(card);
+  }
+  host.append(group);
+}
+
+function renderSettings(workbench, force) {
   const host = document.getElementById('settings');
-  host.replaceChildren();
   const preferences = (workbench && workbench.preferences) || null;
   const options = (workbench && workbench.options) || {};
+  // The view polls, and rebuilding these controls under the pointer would drop
+  // a half-made choice every three seconds.
+  const signature = JSON.stringify([preferences, options, workbench && workbench.profiles]);
+  if (!force && host.dataset.signature === signature) return;
+  host.dataset.signature = signature;
+  host.replaceChildren();
   if (!preferences) {
-    host.append(el('p', { class: 'empty', text: 'Arrancá la consola con --workspace-root para configurar un workspace.' }));
+    host.append(el('p', { class: 'empty', text: 'Elegí un workspace arriba para configurarlo.' }));
     return;
   }
   for (const [field, optionKey, title, description] of SETTINGS_GROUPS) {
@@ -720,6 +857,7 @@ function renderSettings(workbench) {
     }
     host.append(group);
   }
+  renderPhases(host, workbench);
   host.append(el('p', {
     class: 'action-hint',
     text: 'La confianza del workspace, las claves y la configuración global del router se cambian desde la CLI: no se editan desde el navegador.',

@@ -193,3 +193,153 @@ def test_the_page_offers_only_the_published_options() -> None:
     for option_key in ("safety_modes", "presets", "context_modes", "team_modes"):
         assert f"'{option_key}'" in page
     assert "options[optionKey] || []" in page
+
+
+# --- which agent configuration covers each phase -----------------------------
+
+
+@pytest.fixture
+def two_profiles(workspace: Path) -> list[str]:
+    """A second execution profile, so choosing between them means something."""
+
+    from baldr_router.work_items import upsert_execution_profile
+
+    upsert_execution_profile(
+        "reviewer-kiro", provider="kiro-cli", agent="kiro_default", description="Kiro"
+    )
+    return ["default", "reviewer-kiro"]
+
+
+def test_each_phase_can_be_given_its_own_profile(
+    console: str, workspace: Path, two_profiles: list[str]
+) -> None:
+    status, payload = _post(
+        console,
+        {
+            "role_profiles": {
+                "architect": ["default"],
+                "implementer": ["default"],
+                "reviewer": ["reviewer-kiro", "default"],
+            }
+        },
+    )
+
+    assert status == 200, payload
+    stored = WorkItemService().preferences(str(workspace))["role_profiles"]
+    assert stored["reviewer"] == ["reviewer-kiro", "default"]
+    assert stored["architect"] == ["default"]
+
+
+def test_the_order_is_the_fallback_order(
+    console: str, workspace: Path, two_profiles: list[str]
+) -> None:
+    """A phase tries its profiles in order, so the first one is the primary."""
+
+    _post(
+        console,
+        {
+            "role_profiles": {
+                "architect": ["reviewer-kiro", "default"],
+                "implementer": ["default"],
+                "reviewer": ["default"],
+            }
+        },
+    )
+
+    stored = WorkItemService().preferences(str(workspace))["role_profiles"]
+    assert stored["architect"][0] == "reviewer-kiro"
+
+
+def test_a_profile_the_router_does_not_define_is_refused(
+    console: str, workspace: Path
+) -> None:
+    status, payload = _post(
+        console,
+        {
+            "role_profiles": {
+                "architect": ["gpt-9-ultra"],
+                "implementer": ["default"],
+                "reviewer": ["default"],
+            }
+        },
+    )
+
+    assert status == 400
+    assert payload["error"]["code"] == "invalid_role_profiles"
+    stored = WorkItemService().preferences(str(workspace))["role_profiles"]
+    assert "gpt-9-ultra" not in stored.get("architect", [])
+
+
+def test_a_partial_map_is_refused(console: str, workspace: Path) -> None:
+    """Saving replaces the whole map, so a partial one would empty a phase."""
+
+    status, payload = _post(console, {"role_profiles": {"architect": ["default"]}})
+
+    assert status == 400
+    assert payload["error"]["code"] == "invalid_role_profiles"
+    stored = WorkItemService().preferences(str(workspace))["role_profiles"]
+    assert set(stored) == {"architect", "implementer", "reviewer"}
+
+
+def test_a_phase_with_no_profile_is_refused(console: str) -> None:
+    status, payload = _post(
+        console,
+        {
+            "role_profiles": {
+                "architect": [],
+                "implementer": ["default"],
+                "reviewer": ["default"],
+            }
+        },
+    )
+
+    assert status == 400
+    assert payload["error"]["code"] == "invalid_role_profiles"
+
+
+def test_an_invented_phase_is_refused(console: str) -> None:
+    status, payload = _post(
+        console,
+        {
+            "role_profiles": {
+                "architect": ["default"],
+                "implementer": ["default"],
+                "reviewer": ["default"],
+                "deployer": ["default"],
+            }
+        },
+    )
+
+    assert status == 400
+    assert payload["error"]["code"] == "invalid_role_profiles"
+
+
+def test_the_phase_team_saves_without_any_other_preference(
+    console: str, workspace: Path
+) -> None:
+    """It is a save in its own right, not a rider on a mode change."""
+
+    status, payload = _post(
+        console,
+        {
+            "role_profiles": {
+                "architect": ["default"],
+                "implementer": ["default"],
+                "reviewer": ["default"],
+            }
+        },
+    )
+
+    assert status == 200, payload
+    assert payload["preferences"]["role_profiles"]["architect"] == ["default"]
+
+
+def test_the_page_says_when_the_preset_overrides_the_phase_team() -> None:
+    """Only the custom preset respects per-profile effort, so the page says so."""
+
+    from baldr_router.console_service import console_asset_path
+
+    page = console_asset_path().read_text(encoding="utf-8")
+
+    assert "preset !== 'custom'" in page
+    assert "A medida" in page
