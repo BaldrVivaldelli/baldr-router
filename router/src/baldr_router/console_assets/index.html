@@ -300,6 +300,9 @@ const ENTRY_ROWS = 200;
 let contextListing = null;
 let contextError = '';
 let contextLoading = false;
+let agentsState = null;
+let agentsError = '';
+let agentsLoading = false;
 
 const sizeLabel = (value) => {
   if (!Number.isFinite(value)) return '';
@@ -309,6 +312,34 @@ const sizeLabel = (value) => {
 };
 
 const maxAttachments = () => (contextListing && contextListing.max_attachments) || 25;
+
+// Fetched when the configuration tab opens, never with the polled view:
+// building the catalog can call a remote agent manager with a timeout of its
+// own, and a three-second refresh must not wait on that.
+async function loadAgents(force) {
+  if (agentsLoading) return;
+  if (!force && agentsState) return;
+  agentsLoading = true;
+  agentsError = '';
+  try {
+    const response = await fetch(new URL('/v1/agents', location.origin), {
+      headers: { Accept: 'application/json', [TOKEN_HEADER]: token },
+      credentials: 'omit',
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      agentsError = (payload.error && payload.error.message) || ('HTTP ' + response.status);
+      agentsState = null;
+    } else {
+      agentsState = payload;
+    }
+  } catch (error) {
+    agentsError = error.message;
+    agentsState = null;
+  } finally {
+    agentsLoading = false;
+  }
+}
 
 // Fetched when a picker first opens rather than with the view: enumerating a
 // repository costs a Git call, and most visits never attach anything.
@@ -893,6 +924,81 @@ function renderPhases(host, workbench) {
   host.append(group);
 }
 
+// Pinning an agent to a phase. An external agent is a registered version with
+// declared capabilities, so the page offers only what the resolver would accept
+// and says why it ruled the rest out.
+function renderAgents(host, preferences) {
+  const group = el('div', { class: 'option-group' }, [
+    el('h3', { text: 'Agentes por etapa' }),
+    el('p', { text: 'Fijar un agente externo registrado para una etapa, en lugar del proveedor de su perfil.' }),
+  ]);
+  if (agentsError) {
+    group.append(el('p', { class: 'action-error', text: 'No se pudo leer el catálogo: ' + agentsError }));
+    host.append(group);
+    return;
+  }
+  if (!agentsState) {
+    group.append(el('p', { class: 'action-hint', text: 'Leyendo el catálogo de agentes…' }));
+    host.append(group);
+    return;
+  }
+  const state = agentsState;
+  if (state.degraded) {
+    group.append(el('p', {
+      class: 'notice',
+      text: 'El agent manager no responde, así que el catálogo está incompleto. '
+        + 'Fijar un agente ahora podría nombrar una versión que Baldr todavía no ve.',
+    }));
+  }
+  if (!state.agent_count) {
+    group.append(el('p', {
+      class: 'action-hint',
+      text: 'No hay agentes externos registrados, así que cada etapa la cubre el proveedor de su perfil. '
+        + 'Para registrar uno: baldr-router agent publish',
+    }));
+    host.append(group);
+    return;
+  }
+
+  // Complete, like the phase team: the stored map is replaced, not merged, and
+  // an empty value is how a phase stops being pinned.
+  const draft = {};
+  for (const [role] of PHASES) draft[role] = (preferences.agent_overrides || {})[role] || '';
+
+  for (const [role, title] of PHASES) {
+    const candidates = (state.roles || {})[role] || [];
+    const eligible = candidates.filter((candidate) => candidate.eligible);
+    const card = el('div', { class: 'phase' }, [el('h4', { text: title })]);
+    const select = el('select', { 'aria-label': `Agente para ${title}` });
+    select.append(el('option', { value: '', text: 'Sin fijar (usa el perfil de la etapa)' }));
+    for (const candidate of eligible) {
+      select.append(el('option', {
+        value: candidate.ref,
+        text: candidate.owner ? `${candidate.ref} · ${candidate.owner}` : candidate.ref,
+      }));
+    }
+    select.value = draft[role];
+    select.addEventListener('change', () => {
+      draft[role] = select.value;
+      postPreferences({ agent_overrides: draft }, card);
+    });
+    card.append(el('label', { class: 'field', text: 'Agente' }), select);
+    if (!eligible.length) {
+      card.append(el('p', { class: 'role-desc', text: 'Ningún agente registrado puede cubrir esta etapa.' }));
+    }
+    // The resolver's own reason, because "not offered" without it is a puzzle.
+    for (const candidate of candidates.filter((c) => !c.eligible && c.reason)) {
+      card.append(el('p', { class: 'role-desc', text: `${candidate.ref}: ${candidate.reason}` }));
+    }
+    group.append(card);
+  }
+  group.append(el('p', {
+    class: 'action-hint',
+    text: 'Un agente fijado manda incluso con el equipo en «Automático».',
+  }));
+  host.append(group);
+}
+
 function renderSettings(workbench, force) {
   const host = document.getElementById('settings');
   const preferences = (workbench && workbench.preferences) || null;
@@ -900,7 +1006,8 @@ function renderSettings(workbench, force) {
   // The view polls, and rebuilding these controls under the pointer would drop
   // a half-made choice every three seconds.
   const signature = JSON.stringify([
-    preferences, options, workbench && workbench.profiles, context7State, workspaceState,
+    preferences, options, workbench && workbench.profiles,
+    context7State, workspaceState, agentsState, agentsError,
   ]);
   if (!force && host.dataset.signature === signature) return;
   host.dataset.signature = signature;
@@ -943,6 +1050,7 @@ function renderSettings(workbench, force) {
     host.append(group);
   }
   renderPhases(host, workbench);
+  renderAgents(host, preferences);
   host.append(el('p', {
     class: 'action-hint',
     text: 'La confianza del workspace, las claves y la configuración global del router se cambian desde la CLI: no se editan desde el navegador.',
@@ -1171,6 +1279,10 @@ function showView(name) {
   for (const button of document.querySelectorAll('#tabs button')) {
     button.setAttribute('aria-selected', String(button.dataset.view === name));
   }
+  if (name !== 'settings') return;
+  // The catalog is read on arrival rather than with every poll, so the tab
+  // asks for it and redraws once it lands.
+  loadAgents(false).then(() => renderSettings(lastWorkbench, true));
 }
 
 async function refresh() {

@@ -45,12 +45,14 @@ from pathlib import Path
 from typing import Any, cast
 from urllib.parse import parse_qs, quote, urlparse
 
+from .agent_gateway import external_agent_catalog_status
 from .context7_setup import context7_runtime_status
 from .diagnostics import get_logger, log_suppressed
 from .discovery.inventory import attachment_record, run_git, workspace_listing
 from .facade import facade_run, facade_status_report
 from .process_control import install_signal_handlers
 from .redaction import redact_text
+from .team_resolution import role_candidates
 from .work_item_progress import compact_preferences
 from .durability.store import DurableStore
 from .work_items import (
@@ -91,7 +93,8 @@ _ACTION_ROUTE = "/v1/actions"
 _PREFERENCES_ROUTE = "/v1/preferences"
 _COMPOSE_ROUTE = "/v1/compose"
 _CONTEXT_ROUTE = "/v1/context"
-_API_ROUTES = frozenset({"/v1/workbench", _CONTEXT_ROUTE})
+_AGENTS_ROUTE = "/v1/agents"
+_API_ROUTES = frozenset({"/v1/workbench", _CONTEXT_ROUTE, _AGENTS_ROUTE})
 _MAX_TASK = 16_384
 # A workflow runs for minutes, so the request that starts one cannot wait for
 # it. Each start gets a worker, and this bounds how many the console will hold
@@ -106,6 +109,9 @@ _LISTING_TTL = 15.0
 # state the configuration screen needs to tell the truth, and that only changes
 # when somebody runs a command.
 _ENVIRONMENT_TTL = 15.0
+# The registered agents change when somebody publishes a version, which is
+# rarer still, and building the catalog is the most expensive read here.
+_AGENTS_TTL = 60.0
 # A task points at context; it does not carry it. Each attachment costs one
 # path in the prompt, and a task that needs more than this wants a narrower
 # request or a directory.
@@ -240,6 +246,30 @@ def describe_workspace(workspace_root: str) -> dict[str, Any]:
     return state
 
 
+def describe_agents() -> dict[str, Any]:
+    """Describe which registered agents could cover each phase.
+
+    Pinning an agent is only useful if the page offers what the run will accept,
+    so the standing of each one is computed with the resolver's own rules rather
+    than a second opinion about capabilities.
+    """
+    catalog = external_agent_catalog_status()
+    return {
+        # The envelope's ok answers the request; the catalog's own health is a
+        # separate fact, and conflating them would hide a degraded listing
+        # behind what looks like a failed read.
+        "ok": True,
+        "catalog_ok": bool(catalog.get("ok")),
+        "configured": bool(catalog.get("configured")),
+        # A configured agent manager that cannot be reached: the list is real
+        # but incomplete, and pinning from it would be a guess.
+        "degraded": bool(catalog.get("degraded")),
+        "agent_count": int(catalog.get("agent_count") or 0),
+        "registry_path": str((catalog.get("local") or {}).get("path") or ""),
+        "roles": {role: role_candidates(catalog, role) for role in ROLE_NAMES},
+    }
+
+
 def is_trusted_workspace(path: Path) -> bool:
     try:
         return bool(inspect_workspace(path, access="write").get("ok"))
@@ -350,6 +380,16 @@ class ConsoleHTTPServer(ThreadingHTTPServer):
                 lambda: describe_workspace(workspace_root),
             ),
         )
+
+    def agents(self) -> dict[str, Any]:
+        """Return the agent catalog, deliberately outside the polled view.
+
+        Building it reads the local registry, runs a diagnostic per agent and,
+        when an agent manager is configured, calls it with a timeout of its own.
+        A poll must never wait on that, so this answers its own request, the way
+        the context listing does.
+        """
+        return cast("dict[str, Any]", self._cached("agents", _AGENTS_TTL, describe_agents))
 
 
 class ConsoleRequestHandler(BaseHTTPRequestHandler):
@@ -788,6 +828,64 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             selected[role] = names
         return selected, True
 
+    def _agent_overrides(
+        self, payload: Mapping[str, Any]
+    ) -> tuple[dict[str, str] | None, bool]:
+        """Validate which registered agent is pinned to each phase.
+
+        An empty value clears that phase's pin, and a complete map is expected
+        for the same reason role_profiles is: the stored value is replaced, not
+        merged. Eligibility is recomputed from the catalog, so a pin the run
+        would refuse cannot be saved and discovered later.
+        """
+        raw = payload.get("agent_overrides")
+        if raw is None:
+            return None, True
+        if not isinstance(raw, Mapping):
+            self._error(
+                400,
+                "invalid_agent_overrides",
+                "agent_overrides must be an object keyed by phase.",
+            )
+            return None, False
+        unexpected = sorted(str(key) for key in set(raw) - set(ROLE_NAMES))
+        if unexpected:
+            self._error(
+                400,
+                "invalid_agent_overrides",
+                "Unknown phases: " + ", ".join(unexpected),
+            )
+            return None, False
+        catalog = self._console.agents()
+        if catalog.get("degraded"):
+            # The listing is real but incomplete, so an absent agent may exist.
+            self._error(
+                409,
+                "agent_catalog_degraded",
+                "The agent manager is unreachable, so the catalog is incomplete. "
+                "Pinning an agent now could name a version Baldr cannot see.",
+            )
+            return None, False
+        selected: dict[str, str] = {}
+        for role in ROLE_NAMES:
+            reference = str(raw.get(role) or "").strip()
+            if not reference:
+                continue
+            eligible = {
+                str(candidate["ref"])
+                for candidate in catalog.get("roles", {}).get(role, [])
+                if candidate.get("eligible")
+            }
+            if reference not in eligible:
+                self._error(
+                    400,
+                    "invalid_agent_overrides",
+                    f"{reference!r} is not a registered agent that can cover {role}.",
+                )
+                return None, False
+            selected[role] = reference
+        return selected, True
+
     def _preferences(self) -> None:
         payload = self._read_action_request()
         if payload is None:
@@ -798,6 +896,9 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         if not ok or workspace_root is None:
             return
         role_profiles, ok = self._role_profiles(payload)
+        if not ok:
+            return
+        agent_overrides, ok = self._agent_overrides(payload)
         if not ok:
             return
         options = workbench_options()
@@ -817,7 +918,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 )
                 return
             requested[field] = value
-        if not requested and role_profiles is None:
+        if not requested and role_profiles is None and agent_overrides is None:
             self._error(400, "invalid_preference", "No preference was supplied.")
             return
         try:
@@ -830,6 +931,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 context_mode=requested.get("context_mode"),
                 team_mode=requested.get("team_mode"),
                 role_profiles=role_profiles,
+                agent_overrides=agent_overrides,
                 allow_non_git=bool(payload.get("allow_non_git")),
             )
         except WorkspacePolicyError as exc:
@@ -951,6 +1053,8 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 return
             if route == _CONTEXT_ROUTE:
                 self._context(query)
+            elif route == _AGENTS_ROUTE:
+                self._json(self._console.agents())
             else:
                 self._workbench(query)
             return

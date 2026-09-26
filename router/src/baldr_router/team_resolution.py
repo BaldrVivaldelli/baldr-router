@@ -197,6 +197,50 @@ class TeamResolution:
         }
 
 
+def role_candidates(catalog: Mapping[str, Any], role: str) -> list[dict[str, Any]]:
+    """Describe every catalogued agent's standing for one role.
+
+    A surface that offers a choice has to apply the rules the resolver will, or
+    it offers a pin the run then refuses. So this answers with the resolver's own
+    health and compatibility checks, and carries their reason for the ones it
+    rules out rather than hiding them: "this agent is read-only and execution
+    writes" is the useful half of the answer.
+    """
+    if role not in TEAM_ROLES:
+        raise ValueError(f"Unknown role: {role}")
+    described: list[dict[str, Any]] = []
+    raw_agents = catalog.get("agents")
+    agents = (
+        [item for item in raw_agents if isinstance(item, Mapping)]
+        if isinstance(raw_agents, list)
+        else []
+    )
+    for item in agents:
+        reference = str(item.get("ref") or "")
+        if not reference:
+            continue
+        healthy, reason = _health(item)
+        if healthy:
+            eligible, reason = _role_compatible(item, role)
+        else:
+            eligible = False
+        described.append(
+            {
+                "ref": reference,
+                "eligible": bool(eligible),
+                "reason": reason,
+                "name": str(item.get("name") or ""),
+                "version": str(item.get("version") or ""),
+                "owner": str(item.get("owner") or ""),
+                "effect_mode": str(item.get("effect_mode") or ""),
+                "source": str(item.get("source") or ""),
+            }
+        )
+    # Usable ones first, then a stable order so a listing does not reshuffle.
+    described.sort(key=lambda entry: (not entry["eligible"], entry["ref"]))
+    return described
+
+
 def _external_profile(
     *, role: str, plan: Mapping[str, Any], item: Mapping[str, Any]
 ) -> dict[str, Any]:
