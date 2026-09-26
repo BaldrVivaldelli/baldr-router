@@ -275,154 +275,161 @@ def durable_state_contract(scratch: Path) -> dict[str, Any]:
     _running_attempt(store, run_id="read-recovery", workspace=workspace, can_write=False)
     store.close()
     reopened = DurableStore(path=database)
-    database_reopened = reopened.get_run("read-recovery") is not None
-    read_recovery = recover_stale_runs(reopened)
-    read_snapshot = reopened.snapshot_run("read-recovery")
-    read_status = str(read_snapshot["run"]["status"])
-    read_step_status = str(read_snapshot["steps"][0]["status"])
-    read_attempt_status = str(
-        read_snapshot["steps"][0]["participants"][0]["attempts"][0]["status"]
-    )
-
-    _running_attempt(reopened, run_id="write-recovery", workspace=workspace, can_write=True)
-    write_recovery = recover_stale_runs(reopened)
-    write_snapshot = reopened.snapshot_run("write-recovery")
-    write_status = str(write_snapshot["run"]["status"])
-    write_step_status = str(write_snapshot["steps"][0]["status"])
-    write_attempt_status = str(
-        write_snapshot["steps"][0]["participants"][0]["attempts"][0]["status"]
-    )
-    write_actions = list(
-        (write_snapshot["run"].get("reconciliation") or {}).get("allowed_actions") or []
-    )
-
-    _create_run(reopened, run_id="lease-fencing", workspace=workspace)
-    stale_lease = reopened.acquire_lease("lease-fencing", "worker-a", 30)
-    if stale_lease is None:
-        raise RuntimeError("First qualification worker could not acquire its lease.")
-    _expire_run_lease(reopened, "lease-fencing")
-    contender = DurableStore(path=database)
-    current_lease = contender.acquire_lease("lease-fencing", "worker-b", 30)
-    if current_lease is None:
-        raise RuntimeError("Second qualification worker could not take over the expired lease.")
-    stale_lease_rejected = False
+    # Contract checks raise on violation, and a store left open here keeps
+    # its database file locked, which on Windows makes the whole scratch
+    # tree unremovable long after the scenario has reported its verdict.
+    contender: DurableStore | None = None
     try:
-        reopened.transition_run("lease-fencing", "running", lease=stale_lease)
-    except LeaseFenceError:
-        stale_lease_rejected = True
-    contender.transition_run("lease-fencing", "running", lease=current_lease)
-    current_run = contender.get_run("lease-fencing")
-    fresh_lease_accepted = (
-        current_run is not None and current_run["status"] == "running"
-    )
-    fencing_epoch_advanced = current_lease.epoch == stale_lease.epoch + 1
+        database_reopened = reopened.get_run("read-recovery") is not None
+        read_recovery = recover_stale_runs(reopened)
+        read_snapshot = reopened.snapshot_run("read-recovery")
+        read_status = str(read_snapshot["run"]["status"])
+        read_step_status = str(read_snapshot["steps"][0]["status"])
+        read_attempt_status = str(
+            read_snapshot["steps"][0]["participants"][0]["attempts"][0]["status"]
+        )
 
-    _, first_created = _create_run(
-        contender,
-        run_id="idempotency-first",
-        workspace=workspace,
-        idempotency_key="qualification-idempotency",
-        request_fingerprint="request-a",
-    )
-    artifacts_before = int(
-        contender.connect().execute("SELECT COUNT(*) FROM artifacts").fetchone()[0]
-    )
-    replay, replay_created = _create_run(
-        contender,
-        run_id="idempotency-replay",
-        workspace=workspace,
-        idempotency_key="qualification-idempotency",
-        request_fingerprint="request-a",
-    )
-    idempotency_conflict_rejected = False
-    try:
-        _create_run(
+        _running_attempt(reopened, run_id="write-recovery", workspace=workspace, can_write=True)
+        write_recovery = recover_stale_runs(reopened)
+        write_snapshot = reopened.snapshot_run("write-recovery")
+        write_status = str(write_snapshot["run"]["status"])
+        write_step_status = str(write_snapshot["steps"][0]["status"])
+        write_attempt_status = str(
+            write_snapshot["steps"][0]["participants"][0]["attempts"][0]["status"]
+        )
+        write_actions = list(
+            (write_snapshot["run"].get("reconciliation") or {}).get("allowed_actions") or []
+        )
+
+        _create_run(reopened, run_id="lease-fencing", workspace=workspace)
+        stale_lease = reopened.acquire_lease("lease-fencing", "worker-a", 30)
+        if stale_lease is None:
+            raise RuntimeError("First qualification worker could not acquire its lease.")
+        _expire_run_lease(reopened, "lease-fencing")
+        contender = DurableStore(path=database)
+        current_lease = contender.acquire_lease("lease-fencing", "worker-b", 30)
+        if current_lease is None:
+            raise RuntimeError("Second qualification worker could not take over the expired lease.")
+        stale_lease_rejected = False
+        try:
+            reopened.transition_run("lease-fencing", "running", lease=stale_lease)
+        except LeaseFenceError:
+            stale_lease_rejected = True
+        contender.transition_run("lease-fencing", "running", lease=current_lease)
+        current_run = contender.get_run("lease-fencing")
+        fresh_lease_accepted = (
+            current_run is not None and current_run["status"] == "running"
+        )
+        fencing_epoch_advanced = current_lease.epoch == stale_lease.epoch + 1
+
+        _, first_created = _create_run(
             contender,
-            run_id="idempotency-conflict",
+            run_id="idempotency-first",
             workspace=workspace,
             idempotency_key="qualification-idempotency",
-            request_fingerprint="request-b",
+            request_fingerprint="request-a",
         )
-    except IdempotencyConflict:
-        idempotency_conflict_rejected = True
-    artifacts_after = int(
-        contender.connect().execute("SELECT COUNT(*) FROM artifacts").fetchone()[0]
-    )
-    idempotent_replay = bool(
-        first_created
-        and not replay_created
-        and replay["id"] == "idempotency-first"
-        and artifacts_after == artifacts_before
-    )
+        artifacts_before = int(
+            contender.connect().execute("SELECT COUNT(*) FROM artifacts").fetchone()[0]
+        )
+        replay, replay_created = _create_run(
+            contender,
+            run_id="idempotency-replay",
+            workspace=workspace,
+            idempotency_key="qualification-idempotency",
+            request_fingerprint="request-a",
+        )
+        idempotency_conflict_rejected = False
+        try:
+            _create_run(
+                contender,
+                run_id="idempotency-conflict",
+                workspace=workspace,
+                idempotency_key="qualification-idempotency",
+                request_fingerprint="request-b",
+            )
+        except IdempotencyConflict:
+            idempotency_conflict_rejected = True
+        artifacts_after = int(
+            contender.connect().execute("SELECT COUNT(*) FROM artifacts").fetchone()[0]
+        )
+        idempotent_replay = bool(
+            first_created
+            and not replay_created
+            and replay["id"] == "idempotency-first"
+            and artifacts_after == artifacts_before
+        )
 
-    contender.upsert_session(
-        session_key="workspace-a:architect:model-a",
-        provider="codex",
-        role="architect",
-        profile_name="model-a",
-        model="model-a",
-        runner="codex",
-        thread_id="thread-a",
-        status="active",
-        identity_fingerprint="workspace-a",
-        provider_version="qualification",
-    )
-    contender.upsert_session(
-        session_key="workspace-b:architect:model-a",
-        provider="codex",
-        role="architect",
-        profile_name="model-a",
-        model="model-a",
-        runner="codex",
-        thread_id="thread-b",
-        status="active",
-        identity_fingerprint="workspace-b",
-        provider_version="qualification",
-    )
-    session_a = contender.get_valid_session(
-        "workspace-a:architect:model-a",
-        identity_fingerprint="workspace-a",
-        provider_version="qualification",
-        ttl_hours=24,
-        max_turns=10,
-    )
-    session_b = contender.get_valid_session(
-        "workspace-b:architect:model-a",
-        identity_fingerprint="workspace-b",
-        provider_version="qualification",
-        ttl_hours=24,
-        max_turns=10,
-    )
-    invalidated_a = contender.get_valid_session(
-        "workspace-a:architect:model-a",
-        identity_fingerprint="workspace-a-changed",
-        provider_version="qualification",
-        ttl_hours=24,
-        max_turns=10,
-    )
-    session_b_after = contender.get_valid_session(
-        "workspace-b:architect:model-a",
-        identity_fingerprint="workspace-b",
-        provider_version="qualification",
-        ttl_hours=24,
-        max_turns=10,
-    )
-    sessions_isolated = bool(
-        session_a
-        and session_b
-        and session_a["thread_id"] == "thread-a"
-        and session_b["thread_id"] == "thread-b"
-        and invalidated_a is None
-        and session_b_after
-        and session_b_after["thread_id"] == "thread-b"
-    )
+        contender.upsert_session(
+            session_key="workspace-a:architect:model-a",
+            provider="codex",
+            role="architect",
+            profile_name="model-a",
+            model="model-a",
+            runner="codex",
+            thread_id="thread-a",
+            status="active",
+            identity_fingerprint="workspace-a",
+            provider_version="qualification",
+        )
+        contender.upsert_session(
+            session_key="workspace-b:architect:model-a",
+            provider="codex",
+            role="architect",
+            profile_name="model-a",
+            model="model-a",
+            runner="codex",
+            thread_id="thread-b",
+            status="active",
+            identity_fingerprint="workspace-b",
+            provider_version="qualification",
+        )
+        session_a = contender.get_valid_session(
+            "workspace-a:architect:model-a",
+            identity_fingerprint="workspace-a",
+            provider_version="qualification",
+            ttl_hours=24,
+            max_turns=10,
+        )
+        session_b = contender.get_valid_session(
+            "workspace-b:architect:model-a",
+            identity_fingerprint="workspace-b",
+            provider_version="qualification",
+            ttl_hours=24,
+            max_turns=10,
+        )
+        invalidated_a = contender.get_valid_session(
+            "workspace-a:architect:model-a",
+            identity_fingerprint="workspace-a-changed",
+            provider_version="qualification",
+            ttl_hours=24,
+            max_turns=10,
+        )
+        session_b_after = contender.get_valid_session(
+            "workspace-b:architect:model-a",
+            identity_fingerprint="workspace-b",
+            provider_version="qualification",
+            ttl_hours=24,
+            max_turns=10,
+        )
+        sessions_isolated = bool(
+            session_a
+            and session_b
+            and session_a["thread_id"] == "thread-a"
+            and session_b["thread_id"] == "thread-b"
+            and invalidated_a is None
+            and session_b_after
+            and session_b_after["thread_id"] == "thread-b"
+        )
 
-    maintenance = _maintenance_in_isolated_state(contender, root / "isolated-state")
-    integrity_ok = bool((maintenance.get("integrity") or {}).get("ok"))
-    maintenance_ok = bool(maintenance.get("ok") and integrity_ok)
+        maintenance = _maintenance_in_isolated_state(contender, root / "isolated-state")
+        integrity_ok = bool((maintenance.get("integrity") or {}).get("ok"))
+        maintenance_ok = bool(maintenance.get("ok") and integrity_ok)
 
-    contender.close()
-    reopened.close()
+    finally:
+        if contender is not None:
+            contender.close()
+        reopened.close()
     checks = {
         "database_is_local": database_is_local,
         "database_reopened": database_reopened,
@@ -495,78 +502,80 @@ def reconciliation_actions_contract(scratch: Path) -> dict[str, Any]:
         workspace = case / "workspace"
         _init_contract_repository(workspace)
         store = DurableStore(path=case / "state.sqlite3")
+        try:
 
-        def provider(**kwargs: Any) -> dict[str, Any]:
-            role = str(kwargs["role_name"])
-            if role == "implementer":
-                (Path(kwargs["cwd"]) / "authorized.txt").write_text(
-                    "authorized\n", encoding="utf-8"
-                )
-            status = {
-                "architect": "planned",
-                "implementer": "implemented",
-                "reviewer": "approved",
-            }[role]
-            return {
-                "ok": True,
-                "thread_id": f"qualification-{role}",
-                "final_report": _contract_report(
-                    status,
-                    f"{role} completed",
-                    write_authorization=(
-                        "required" if role == "architect" else "not_required"
+            def provider(**kwargs: Any) -> dict[str, Any]:
+                role = str(kwargs["role_name"])
+                if role == "implementer":
+                    (Path(kwargs["cwd"]) / "authorized.txt").write_text(
+                        "authorized\n", encoding="utf-8"
+                    )
+                status = {
+                    "architect": "planned",
+                    "implementer": "implemented",
+                    "reviewer": "approved",
+                }[role]
+                return {
+                    "ok": True,
+                    "thread_id": f"qualification-{role}",
+                    "final_report": _contract_report(
+                        status,
+                        f"{role} completed",
+                        write_authorization=(
+                            "required" if role == "architect" else "not_required"
+                        ),
                     ),
-                ),
-            }
+                }
 
-        engine = DurableWorkflowEngine(store=store, provider_runner=provider)
-        snapshot = _contract_snapshot(
-            workspace_mode="automatic", write_isolation="in-place"
-        )
-        paused = engine.run(
-            workspace_root=workspace,
-            task="Exercise explicit write authorization",
-            extra_context="",
-            config_snapshot=snapshot,
-            context7_libraries=None,
-            client_name="qualification",
-            idempotency_key=f"reconciliation-{action}",
-        )
-        run_id = str(paused["run_id"])
-        offered = action in set(
-            (paused.get("reconciliation") or {}).get("allowed_actions") or []
-        )
-        result = engine.run(
-            workspace_root=workspace,
-            task="",
-            extra_context="",
-            config_snapshot=snapshot,
-            context7_libraries=None,
-            client_name="qualification",
-            resume_run_id=run_id,
-            reconciliation_action=action,
-        )
-        expected_status = "approved" if action == "authorize_changes" else "cancelled"
-        expected_event = (
-            "workflow.write_authorization_granted"
-            if action == "authorize_changes"
-            else "workflow.write_authorization_declined"
-        )
-        records.append(
-            _action_record(
-                store,
-                action=action,
-                run_id=run_id,
-                offered=offered,
-                result=result,
-                expected_statuses={expected_status},
-                expected_event=expected_event,
-                extra_ok=(workspace / "authorized.txt").exists()
-                if action == "authorize_changes"
-                else not (workspace / "authorized.txt").exists(),
+            engine = DurableWorkflowEngine(store=store, provider_runner=provider)
+            snapshot = _contract_snapshot(
+                workspace_mode="automatic", write_isolation="in-place"
             )
-        )
-        store.close()
+            paused = engine.run(
+                workspace_root=workspace,
+                task="Exercise explicit write authorization",
+                extra_context="",
+                config_snapshot=snapshot,
+                context7_libraries=None,
+                client_name="qualification",
+                idempotency_key=f"reconciliation-{action}",
+            )
+            run_id = str(paused["run_id"])
+            offered = action in set(
+                (paused.get("reconciliation") or {}).get("allowed_actions") or []
+            )
+            result = engine.run(
+                workspace_root=workspace,
+                task="",
+                extra_context="",
+                config_snapshot=snapshot,
+                context7_libraries=None,
+                client_name="qualification",
+                resume_run_id=run_id,
+                reconciliation_action=action,
+            )
+            expected_status = "approved" if action == "authorize_changes" else "cancelled"
+            expected_event = (
+                "workflow.write_authorization_granted"
+                if action == "authorize_changes"
+                else "workflow.write_authorization_declined"
+            )
+            records.append(
+                _action_record(
+                    store,
+                    action=action,
+                    run_id=run_id,
+                    offered=offered,
+                    result=result,
+                    expected_statuses={expected_status},
+                    expected_event=expected_event,
+                    extra_ok=(workspace / "authorized.txt").exists()
+                    if action == "authorize_changes"
+                    else not (workspace / "authorized.txt").exists(),
+                )
+            )
+        finally:
+            store.close()
 
     def unknown_write_case(action: str, *, worktree: bool) -> None:
         case = root / action
@@ -583,93 +592,95 @@ def reconciliation_actions_contract(scratch: Path) -> dict[str, Any]:
             workspace_mode = "non-git"
             write_isolation = "in-place"
         store = DurableStore(path=case / "state.sqlite3")
-        crashed = False
-
-        def provider(**kwargs: Any) -> dict[str, Any]:
-            nonlocal crashed
-            role = str(kwargs["role_name"])
-            if role == "implementer" and not crashed:
-                crashed = True
-                (Path(kwargs["cwd"]) / "unknown.txt").write_text(
-                    "unknown effect\n", encoding="utf-8"
-                )
-                raise SimulatedProcessCrash(f"qualification:{action}")
-            if role == "implementer":
-                (Path(kwargs["cwd"]) / "result.txt").write_text(
-                    "reconciled\n", encoding="utf-8"
-                )
-            status = {
-                "architect": "planned",
-                "implementer": "implemented",
-                "reviewer": "approved",
-            }[role]
-            return {
-                "ok": True,
-                "thread_id": f"qualification-{role}",
-                "final_report": _contract_report(status, f"{role} completed"),
-            }
-
-        snapshot = _contract_snapshot(
-            workspace_mode=workspace_mode,
-            write_isolation=write_isolation,
-        )
-        engine = DurableWorkflowEngine(store=store, provider_runner=provider)
         try:
-            engine.run(
+            crashed = False
+
+            def provider(**kwargs: Any) -> dict[str, Any]:
+                nonlocal crashed
+                role = str(kwargs["role_name"])
+                if role == "implementer" and not crashed:
+                    crashed = True
+                    (Path(kwargs["cwd"]) / "unknown.txt").write_text(
+                        "unknown effect\n", encoding="utf-8"
+                    )
+                    raise SimulatedProcessCrash(f"qualification:{action}")
+                if role == "implementer":
+                    (Path(kwargs["cwd"]) / "result.txt").write_text(
+                        "reconciled\n", encoding="utf-8"
+                    )
+                status = {
+                    "architect": "planned",
+                    "implementer": "implemented",
+                    "reviewer": "approved",
+                }[role]
+                return {
+                    "ok": True,
+                    "thread_id": f"qualification-{role}",
+                    "final_report": _contract_report(status, f"{role} completed"),
+                }
+
+            snapshot = _contract_snapshot(
+                workspace_mode=workspace_mode,
+                write_isolation=write_isolation,
+            )
+            engine = DurableWorkflowEngine(store=store, provider_runner=provider)
+            try:
+                engine.run(
+                    workspace_root=workspace,
+                    task="Exercise unknown write reconciliation",
+                    extra_context="",
+                    config_snapshot=snapshot,
+                    context7_libraries=None,
+                    client_name="qualification",
+                    idempotency_key=f"reconciliation-{action}",
+                )
+            except SimulatedProcessCrash:
+                pass
+            else:
+                raise RuntimeError(f"The {action} fixture did not interrupt its write.")
+            run_id = only_run_id(store)
+            _expire_run_lease(store, run_id)
+            recover_stale_runs(store)
+            recovered = store.snapshot_run(run_id)
+            offered_actions = set(
+                (recovered["run"].get("reconciliation") or {}).get("allowed_actions")
+                or []
+            )
+            result = engine.run(
                 workspace_root=workspace,
-                task="Exercise unknown write reconciliation",
+                task="",
                 extra_context="",
                 config_snapshot=snapshot,
                 context7_libraries=None,
                 client_name="qualification",
-                idempotency_key=f"reconciliation-{action}",
+                resume_run_id=run_id,
+                reconciliation_action=action,
             )
-        except SimulatedProcessCrash:
-            pass
-        else:
-            raise RuntimeError(f"The {action} fixture did not interrupt its write.")
-        run_id = only_run_id(store)
-        _expire_run_lease(store, run_id)
-        recover_stale_runs(store)
-        recovered = store.snapshot_run(run_id)
-        offered_actions = set(
-            (recovered["run"].get("reconciliation") or {}).get("allowed_actions")
-            or []
-        )
-        result = engine.run(
-            workspace_root=workspace,
-            task="",
-            extra_context="",
-            config_snapshot=snapshot,
-            context7_libraries=None,
-            client_name="qualification",
-            resume_run_id=run_id,
-            reconciliation_action=action,
-        )
-        expected_statuses = {"failed"} if action == "mark_failed" else {"approved"}
-        expected_event = {
-            "accept_existing_changes": "step.reconciled_accepted",
-            "mark_failed": "workflow.reconciliation_marked_failed",
-            "resume_from_checkpoint": "workflow.reconciliation_resolved",
-            "discard_worktree": "workflow.reconciliation_resolved",
-        }[action]
-        records.append(
-            _action_record(
-                store,
-                action=action,
-                run_id=run_id,
-                offered=action in offered_actions,
-                result=result,
-                expected_statuses=expected_statuses,
-                expected_event=expected_event,
-                extra_ok=(
-                    (workspace / "unknown.txt").exists()
-                    if action == "accept_existing_changes"
-                    else True
-                ),
+            expected_statuses = {"failed"} if action == "mark_failed" else {"approved"}
+            expected_event = {
+                "accept_existing_changes": "step.reconciled_accepted",
+                "mark_failed": "workflow.reconciliation_marked_failed",
+                "resume_from_checkpoint": "workflow.reconciliation_resolved",
+                "discard_worktree": "workflow.reconciliation_resolved",
+            }[action]
+            records.append(
+                _action_record(
+                    store,
+                    action=action,
+                    run_id=run_id,
+                    offered=action in offered_actions,
+                    result=result,
+                    expected_statuses=expected_statuses,
+                    expected_event=expected_event,
+                    extra_ok=(
+                        (workspace / "unknown.txt").exists()
+                        if action == "accept_existing_changes"
+                        else True
+                    ),
+                )
             )
-        )
-        store.close()
+        finally:
+            store.close()
 
     def failed_shadow_case(action: str) -> None:
         case = root / action
@@ -677,89 +688,91 @@ def reconciliation_actions_contract(scratch: Path) -> dict[str, Any]:
         workspace.mkdir(parents=True, exist_ok=True)
         (workspace / "document.txt").write_text("original\n", encoding="utf-8")
         store = DurableStore(path=case / "state.sqlite3")
-        failed_once = False
+        try:
+            failed_once = False
 
-        def provider(**kwargs: Any) -> dict[str, Any]:
-            nonlocal failed_once
-            role = str(kwargs["role_name"])
-            if role == "implementer" and not failed_once:
-                failed_once = True
-                (Path(kwargs["cwd"]) / "document.txt").write_text(
-                    "partial\n", encoding="utf-8"
-                )
-                return {"ok": False, "reason": "qualification fixture failure"}
-            if role == "implementer":
-                (Path(kwargs["cwd"]) / "document.txt").write_text(
-                    "continued\n", encoding="utf-8"
-                )
-            status = {
-                "architect": "planned",
-                "implementer": "implemented",
-                "reviewer": "approved",
-            }[role]
-            return {
-                "ok": True,
-                "thread_id": f"qualification-{role}",
-                "final_report": _contract_report(status, f"{role} completed"),
-            }
+            def provider(**kwargs: Any) -> dict[str, Any]:
+                nonlocal failed_once
+                role = str(kwargs["role_name"])
+                if role == "implementer" and not failed_once:
+                    failed_once = True
+                    (Path(kwargs["cwd"]) / "document.txt").write_text(
+                        "partial\n", encoding="utf-8"
+                    )
+                    return {"ok": False, "reason": "qualification fixture failure"}
+                if role == "implementer":
+                    (Path(kwargs["cwd"]) / "document.txt").write_text(
+                        "continued\n", encoding="utf-8"
+                    )
+                status = {
+                    "architect": "planned",
+                    "implementer": "implemented",
+                    "reviewer": "approved",
+                }[role]
+                return {
+                    "ok": True,
+                    "thread_id": f"qualification-{role}",
+                    "final_report": _contract_report(status, f"{role} completed"),
+                }
 
-        snapshot = _contract_snapshot(
-            workspace_mode="current", write_isolation="auto"
-        )
-        engine = DurableWorkflowEngine(store=store, provider_runner=provider)
-        paused = engine.run(
-            workspace_root=workspace,
-            task="Exercise protected-copy reconciliation",
-            extra_context="",
-            config_snapshot=snapshot,
-            context7_libraries=None,
-            client_name="qualification",
-            idempotency_key=f"reconciliation-{action}",
-        )
-        run_id = str(paused["run_id"])
-        offered_actions = set(
-            (paused.get("reconciliation") or {}).get("allowed_actions") or []
-        )
-        result = engine.run(
-            workspace_root=workspace,
-            task="",
-            extra_context="",
-            config_snapshot=snapshot,
-            context7_libraries=None,
-            client_name="qualification",
-            resume_run_id=run_id,
-            reconciliation_action=action,
-        )
-        expected_statuses = {
-            "inspect_shadow": {"awaiting_reconciliation"},
-            "continue_from_shadow": {"approved"},
-            "discard_shadow": {"failed"},
-        }[action]
-        expected_event = {
-            "inspect_shadow": None,
-            "continue_from_shadow": "workflow.reconciliation_resolved",
-            "discard_shadow": "workflow.shadow_discarded",
-        }[action]
-        extra_ok = True
-        if action == "inspect_shadow":
-            extra_ok = bool((result.get("reconciliation") or {}).get("inspected_at"))
-        elif action == "continue_from_shadow":
-            extra_ok = (
-                workspace / "document.txt"
-            ).read_text(encoding="utf-8") == "continued\n"
-        records.append(
-            _action_record(
-                store,
-                action=action,
-                run_id=run_id,
-                offered=action in offered_actions,
-                result=result,
-                expected_statuses=expected_statuses,
-                expected_event=expected_event,
-                extra_ok=extra_ok,
+            snapshot = _contract_snapshot(
+                workspace_mode="current", write_isolation="auto"
             )
-        )
-        store.close()
+            engine = DurableWorkflowEngine(store=store, provider_runner=provider)
+            paused = engine.run(
+                workspace_root=workspace,
+                task="Exercise protected-copy reconciliation",
+                extra_context="",
+                config_snapshot=snapshot,
+                context7_libraries=None,
+                client_name="qualification",
+                idempotency_key=f"reconciliation-{action}",
+            )
+            run_id = str(paused["run_id"])
+            offered_actions = set(
+                (paused.get("reconciliation") or {}).get("allowed_actions") or []
+            )
+            result = engine.run(
+                workspace_root=workspace,
+                task="",
+                extra_context="",
+                config_snapshot=snapshot,
+                context7_libraries=None,
+                client_name="qualification",
+                resume_run_id=run_id,
+                reconciliation_action=action,
+            )
+            expected_statuses = {
+                "inspect_shadow": {"awaiting_reconciliation"},
+                "continue_from_shadow": {"approved"},
+                "discard_shadow": {"failed"},
+            }[action]
+            expected_event = {
+                "inspect_shadow": None,
+                "continue_from_shadow": "workflow.reconciliation_resolved",
+                "discard_shadow": "workflow.shadow_discarded",
+            }[action]
+            extra_ok = True
+            if action == "inspect_shadow":
+                extra_ok = bool((result.get("reconciliation") or {}).get("inspected_at"))
+            elif action == "continue_from_shadow":
+                extra_ok = (
+                    workspace / "document.txt"
+                ).read_text(encoding="utf-8") == "continued\n"
+            records.append(
+                _action_record(
+                    store,
+                    action=action,
+                    run_id=run_id,
+                    offered=action in offered_actions,
+                    result=result,
+                    expected_statuses=expected_statuses,
+                    expected_event=expected_event,
+                    extra_ok=extra_ok,
+                )
+            )
+        finally:
+            store.close()
 
     def apply_shadow_case() -> None:
         action = "apply_shadow_changes"
@@ -768,65 +781,67 @@ def reconciliation_actions_contract(scratch: Path) -> dict[str, Any]:
         workspace.mkdir(parents=True, exist_ok=True)
         (workspace / "document.txt").write_text("original\n", encoding="utf-8")
         store = DurableStore(path=case / "state.sqlite3")
+        try:
 
-        def provider(**kwargs: Any) -> dict[str, Any]:
-            role = str(kwargs["role_name"])
-            if role == "implementer":
-                (Path(kwargs["cwd"]) / "document.txt").write_text(
-                    "verified checkpoint\n", encoding="utf-8"
-                )
-            status = {
-                "architect": "planned",
-                "implementer": "implemented",
-                "reviewer": "needs_changes",
-            }[role]
-            return {
-                "ok": True,
-                "thread_id": f"qualification-{role}",
-                "final_report": _contract_report(status, f"{role} completed"),
-            }
+            def provider(**kwargs: Any) -> dict[str, Any]:
+                role = str(kwargs["role_name"])
+                if role == "implementer":
+                    (Path(kwargs["cwd"]) / "document.txt").write_text(
+                        "verified checkpoint\n", encoding="utf-8"
+                    )
+                status = {
+                    "architect": "planned",
+                    "implementer": "implemented",
+                    "reviewer": "needs_changes",
+                }[role]
+                return {
+                    "ok": True,
+                    "thread_id": f"qualification-{role}",
+                    "final_report": _contract_report(status, f"{role} completed"),
+                }
 
-        snapshot = _contract_snapshot(
-            workspace_mode="current", write_isolation="auto"
-        )
-        engine = DurableWorkflowEngine(store=store, provider_runner=provider)
-        paused = engine.run(
-            workspace_root=workspace,
-            task="Exercise verified protected-copy application",
-            extra_context="",
-            config_snapshot=snapshot,
-            context7_libraries=None,
-            client_name="qualification",
-            idempotency_key=f"reconciliation-{action}",
-        )
-        run_id = str(paused["run_id"])
-        offered_actions = set(
-            (paused.get("reconciliation") or {}).get("allowed_actions") or []
-        )
-        result = engine.run(
-            workspace_root=workspace,
-            task="",
-            extra_context="",
-            config_snapshot=snapshot,
-            context7_libraries=None,
-            client_name="qualification",
-            resume_run_id=run_id,
-            reconciliation_action=action,
-        )
-        records.append(
-            _action_record(
-                store,
-                action=action,
-                run_id=run_id,
-                offered=action in offered_actions,
-                result=result,
-                expected_statuses={"needs_changes"},
-                expected_event="workflow.shadow_applied_by_operator",
-                extra_ok=(workspace / "document.txt").read_text(encoding="utf-8")
-                == "verified checkpoint\n",
+            snapshot = _contract_snapshot(
+                workspace_mode="current", write_isolation="auto"
             )
-        )
-        store.close()
+            engine = DurableWorkflowEngine(store=store, provider_runner=provider)
+            paused = engine.run(
+                workspace_root=workspace,
+                task="Exercise verified protected-copy application",
+                extra_context="",
+                config_snapshot=snapshot,
+                context7_libraries=None,
+                client_name="qualification",
+                idempotency_key=f"reconciliation-{action}",
+            )
+            run_id = str(paused["run_id"])
+            offered_actions = set(
+                (paused.get("reconciliation") or {}).get("allowed_actions") or []
+            )
+            result = engine.run(
+                workspace_root=workspace,
+                task="",
+                extra_context="",
+                config_snapshot=snapshot,
+                context7_libraries=None,
+                client_name="qualification",
+                resume_run_id=run_id,
+                reconciliation_action=action,
+            )
+            records.append(
+                _action_record(
+                    store,
+                    action=action,
+                    run_id=run_id,
+                    offered=action in offered_actions,
+                    result=result,
+                    expected_statuses={"needs_changes"},
+                    expected_event="workflow.shadow_applied_by_operator",
+                    extra_ok=(workspace / "document.txt").read_text(encoding="utf-8")
+                    == "verified checkpoint\n",
+                )
+            )
+        finally:
+            store.close()
 
     with _isolated_runtime_environment(root / "runtime"):
         authorization_case("authorize_changes")
