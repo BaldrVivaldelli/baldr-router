@@ -14,7 +14,7 @@ dependencies = [
   # Capped deliberately: mcp 2.x renamed FastMCP to MCPServer and changed other
   # APIs, so server.py does not import under it. Without the cap a fresh install
   # resolves 2.x from PyPI and the router fails at startup.
-  "mcp>=1.10.0,<2",
+  "mcp>=1.10.0,<3",
   # Versioned contracts are packaged in the wheel and must be enforced at
   # runtime on external payloads, not only in tests.
   "jsonschema>=4.23"
