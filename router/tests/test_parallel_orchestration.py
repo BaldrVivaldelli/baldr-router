@@ -12,6 +12,12 @@ from baldr_router.config import AppConfig, ExecutionProfileConfig
 from baldr_router.durability.engine import DurableWorkflowEngine, _resolved_snapshot
 from baldr_router.durability.store import DurableStore
 
+# Synchronization budget, not a performance assertion. A healthy run sets these
+# events in milliseconds; the bound only exists so a genuine deadlock fails
+# instead of hanging. Windows CI runs the suite roughly seven times slower than
+# Linux, where five seconds was not enough to reach the review phase.
+_SYNC_TIMEOUT = 60.0
+
 
 def _repo(path: Path) -> Path:
     path.mkdir()
@@ -285,7 +291,7 @@ def test_cancellation_interrupts_a_parallel_read_phase_and_finalizes_the_run(
                 active += 1
                 if active >= 2:
                     review_started.set()
-            release_reviewers.wait(timeout=5)
+            release_reviewers.wait(timeout=_SYNC_TIMEOUT)
         return {
             "ok": True,
             "run_id": f"provider-{kwargs['profile_name']}",
@@ -307,7 +313,7 @@ def test_cancellation_interrupts_a_parallel_read_phase_and_finalizes_the_run(
 
     worker = threading.Thread(target=run, name="parallel-cancel-test")
     worker.start()
-    assert review_started.wait(timeout=5)
+    assert review_started.wait(timeout=_SYNC_TIMEOUT)
     row = (
         store.connect()
         .execute("SELECT id FROM workflow_runs ORDER BY created_at DESC LIMIT 1")
@@ -316,7 +322,7 @@ def test_cancellation_interrupts_a_parallel_read_phase_and_finalizes_the_run(
     assert row is not None
     cancel_result = engine.request_cancel(str(row["id"]), reason="test cancellation")
     release_reviewers.set()
-    worker.join(timeout=5)
+    worker.join(timeout=_SYNC_TIMEOUT)
 
     assert not worker.is_alive()
     assert cancel_result["status"] in {"cancelling", "cancelled"}

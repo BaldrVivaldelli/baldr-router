@@ -12,7 +12,8 @@ license = "MIT"
 authors = [{ name = "Baldr" }]
 dependencies = [
   "baldr-router>=0.20.1,<0.21.0",
-  "mcp>=1.10.0"
+  # Same cap as the router: mcp 2.x is a breaking rename of the server API.
+  "mcp>=1.10.0,<2"
 ]
 
 [project.scripts]
@@ -29,7 +30,7 @@ testpaths = ["tests"]
 pythonpath = ["src", "../../../router/src"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "ruff>=0.9"]
+dev = ["pytest>=8.0", "ruff>=0.9,<0.16"]
 
 [tool.uv.sources]
 baldr-router = { workspace = true }
