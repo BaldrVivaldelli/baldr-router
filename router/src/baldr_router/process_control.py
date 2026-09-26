@@ -281,6 +281,17 @@ def _signal_handler(signum: int, frame: Any) -> None:
     raise SystemExit(128 + signum)
 
 
+def install_signal_handlers() -> None:
+    """Opt in from a top-level runtime before any process is spawned.
+
+    Handlers are installed lazily on the first spawn, and only from the main
+    thread. A runtime that spawns from a worker — the console starts workflows
+    on one — would therefore never get them, and a SIGTERM would skip the
+    atexit cleanup and strand the provider's process tree.
+    """
+    _install_handlers()
+
+
 def _install_handlers() -> None:
     """Install handlers only when explicitly requested by a top-level runtime.
 

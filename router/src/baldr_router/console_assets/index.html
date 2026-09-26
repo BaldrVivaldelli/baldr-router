@@ -148,6 +148,19 @@ nav.tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: 
 .option .desc { color: var(--muted); font-size: 12px; margin-top: 2px; }
 .option .flag { font-size: 11px; color: var(--accent); margin-left: 6px; font-weight: 600; }
 .option .flag.warn { color: var(--attention); }
+.composer { display: flex; gap: 8px; align-items: flex-end; margin-top: 14px; }
+.composer textarea {
+  flex: 1; font: inherit; font-size: 14px; resize: vertical; min-height: 44px;
+  padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line);
+  background: var(--bg); color: var(--ink);
+}
+.composer textarea:focus { outline: none; border-color: var(--accent); }
+.composer button {
+  font: inherit; font-size: 13px; cursor: pointer; border-radius: 8px; padding: 10px 16px;
+  border: 1px solid var(--accent); background: var(--accent); color: #fff; white-space: nowrap;
+}
+.composer button:disabled { opacity: .55; cursor: progress; }
+.composer-hint { font-size: 12px; color: var(--muted); margin: 6px 0 0; }
 .action-hint { margin-top: 8px; font-size: 12px; color: var(--muted); }
 .locked { max-width: 640px; margin: 48px auto; }
 .locked code {
@@ -172,6 +185,7 @@ nav.tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: 
     <h2>Tareas</h2>
     <ul class="items" id="items"></ul>
     <p class="empty" id="items-empty" hidden>Todavía no hay tareas en este alcance.</p>
+    <div id="new-task"></div>
   </section>
   <section id="detail" aria-live="polite"></section>
 </main>
@@ -213,6 +227,8 @@ let timer = null;
 let lastStates = new Map();
 let notified = false;
 let lastWorkbench = null;
+let canCompose = false;
+const drafts = new Map();
 
 const el = (tag, props = {}, children = []) => {
   const node = document.createElement(tag);
@@ -458,6 +474,20 @@ function renderDetail(selected, selectedError) {
   if (report) {
     panel.append(el('div', { class: 'section' }, [el('h2', { text: 'Resultado' }), report]));
   }
+
+  // Continuing is offered once the item is no longer working, because a turn
+  // is a follow-up to a result, not an interruption.
+  if (canCompose && ['complete', 'attention', 'cancelled'].includes(progress.overall_state)) {
+    panel.append(el('div', { class: 'section' }, [
+      el('h2', { text: 'Seguir esta tarea' }),
+      composer({
+        itemId: selected.id,
+        placeholder: 'Pedile una corrección o el próximo paso…',
+        submitLabel: 'Continuar',
+        hint: 'Se agrega como un turno de esta misma tarea, conservando su historia.',
+      }),
+    ]));
+  }
   host.append(panel);
 }
 
@@ -572,6 +602,87 @@ function renderSettings(workbench) {
   }));
 }
 
+// The composer is the same control in two places: at the top it starts a new
+// task, inside a finished item it adds a durable turn to that one. There is no
+// separate idea of a conversation, because the item already is one.
+function composer({ itemId, placeholder, submitLabel, hint }) {
+  // The view re-renders every few seconds, so an unsent draft has to outlive
+  // its textarea or it would vanish mid-sentence.
+  const draftKey = itemId || 'new';
+  const textarea = el('textarea', { rows: '2', placeholder, 'aria-label': placeholder });
+  textarea.value = drafts.get(draftKey) || '';
+  textarea.addEventListener('input', () => drafts.set(draftKey, textarea.value));
+  const button = el('button', { type: 'button', text: submitLabel });
+  const box = el('div', {}, [
+    el('div', { class: 'composer' }, [textarea, button]),
+    hint ? el('p', { class: 'composer-hint', text: hint }) : null,
+  ]);
+
+  async function send() {
+    const task = textarea.value.trim();
+    if (!task) { textarea.focus(); return; }
+    const existing = box.querySelector('.action-error');
+    if (existing) existing.remove();
+    button.disabled = true;
+    textarea.disabled = true;
+    try {
+      const response = await fetch(new URL('/v1/compose', location.origin), {
+        method: 'POST',
+        credentials: 'omit',
+        headers: { 'Content-Type': 'application/json', [TOKEN_HEADER]: token },
+        body: JSON.stringify(itemId ? { task, work_item_id: itemId } : { task }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || payload.ok === false) {
+        const detail = (payload.error && payload.error.message) || ('HTTP ' + response.status);
+        box.append(el('div', { class: 'action-error', text: 'No se pudo enviar: ' + detail }));
+        return;
+      }
+      textarea.value = '';
+      drafts.delete(draftKey);
+      if (payload.work_item_id) {
+        selectedId = payload.work_item_id;
+        const url = new URL(location.href);
+        url.searchParams.set('work_item_id', selectedId);
+        history.replaceState(null, '', url);
+      }
+      await refresh();
+    } catch (error) {
+      box.append(el('div', { class: 'action-error', text: 'No se pudo enviar: ' + error.message }));
+    } finally {
+      button.disabled = false;
+      textarea.disabled = false;
+    }
+  }
+
+  button.addEventListener('click', send);
+  textarea.addEventListener('keydown', (event) => {
+    // Enter sends; a newline needs the modifier, as in every chat.
+    if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); send(); }
+  });
+  return box;
+}
+
+function renderNewTask() {
+  const host = document.getElementById('new-task');
+  // Rebuilding this on every poll would fight whoever is typing in it.
+  if (host.dataset.ready === String(canCompose)) return;
+  host.dataset.ready = String(canCompose);
+  host.replaceChildren();
+  if (!canCompose) {
+    host.append(el('p', {
+      class: 'composer-hint',
+      text: 'Arrancá la consola con --workspace-root para crear tareas desde acá.',
+    }));
+    return;
+  }
+  host.append(composer({
+    placeholder: 'Pedile algo a Baldr…',
+    submitLabel: 'Empezar',
+    hint: 'Usa la configuración de este workspace. Enter envía, Shift+Enter agrega una línea.',
+  }));
+}
+
 function showView(name) {
   document.getElementById('view-tasks').hidden = name !== 'tasks';
   document.getElementById('view-settings').hidden = name !== 'settings';
@@ -605,6 +716,8 @@ async function refresh() {
     renderItems(workbench.items || []);
     renderDetail(workbench.selected, workbench.selected_error);
     lastWorkbench = workbench;
+    canCompose = Boolean(workbench.preferences);
+    renderNewTask();
     renderSettings(workbench);
     announce(workbench.items || []);
     foot.className = 'foot';

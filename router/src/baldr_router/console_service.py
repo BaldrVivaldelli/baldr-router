@@ -40,6 +40,7 @@ from urllib.parse import parse_qs, quote, urlparse
 
 from .diagnostics import get_logger, log_suppressed
 from .facade import facade_run, facade_status_report
+from .process_control import install_signal_handlers
 from .redaction import redact_text
 from .work_item_progress import compact_preferences
 from .work_items import RECONCILIATION_ACTION_ORDER, WorkItemService, workbench_options
@@ -69,6 +70,12 @@ _PUBLIC_ASSETS: dict[str, tuple[str, str]] = {
 _API_ROUTES = frozenset({"/v1/workbench"})
 _ACTION_ROUTE = "/v1/actions"
 _PREFERENCES_ROUTE = "/v1/preferences"
+_COMPOSE_ROUTE = "/v1/compose"
+_MAX_TASK = 16_384
+# A workflow runs for minutes, so the request that starts one cannot wait for
+# it. Each start gets a worker, and this bounds how many the console will hold
+# at once; the durable layer already refuses to start an item twice.
+_MAX_CONCURRENT_STARTS = 4
 # Each of these is a per-workspace preference whose legal values the router
 # already publishes with human copy. Trust, secrets and the global config stay
 # out: granting trust from a page is an escalation, an API key needs a
@@ -135,6 +142,7 @@ class ConsoleHTTPServer(ThreadingHTTPServer):
     ) -> None:
         self.workspace_root = workspace_root
         self.token = token or new_console_token()
+        self.starts = threading.BoundedSemaphore(_MAX_CONCURRENT_STARTS)
         super().__init__(address, handler_class)
 
 
@@ -419,6 +427,84 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             return
         self._json({"ok": True, "preferences": compact_preferences(preferences)})
 
+    def _start_in_background(self, work_item_id: str) -> None:
+        console = self._console
+
+        def run() -> None:
+            try:
+                WorkItemService().start(work_item_id, client_name=CONSOLE_CLIENT)
+            except Exception:
+                # The durable record is the outcome; this only keeps the reason
+                # from vanishing when nobody is watching the thread.
+                log_suppressed(
+                    _LOG, "Console-started work item failed", work_item_id=work_item_id
+                )
+            finally:
+                console.starts.release()
+
+        threading.Thread(
+            target=run, name=f"baldr-console-start-{work_item_id}", daemon=True
+        ).start()
+
+    def _compose(self) -> None:
+        workspace_root = self._console.workspace_root
+        if not workspace_root:
+            self._error(
+                409,
+                "workspace_scope_required",
+                "Start the console with --workspace-root to create work here.",
+            )
+            return
+        payload = self._read_action_request()
+        if payload is None:
+            return
+        task = str(payload.get("task") or "").strip()
+        work_item_id = str(payload.get("work_item_id") or "").strip()
+        if not task:
+            self._error(400, "task_required", "Write what Baldr should do.")
+            return
+        if len(task) > _MAX_TASK or len(work_item_id) > _MAX_ITEM_ID:
+            self._error(413, "body_too_large", "The request is too long.")
+            return
+        if not self._console.starts.acquire(blocking=False):
+            self._error(
+                429,
+                "too_many_starts",
+                "The console is already starting as much work as it holds at once.",
+            )
+            return
+        service = WorkItemService()
+        try:
+            if work_item_id:
+                # A follow-up is a durable turn on the same item, which is why
+                # the console needs no separate idea of a conversation.
+                item = service.continue_item(
+                    work_item_id,
+                    workspace_root=workspace_root,
+                    request=task,
+                    source=CONSOLE_CLIENT,
+                )
+            else:
+                # Created without overrides on purpose: the workspace
+                # preferences configured on the settings tab are the defaults.
+                item = service.create(
+                    workspace_root=workspace_root,
+                    task=task,
+                    source=CONSOLE_CLIENT,
+                )
+        except WorkspacePolicyError as exc:
+            self._console.starts.release()
+            self._error(409, exc.code or "workspace_policy", str(exc))
+            return
+        except (KeyError, ValueError, OSError) as exc:
+            self._console.starts.release()
+            self._error(400, "compose_rejected", redact_text(str(exc)))
+            return
+        created_id = str(item["id"])
+        self._start_in_background(created_id)
+        # 202: the item exists and is durable, the workflow has only begun.
+        self._json({"ok": True, "work_item_id": created_id, "started": True}, 202)
+
     def _asset(self, name: str, content_type: str) -> None:
         try:
             # Read per request on purpose: editing the page and refreshing the
@@ -463,6 +549,9 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             return
         if route == _PREFERENCES_ROUTE:
             self._preferences()
+            return
+        if route == _COMPOSE_ROUTE:
+            self._compose()
             return
         self._error(404, "not_found", "Unknown console route.")
 
@@ -555,6 +644,10 @@ def serve_console(
         allow_non_loopback=allow_non_loopback,
         token=token,
     )
+    # Workflows start on worker threads, and the lazy install only ever runs on
+    # the main thread, so the opt-in has to happen here or a SIGTERM would
+    # strand a provider's process tree.
+    install_signal_handlers()
     print(
         json.dumps(
             {

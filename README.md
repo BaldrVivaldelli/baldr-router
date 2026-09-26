@@ -582,8 +582,13 @@ tiene efectos: cada `GET` pasa por la intención `status` congelada en su forma
 Las decisiones sí se pueden responder desde la página: contestar una ejecución
 bloqueada o detener una en curso. **Nada de lo que manda el navegador decide**:
 el router recalcula qué acciones permite ese item y rechaza el resto con `409`.
-Crear y continuar trabajo necesita el composer, así que sigue siendo de la CLI
-y el editor.
+
+El composer aparece en dos lugares: arriba para empezar una tarea, y dentro de
+una tarea terminada para seguirla. Seguirla **no abre otra conversación**: se
+agrega como un turno durable del mismo work item, conservando su historia. Un
+workflow tarda minutos, así que la petición responde `202` apenas el item es
+durable y el trabajo sigue de fondo; la página lo ve avanzar sola. Los
+borradores sin enviar sobreviven a esas actualizaciones.
 
 La pestaña **Configuración** ajusta las cuatro preferencias por workspace
 —protección de cambios, nivel de detalle, ayuda adicional y equipo— con las
