@@ -256,6 +256,14 @@ The reconciliation underneath is the one that already existed:
 baldr-router agent sync --source declarative --path baldr-agents.toml [--apply]
 ```
 
+The console's **Agentes** tab drafts one without writing anything. It answers
+what the declaration would mean before it is committed — which phases the agent
+could cover, computed with the resolver's own rules, and which of the tools it
+asked for it would actually be granted — and hands back the block to paste.
+The declaration keeps what was asked for even where a tool will be refused: the
+file records intent and the router applies what it grants, and a block silently
+rewritten would make the file lie about what somebody meant.
+
 Editing an agent in place is a conflict, not an update. An exact version is
 immutable, so a changed `tools` line under the same reference is refused and
 the plan says so; publishing `@1.1.0` instead registers the new agent and

@@ -356,3 +356,146 @@ def test_the_page_says_when_nothing_is_registered() -> None:
     assert "baldr-router agent publish" in page
     # A pin beats automatic selection, which is worth stating once.
     assert "manda incluso" in page
+
+
+# --- drafting one, without writing anything -----------------------------------
+
+
+def _draft(console: str, body: object) -> tuple[int, dict]:
+    request = urllib.request.Request(
+        f"{console}/v1/agent-draft",
+        data=json.dumps(body).encode(),
+        headers={TOKEN_HEADER: TOKEN, "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return int(response.status), json.loads(response.read() or b"{}")
+    except urllib.error.HTTPError as error:
+        return int(error.code), json.loads(error.read() or b"{}")
+
+
+REVIEWER_DRAFT = {
+    "ref": "local://equipo/revisor@1.0.0",
+    "owner": "equipo-plataforma",
+    "description": "Revisa la superficie pública",
+    "capabilities": ["workspace.read", "role.reviewer"],
+    "effect_mode": "read-only",
+    "provider": "claude",
+    "model": "opus",
+    "tools": "Read,Grep,Bash",
+    "instructions": "Mirá autenticación.",
+}
+
+
+def test_a_draft_says_which_phases_it_could_cover(console: str) -> None:
+    """Computed with the resolver's rules, so the form cannot promise a role
+    the run would refuse."""
+
+    status, payload = _draft(console, REVIEWER_DRAFT)
+
+    assert status == 200, payload
+    assert payload["valid"] is True
+    eligible = {
+        entry["role"] for entry in payload["effect"]["roles"] if entry["eligible"]
+    }
+    assert eligible == {"reviewer"}
+    # And says why not, rather than leaving a blank.
+    refused = {
+        entry["role"]: entry["reason"]
+        for entry in payload["effect"]["roles"]
+        if not entry["eligible"]
+    }
+    assert refused["implementer"]
+    assert refused["architect"]
+
+
+def test_a_draft_says_which_tools_it_would_actually_get(console: str) -> None:
+    _, payload = _draft(console, REVIEWER_DRAFT)
+
+    effect = payload["effect"]
+    assert effect["allowed_tools"] == ["Read", "Grep"]
+    assert effect["refused_tools"] == ["Bash"]
+    assert effect["tools_honored"] is True
+
+
+def test_the_declaration_keeps_what_was_asked_for(console: str) -> None:
+    """The file records intent; the router applies what it grants.
+
+    Rewriting the block to drop a refused tool would make the file lie about
+    what somebody meant, and would teach them nothing about why.
+    """
+    _, payload = _draft(console, REVIEWER_DRAFT)
+
+    assert 'tools = "Read,Grep,Bash"' in payload["toml"]
+
+
+def test_a_provider_that_ignores_tools_says_so(console: str) -> None:
+    """A restriction that changes nothing reads like protection."""
+
+    _, payload = _draft(console, {**REVIEWER_DRAFT, "provider": "codex"})
+
+    assert payload["effect"]["tools_honored"] is False
+
+
+def test_an_invalid_draft_answers_with_its_reason(console: str) -> None:
+    status, payload = _draft(
+        console,
+        {
+            "ref": "local://equipo/x@1.0.0",
+            "owner": "e",
+            "provider": "claude",
+            "capabilities": ["workspace.read"],
+            "effect_mode": "workspace-write",
+        },
+    )
+
+    assert status == 200
+    assert payload["valid"] is False
+    assert "workspace.write" in payload["errors"][0]
+
+
+def test_drafting_writes_nothing(console: str) -> None:
+    """The console is where the decision is worked out, not where it lives."""
+
+    from baldr_router.agent_registry import agent_registry_status
+
+    _draft(console, REVIEWER_DRAFT)
+
+    assert agent_registry_status()["agent_count"] == 0
+
+
+def test_drafting_requires_the_session_token(console: str) -> None:
+    request = urllib.request.Request(
+        f"{console}/v1/agent-draft",
+        data=json.dumps(REVIEWER_DRAFT).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with pytest.raises(urllib.error.HTTPError) as caught:
+        urllib.request.urlopen(request, timeout=30)
+
+    assert caught.value.code == 401
+
+
+def test_a_block_the_console_accepts_is_a_file_that_syncs(
+    console: str, tmp_path: Path
+) -> None:
+    """One format, one opinion.
+
+    A console that showed a draft as valid and a sync that then refused it
+    would be two answers about the same file, and the second one arrives after
+    somebody committed the first.
+    """
+    from baldr_router.agent_sources import AgentSourceContext, DeclarativeAgentSource
+
+    _, payload = _draft(console, REVIEWER_DRAFT)
+    (tmp_path / "baldr-agents.toml").write_text(payload["toml"], encoding="utf-8")
+
+    result = DeclarativeAgentSource(path=Path("baldr-agents.toml")).discover(
+        context=AgentSourceContext(tmp_path)
+    )
+
+    assert len(result.candidates) == 1
+    # The same bytes describe the same agent, down to its identity.
+    assert result.candidates[0].manifest.digest == payload["digest"]

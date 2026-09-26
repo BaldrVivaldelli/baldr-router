@@ -262,3 +262,56 @@ def test_more_agents_than_the_limit_are_reported(tmp_path: Path) -> None:
 
     assert len(result.candidates) == 2
     assert result.warnings[0].code == "candidate-limit-reached"
+
+
+# --- writing the file back out ------------------------------------------------
+
+
+def test_a_rendered_block_parses_back_into_the_same_agent(tmp_path: Path) -> None:
+    """The writer lives beside the reader so the format round-trips.
+
+    Quotes and newlines in a description or an instruction are ordinary, and a
+    renderer that broke on them would produce a file nobody could sync.
+    """
+    from baldr_router.agent_sources import (
+        manifest_from_declaration,
+        render_declaration_toml,
+    )
+
+    entry = {
+        "ref": "local://equipo/revisor@1.0.0",
+        "owner": "equipo",
+        "description": 'Revisa "la superficie" pública',
+        "capabilities": ["workspace.read", "role.reviewer"],
+        "provider": "claude",
+        "model": "opus",
+        "tools": "Read,Grep",
+        "instructions": "Mirá auth.\nY el manejo de secretos.",
+    }
+    block = render_declaration_toml(entry)
+    parsed = _discover(tmp_path, block).candidates[0].manifest
+
+    assert parsed.digest == manifest_from_declaration(entry).digest
+    assert parsed.target["instructions"] == "Mirá auth.\nY el manejo de secretos."
+
+
+def test_a_read_only_agent_renders_without_saying_so(tmp_path: Path) -> None:
+    """The safe default stays implicit, so a writing agent stands out."""
+
+    from baldr_router.agent_sources import render_declaration_toml
+
+    quiet = render_declaration_toml(
+        {"ref": "local://e/a@1.0.0", "owner": "e", "provider": "codex"}
+    )
+    loud = render_declaration_toml(
+        {
+            "ref": "local://e/b@1.0.0",
+            "owner": "e",
+            "provider": "codex",
+            "effect_mode": "workspace-write",
+            "capabilities": ["workspace.read", "workspace.write"],
+        }
+    )
+
+    assert "effect_mode" not in quiet
+    assert 'effect_mode = "workspace-write"' in loud

@@ -128,6 +128,7 @@ class ClaudeProvider:
         supports_structured_output=True,
         # Every invocation is one headless print; nothing is resumed yet.
         supports_sessions=False,
+        supports_tool_restriction=True,
         # Verified against the CLI rather than assumed: a read-only phase runs
         # with the command-running tools removed and the editing tools denied,
         # so the capability is absent rather than discouraged.

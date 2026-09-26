@@ -16,6 +16,10 @@ class ProviderCapabilities:
     supports_workspace_write: bool = False
     supports_structured_output: bool = True
     supports_sessions: bool = False
+    # Whether a declared tool list actually narrows what this provider may use.
+    # A provider that ignores one should say so, rather than let a restriction
+    # be configured that changes nothing.
+    supports_tool_restriction: bool = False
     read_only_enforcement: str = "advisory"
     write_enforcement: str = "advisory"
 

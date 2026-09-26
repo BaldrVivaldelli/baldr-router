@@ -70,7 +70,7 @@ select.picker:hover { border-color: var(--accent); }
 }
 .pill b { color: var(--ink); font-weight: 600; }
 main { display: grid; grid-template-columns: minmax(240px, 320px) 1fr; gap: 16px; padding: 16px; align-items: start; }
-#view-settings { grid-template-columns: minmax(0, 720px); }
+#view-settings, #view-agents { grid-template-columns: minmax(0, 760px); }
 @media (max-width: 760px) { main { grid-template-columns: 1fr; } header { padding: 12px 16px; } }
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px; }
 ul.items { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
@@ -175,6 +175,26 @@ nav.tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: 
   padding: 8px 10px; margin: 0 0 10px; font-size: 12px;
 }
 .stale-router { margin: 16px 16px -4px; font-size: 13px; }
+.field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+@media (max-width: 620px) { .field-row { grid-template-columns: 1fr; } }
+textarea.field-input {
+  width: 100%; font: inherit; font-size: 13px; resize: vertical; min-height: 60px;
+  padding: 7px 9px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--panel); color: var(--ink);
+}
+textarea.field-input:focus { outline: none; border-color: var(--accent); }
+pre.block {
+  margin: 8px 0 0; padding: 11px; overflow-x: auto; font-size: 12px; line-height: 1.5;
+  background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
+  white-space: pre; color: var(--ink);
+}
+.verdict { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.verdict .tag {
+  border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px; font-size: 12px;
+}
+.verdict .tag.yes { border-color: var(--done); color: var(--done); }
+.verdict .tag.no { border-color: var(--idle); color: var(--muted); }
+.verdict .tag.warn { border-color: var(--attention); color: var(--attention); }
 .composer { display: flex; gap: 8px; align-items: flex-end; margin-top: 14px; }
 .composer textarea {
   flex: 1; font: inherit; font-size: 14px; resize: vertical; min-height: 44px;
@@ -237,6 +257,7 @@ ul.entries .meta { color: var(--muted); font-size: 11px; margin-left: auto; whit
   <nav class="tabs" id="tabs" role="tablist">
     <button type="button" role="tab" data-view="tasks" aria-selected="true">Tareas</button>
     <button type="button" role="tab" data-view="settings" aria-selected="false">Configuración</button>
+    <button type="button" role="tab" data-view="agents" aria-selected="false">Agentes</button>
   </nav>
   <button class="ghost" id="notify" type="button" hidden>Avisarme</button>
 </header>
@@ -252,6 +273,9 @@ ul.entries .meta { color: var(--muted); font-size: 11px; margin-left: auto; whit
 </main>
 <main id="view-settings" hidden>
   <section class="panel" id="settings" aria-label="Configuración"></section>
+</main>
+<main id="view-agents" hidden>
+  <section class="panel" id="agents-page" aria-label="Agentes"></section>
 </main>
 <p class="foot" id="foot"></p>
 <script>
@@ -1484,7 +1508,7 @@ function renderNewTask() {
 const NEEDED_ROUTES = [
   '/v1/workbench', '/v1/context', '/v1/agents',
   '/v1/actions', '/v1/preferences', '/v1/compose',
-  '/v1/providers', '/v1/profiles',
+  '/v1/providers', '/v1/profiles', '/v1/agent-draft',
 ];
 
 function checkRouterIsCurrent(routes) {
@@ -1501,17 +1525,274 @@ function checkRouterIsCurrent(routes) {
   }
 }
 
+// The agents page is where somebody works out what an agent should be allowed
+// to do. Where that decision lives is the file in their repository, so this
+// screen writes nothing: it answers, and hands back the block to commit.
+const draft = {
+  ref: 'local://equipo/revisor@1.0.0',
+  owner: '',
+  description: '',
+  roles: new Set(['reviewer']),
+  can_write: false,
+  provider: '',
+  model: '',
+  tools: 'Read,Grep',
+  instructions: '',
+};
+let draftAnswer = null;
+let draftPending = null;
+
+function draftDeclaration() {
+  const capabilities = ['workspace.read'];
+  if (draft.can_write) capabilities.push('workspace.write');
+  for (const role of ['architect', 'implementer', 'reviewer']) {
+    if (draft.roles.has(role)) capabilities.push('role.' + role);
+  }
+  const entry = {
+    ref: draft.ref.trim(),
+    owner: draft.owner.trim(),
+    description: draft.description.trim(),
+    capabilities,
+    effect_mode: draft.can_write ? 'workspace-write' : 'read-only',
+    provider: draft.provider,
+  };
+  for (const key of ['model', 'tools', 'instructions']) {
+    if (draft[key].trim()) entry[key] = draft[key].trim();
+  }
+  return entry;
+}
+
+async function askAboutDraft() {
+  try {
+    const response = await fetch(new URL('/v1/agent-draft', location.origin), {
+      method: 'POST',
+      credentials: 'omit',
+      headers: { 'Content-Type': 'application/json', [TOKEN_HEADER]: token },
+      body: JSON.stringify(draftDeclaration()),
+    });
+    const payload = await response.json().catch(() => ({}));
+    draftAnswer = response.ok ? payload
+      : { valid: false, errors: [(payload.error && payload.error.message) || ('HTTP ' + response.status)] };
+  } catch (error) {
+    draftAnswer = { valid: false, errors: [error.message] };
+  }
+  renderDraftAnswer();
+}
+
+// Typing should not ask on every keystroke, and should not make somebody wait
+// for a pause they did not know to take.
+function draftChanged() {
+  if (draftPending) clearTimeout(draftPending);
+  draftPending = setTimeout(askAboutDraft, 350);
+}
+
+function renderDraftAnswer() {
+  const host = document.getElementById('draft-answer');
+  if (!host) return;
+  host.replaceChildren();
+  const answer = draftAnswer;
+  if (!answer) return;
+  if (!answer.valid) {
+    for (const message of answer.errors || []) {
+      host.append(el('p', { class: 'action-error', text: message }));
+    }
+    return;
+  }
+  const effect = answer.effect || {};
+
+  const verdict = el('div', { class: 'verdict' });
+  for (const entry of effect.roles || []) {
+    verdict.append(el('span', {
+      class: 'tag ' + (entry.eligible ? 'yes' : 'no'),
+      title: entry.reason || '',
+      text: (entry.eligible ? '✓ ' : '✗ ') + (STAGE_LABELS[entry.role] || entry.role),
+    }));
+  }
+  host.append(el('p', { class: 'field', text: 'Sirve para' }), verdict);
+  const unusable = (effect.roles || []).filter((entry) => !entry.eligible && entry.reason);
+  for (const entry of unusable) {
+    host.append(el('p', { class: 'role-desc', text: `${STAGE_LABELS[entry.role] || entry.role}: ${entry.reason}` }));
+  }
+
+  if (effect.declared_tools) {
+    if (!effect.tools_honored) {
+      host.append(el('p', {
+        class: 'notice',
+        text: `El proveedor «${effect.provider}» ignora la lista de herramientas: la restricción no haría nada. `
+          + 'Hoy sólo Claude la aplica.',
+      }));
+    } else {
+      const tools = el('div', { class: 'verdict' });
+      for (const name of effect.allowed_tools || []) {
+        tools.append(el('span', { class: 'tag yes', text: '✓ ' + name }));
+      }
+      for (const name of effect.refused_tools || []) {
+        tools.append(el('span', { class: 'tag warn', title: 'No se otorga en una fase de solo lectura', text: '✗ ' + name }));
+      }
+      host.append(el('p', { class: 'field', text: 'Herramientas' }), tools);
+      if ((effect.refused_tools || []).length) {
+        host.append(el('p', {
+          class: 'role-desc',
+          text: 'Las tachadas no se otorgan: una fase que no escribe no recibe herramientas que puedan escribir.',
+        }));
+      }
+    }
+  }
+
+  host.append(el('p', { class: 'field', text: 'Para pegar en baldr-agents.toml' }));
+  const block = el('pre', { class: 'block', text: answer.toml });
+  host.append(block);
+  const copy = el('button', { class: 'ghost', type: 'button', text: 'Copiar' });
+  copy.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(answer.toml);
+      copy.textContent = 'Copiado';
+      setTimeout(() => { copy.textContent = 'Copiar'; }, 1500);
+    } catch (_) {
+      // Clipboard access can be refused; selecting it is still a way to copy.
+      const range = document.createRange();
+      range.selectNodeContents(block);
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+      copy.textContent = 'Seleccionado, copiá con Ctrl-C';
+    }
+  });
+  host.append(el('div', { class: 'actions' }, [copy]));
+  host.append(el('p', {
+    class: 'action-hint',
+    text: `Identidad: ${answer.digest.slice(0, 23)}… · después: make agents para ver el plan, make agents-apply para aplicarlo.`,
+  }));
+}
+
+const STAGE_LABELS = { architect: 'Planificación', implementer: 'Ejecución', reviewer: 'Revisión' };
+
+function textField(label, key, { placeholder = '', area = false } = {}) {
+  const input = area
+    ? el('textarea', { class: 'field-input', rows: '3', placeholder, 'aria-label': label })
+    : el('input', { class: 'filter', type: 'text', placeholder, 'aria-label': label });
+  input.value = draft[key];
+  input.addEventListener('input', () => { draft[key] = input.value; draftChanged(); });
+  return el('div', {}, [el('label', { class: 'field', text: label }), input]);
+}
+
+function renderAgentsPage() {
+  const host = document.getElementById('agents-page');
+  if (host.dataset.ready === 'yes') return;
+  host.dataset.ready = 'yes';
+  host.replaceChildren();
+
+  // What the machine already has.
+  const known = el('div', { class: 'option-group' }, [
+    el('h3', { text: 'Agentes registrados' }),
+    el('p', { text: 'El catálogo de esta máquina. Las etapas eligen entre estos.' }),
+  ]);
+  const state = agentsState;
+  if (!state) {
+    known.append(el('p', { class: 'action-hint', text: 'Leyendo el catálogo…' }));
+  } else if (!state.agent_count) {
+    known.append(el('p', { class: 'action-hint', text: 'Todavía no hay ninguno. Declará el primero acá abajo.' }));
+  } else {
+    const seen = new Set();
+    for (const entry of (state.roles || {}).architect || []) seen.add(entry.ref);
+    for (const role of ['implementer', 'reviewer']) {
+      for (const entry of (state.roles || {})[role] || []) seen.add(entry.ref);
+    }
+    for (const ref of [...seen].sort()) {
+      known.append(el('div', { class: 'phase' }, [el('h4', { text: ref })]));
+    }
+  }
+  host.append(known);
+
+  const group = el('div', { class: 'option-group' }, [
+    el('h3', { text: 'Declarar un agente' }),
+    el('p', { text: 'Un agente que es pura configuración: sin código, sin build. Acá lo pensás; vive en el archivo de tu repositorio.' }),
+  ]);
+
+  const refField = textField('Referencia', 'ref', { placeholder: 'local://equipo/nombre@1.0.0' });
+  group.append(refField);
+  group.append(el('p', {
+    class: 'role-desc',
+    text: 'La versión es parte de la identidad y es inmutable: cambiar lo que el agente puede tocar es publicar una versión nueva.',
+  }));
+  group.append(el('div', { class: 'field-row' }, [
+    textField('Dueño', 'owner', { placeholder: 'equipo-plataforma' }),
+    textField('Descripción', 'description', { placeholder: 'Para qué sirve' }),
+  ]));
+
+  const roleBox = el('div', { class: 'fallbacks' });
+  for (const [role, label] of Object.entries(STAGE_LABELS)) {
+    const box = el('input', { type: 'checkbox' });
+    box.checked = draft.roles.has(role);
+    box.addEventListener('change', () => {
+      if (box.checked) draft.roles.add(role); else draft.roles.delete(role);
+      draftChanged();
+    });
+    roleBox.append(el('label', {}, [box, el('span', { text: label })]));
+  }
+  group.append(el('label', { class: 'field', text: 'Etapas que puede cubrir' }), roleBox);
+
+  const write = el('input', { type: 'checkbox' });
+  write.checked = draft.can_write;
+  write.addEventListener('change', () => { draft.can_write = write.checked; draftChanged(); });
+  group.append(el('div', { class: 'fallbacks', style: 'margin-top:8px' }, [
+    el('label', {}, [write, el('span', { text: 'Puede modificar el workspace' })]),
+  ]));
+  group.append(el('p', {
+    class: 'role-desc',
+    text: 'Sin esto el agente es de solo lectura, que es lo que hace falta para planificar y revisar.',
+  }));
+
+  const providerSelect = el('select', { 'aria-label': 'Proveedor' });
+  const syncProviders = () => {
+    const providers = (providersState && providersState.providers) || [];
+    providerSelect.replaceChildren();
+    for (const provider of providers) {
+      providerSelect.append(el('option', {
+        value: provider.id,
+        text: provider.available ? provider.id : `${provider.id} (no disponible)`,
+      }));
+    }
+    if (!draft.provider) draft.provider = (providersState && providersState.default_provider) || (providers[0] || {}).id || '';
+    providerSelect.value = draft.provider;
+  };
+  providerSelect.addEventListener('change', () => { draft.provider = providerSelect.value; draftChanged(); });
+  group.append(el('label', { class: 'field', text: 'Proveedor' }), providerSelect);
+  group.append(el('div', { class: 'field-row' }, [
+    textField('Modelo', 'model', { placeholder: 'opus' }),
+    textField('Herramientas', 'tools', { placeholder: 'Read,Grep' }),
+  ]));
+  group.append(textField('Instrucciones', 'instructions', {
+    placeholder: 'Cómo tiene que trabajar este agente', area: true,
+  }));
+  group.append(el('div', { id: 'draft-answer' }));
+  host.append(group);
+
+  loadProviders(false).then(() => { syncProviders(); draftChanged(); });
+  syncProviders();
+  askAboutDraft();
+}
+
 function showView(name) {
-  document.getElementById('view-tasks').hidden = name !== 'tasks';
-  document.getElementById('view-settings').hidden = name !== 'settings';
+  for (const view of ['tasks', 'settings', 'agents']) {
+    document.getElementById('view-' + view).hidden = view !== name;
+  }
   for (const button of document.querySelectorAll('#tabs button')) {
     button.setAttribute('aria-selected', String(button.dataset.view === name));
   }
-  if (name !== 'settings') return;
-  // The catalog is read on arrival rather than with every poll, so the tab
-  // asks for it and redraws once it lands.
-  loadAgents(false).then(() => renderSettings(lastWorkbench, true));
-  loadProviders(false).then(() => renderSettings(lastWorkbench, true));
+  // Both catalogs are read on arrival rather than with every poll, so a tab
+  // asks for what it needs and redraws once it lands.
+  if (name === 'settings') {
+    loadAgents(false).then(() => renderSettings(lastWorkbench, true));
+    loadProviders(false).then(() => renderSettings(lastWorkbench, true));
+  }
+  if (name === 'agents') {
+    renderAgentsPage();
+    loadAgents(false).then(() => {
+      document.getElementById('agents-page').dataset.ready = '';
+      renderAgentsPage();
+    });
+  }
 }
 
 async function refresh() {

@@ -45,8 +45,14 @@ from pathlib import Path
 from typing import Any, cast
 from urllib.parse import parse_qs, quote, urlparse
 
+from .agent_api import AgentContractError
 from .agent_gateway import external_agent_catalog_status
-from .claude_cli import VALID_EFFORTS as CLAUDE_EFFORTS, claude_model_suggestions
+from .agent_sources import manifest_from_declaration, render_declaration_toml
+from .claude_cli import (
+    VALID_EFFORTS as CLAUDE_EFFORTS,
+    claude_model_suggestions,
+    permitted_tools,
+)
 from .codex import codex_model_catalog
 from .context7_setup import context7_runtime_status
 from .diagnostics import get_logger, log_suppressed
@@ -100,6 +106,7 @@ _CONTEXT_ROUTE = "/v1/context"
 _AGENTS_ROUTE = "/v1/agents"
 _PROVIDERS_ROUTE = "/v1/providers"
 _PROFILES_ROUTE = "/v1/profiles"
+_AGENT_DRAFT_ROUTE = "/v1/agent-draft"
 _API_ROUTES = frozenset(
     {"/v1/workbench", _CONTEXT_ROUTE, _AGENTS_ROUTE, _PROVIDERS_ROUTE}
 )
@@ -144,7 +151,13 @@ _PREFERENCE_FIELDS: dict[str, str] = {
 _SERVED_ROUTES = tuple(
     sorted(
         _API_ROUTES
-        | {_ACTION_ROUTE, _PREFERENCES_ROUTE, _COMPOSE_ROUTE, _PROFILES_ROUTE}
+        | {
+            _ACTION_ROUTE,
+            _PREFERENCES_ROUTE,
+            _COMPOSE_ROUTE,
+            _PROFILES_ROUTE,
+            _AGENT_DRAFT_ROUTE,
+        }
     )
 )
 _MAX_ACTION_BODY = 4096
@@ -335,6 +348,72 @@ def describe_providers() -> dict[str, Any]:
         "ok": True,
         "default_provider": str(status.get("default_provider") or ""),
         "providers": providers,
+    }
+
+
+def describe_agent_draft(entry: Mapping[str, Any]) -> dict[str, Any]:
+    """Say what a declared agent would mean, and write nothing.
+
+    Drafting one here rather than in a text editor is only worth it if the
+    answer comes back before the decision: which phases this agent could cover,
+    and which of the tools it asked for it would actually be granted. The rules
+    are the file's own, so a draft this accepts is a file that syncs.
+    """
+    try:
+        manifest = manifest_from_declaration(entry)
+    except AgentContractError as exc:
+        return {"ok": True, "valid": False, "errors": [str(exc)], "toml": ""}
+
+    provider = str(manifest.target.get("provider") or "")
+    adapter = get_provider_registry().resolve(provider)
+    can_write = manifest.effect_mode == "workspace-write"
+    declared_tools = str(manifest.target.get("tools") or "")
+    allowed, refused = permitted_tools(declared_tools, can_write=can_write)
+    # One synthetic catalog entry, run through the resolver's own rules, so the
+    # form cannot promise a role the run would refuse.
+    catalog = {
+        "agents": [
+            {
+                "ref": str(manifest.reference),
+                "digest": manifest.digest,
+                "capabilities": list(manifest.capabilities),
+                "effect_mode": manifest.effect_mode,
+                "enabled": True,
+                "revoked": False,
+                "ready": True,
+                "state": "ready",
+            }
+        ]
+    }
+    return {
+        "ok": True,
+        "valid": True,
+        "errors": [],
+        "ref": str(manifest.reference),
+        "digest": manifest.digest,
+        "toml": render_declaration_toml(entry),
+        "effect": {
+            "provider": provider,
+            "provider_known": adapter is not None,
+            # A restriction that changes nothing is worse than none at all,
+            # because it reads like protection.
+            "tools_honored": bool(
+                adapter is not None and adapter.capabilities.supports_tool_restriction
+            ),
+            "can_write": can_write,
+            "declared_tools": declared_tools,
+            "allowed_tools": allowed,
+            "refused_tools": refused,
+            "roles": [
+                {
+                    "role": role,
+                    "eligible": bool(candidate["eligible"]),
+                    "reason": str(candidate["reason"]),
+                }
+                for role in ROLE_NAMES
+                for candidate in [role_candidates(catalog, role)[0]]
+            ],
+        },
     }
 
 
@@ -1039,6 +1118,18 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         self._console.forget_providers()
         self._json({"ok": True, "profile": result.get("profile"), "config": result.get("config")})
 
+    def _agent_draft(self) -> None:
+        """Answer what a drafted agent would mean. Nothing here persists.
+
+        The console is where somebody works out what an agent should be allowed
+        to do; the file in their repository is where that decision lives. So
+        this returns the block to put there, and never writes a catalog entry.
+        """
+        payload = self._read_action_request(max_bytes=_MAX_COMPOSE_BODY)
+        if payload is None:
+            return
+        self._json(describe_agent_draft(payload))
+
     def _preferences(self) -> None:
         payload = self._read_action_request()
         if payload is None:
@@ -1234,6 +1325,9 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             return
         if route == _PROFILES_ROUTE:
             self._profiles()
+            return
+        if route == _AGENT_DRAFT_ROUTE:
+            self._agent_draft()
             return
         self._error(404, "not_found", "Unknown console route.")
 

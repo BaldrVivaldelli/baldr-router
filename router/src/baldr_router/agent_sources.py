@@ -976,8 +976,15 @@ def _declarative_bool(value: Any, *, field_name: str) -> bool:
     raise AgentContractError(f"Agent field {field_name!r} must be true or false.")
 
 
-def _declarative_manifest(entry: Mapping[str, Any], *, index: int) -> AgentManifest:
-    where = f"agent #{index + 1}"
+def manifest_from_declaration(
+    entry: Mapping[str, Any], *, where: str = "agent"
+) -> AgentManifest:
+    """Compile one declared agent into the manifest the registry stores.
+
+    Public because the authoring surface and the file read the same rules: a
+    console that showed a draft as valid and a sync that then refused it would
+    be two opinions about one format.
+    """
     if not isinstance(entry, Mapping):
         raise AgentContractError(f"{where} must be a table.")
     unexpected = sorted(
@@ -1139,7 +1146,9 @@ class DeclarativeAgentSource:
         candidates: list[AgentSourceCandidate] = []
         seen: set[str] = set()
         for index, entry in enumerate(entries):
-            manifest = _declarative_manifest(entry, index=index)
+            manifest = manifest_from_declaration(
+                entry, where=f"agent #{index + 1}"
+            )
             reference = str(manifest.reference)
             if reference in seen:
                 raise AgentContractError(
@@ -1163,3 +1172,55 @@ class DeclarativeAgentSource:
         return AgentSourceResult(
             source=info, candidates=tuple(candidates), warnings=tuple(warnings)
         )
+
+
+_TOML_ESCAPES = {
+    "\\": "\\\\",
+    '"': '\\"',
+    "\n": "\\n",
+    "\r": "\\r",
+    "\t": "\\t",
+    "\b": "\\b",
+    "\f": "\\f",
+}
+
+
+def _toml_string(value: str) -> str:
+    rendered = "".join(
+        _TOML_ESCAPES.get(character, character)
+        if character >= " " or character in _TOML_ESCAPES
+        # A control character has no basic-string spelling of its own.
+        else f"\\u{ord(character):04X}"
+        for character in str(value)
+    )
+    return f'"{rendered}"'
+
+
+def render_declaration_toml(entry: Mapping[str, Any]) -> str:
+    """Render one declared agent as the block that belongs in the file.
+
+    The writer lives beside the reader on purpose: a format with its two halves
+    in different modules drifts, and this one is meant to round-trip.
+    """
+    lines = ["[[agent]]"]
+    for key in ("ref", "owner", "description"):
+        value = str(entry.get(key) or "").strip()
+        if value:
+            lines.append(f"{key} = {_toml_string(value)}")
+    capabilities = entry.get("capabilities")
+    if isinstance(capabilities, list) and capabilities:
+        rendered = ", ".join(_toml_string(str(value)) for value in capabilities)
+        lines.append(f"capabilities = [{rendered}]")
+    effect_mode = str(entry.get("effect_mode") or "").strip()
+    # Only when it departs from the safe default, so a read-only agent stays
+    # short and a writing one stands out.
+    if effect_mode and effect_mode != "read-only":
+        lines.append(f"effect_mode = {_toml_string(effect_mode)}")
+    transport = str(entry.get("transport") or "").strip()
+    if transport and transport != "provider":
+        lines.append(f"transport = {_toml_string(transport)}")
+    for key in _TARGET_KEYS:
+        value = str(entry.get(key) or "").strip()
+        if value:
+            lines.append(f"{key} = {_toml_string(value)}")
+    return "\n".join(lines) + "\n"
