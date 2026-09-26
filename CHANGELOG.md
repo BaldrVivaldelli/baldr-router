@@ -17,6 +17,17 @@
 - Gave the web console the configuration surfaces it was missing: a context
   picker that attaches workspace paths as pointers, a per-phase team screen, and
   the state behind the documentation and protection settings.
+- Made an agent something a repository can declare. A manifest with
+  `transport: "provider"` is pure configuration, and `target.tools` and
+  `target.instructions` now say what it may touch and how it should work — both
+  narrowing only, since the role decides whether a phase may write at all.
+  `baldr-agents.toml` is the file a reviewer reads and the manifest is compiled
+  from it, so `make agents` plans and `make agents-apply` converges through the
+  reconciliation that already existed. The console's Agentes tab drafts one and
+  answers what it would mean, without writing a catalog entry.
+- Let execution profiles be created from the console, with the model chosen
+  from Codex's live catalog or Claude's aliases, and the provider checked
+  against the adapters that exist.
 
 ## 0.20.1 — Reliability Hardening
 
