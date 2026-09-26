@@ -30,7 +30,7 @@ testpaths = ["tests"]
 pythonpath = ["src", "../../../router/src"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "ruff>=0.9,<0.16"]
+dev = ["pytest>=8.0", "ruff>=0.9,<0.17"]
 
 [tool.uv.sources]
 baldr-router = { workspace = true }
