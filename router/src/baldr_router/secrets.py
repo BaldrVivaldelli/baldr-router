@@ -4,11 +4,14 @@ import getpass
 import os
 import stat
 import tomllib
+import uuid
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Optional
 
 from .config import secrets_path
+
+_OWNER_ONLY = stat.S_IRUSR | stat.S_IWUSR
 
 
 def _load_secret_file(path: Path | None = None) -> dict:
@@ -71,6 +74,29 @@ def _dump_secret_toml(data: Mapping[str, object]) -> str:
     return "".join(f"{line}\n" for line in lines)
 
 
+def _write_private_text(path: Path, text: str) -> None:
+    """Publish the secrets file without ever exposing it under the umask.
+
+    Writing the credential first and narrowing the mode afterwards leaves a
+    window in which another account can read it, so the replacement is created
+    owner-only and moved into place atomically.
+    """
+    temporary = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, _OWNER_ONLY)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        os.chmod(path, _OWNER_ONLY)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def _write_secret_file(data: dict, path: Path | None = None) -> Path:
     p = path or secrets_path()
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -91,8 +117,7 @@ def _write_secret_file(data: dict, path: Path | None = None) -> Path:
         for key, value in pruned.items()
         if not (isinstance(value, Mapping) and not value) and value is not None
     }
-    p.write_text(_dump_secret_toml(pruned), encoding="utf-8")
-    os.chmod(p, stat.S_IRUSR | stat.S_IWUSR)
+    _write_private_text(p, _dump_secret_toml(pruned))
     return p
 
 

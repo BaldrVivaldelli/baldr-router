@@ -14,7 +14,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from baldr_router.agent_gateway import external_agent_catalog_status, get_agent_gateway
-from baldr_router.config import AppConfig, RoleConfig
+from baldr_router.config import AppConfig, RoleConfig, load_config
+from baldr_router.diagnostics import get_logger, log_suppressed
 from baldr_router.phase_deliverables import materialize_phase_deliverable
 from baldr_router.process_control import terminate_processes_for_run
 from baldr_router.provider_registry import (
@@ -56,6 +57,8 @@ from .store import (
     LeaseFenceError,
     LeaseToken,
 )
+
+_LOG = get_logger(__name__)
 
 ProviderRunner = Callable[..., dict[str, Any]]
 FaultHook = Callable[[str, dict[str, Any]], None]
@@ -1321,7 +1324,15 @@ class DurableWorkflowEngine:
                         lease=lease,
                     )
             except Exception:
-                pass
+                # Losing this transition leaves the run in its previous state
+                # with no record of why, which is the hardest failure to
+                # diagnose later.
+                log_suppressed(
+                    _LOG,
+                    "Could not record the engine failure for this run",
+                    run_id=run_id,
+                    original_error=str(exc),
+                )
         result = self._result_from_snapshot(self.store.snapshot_run(run_id))
         result["reason"] = str(exc)
         return result
@@ -2894,6 +2905,11 @@ class DurableWorkflowEngine:
 
     def _append_telemetry(self, result: dict[str, Any]) -> None:
         try:
+            # Every Codex runner honors this switch. Recording the workflow row
+            # unconditionally meant disabling telemetry still left a run log on
+            # disk, so the engine reads the operator's current preference.
+            if not load_config().telemetry.enabled:
+                return
             append_run(
                 {
                     "run_id": result.get("run_id"),
@@ -2918,4 +2934,8 @@ class DurableWorkflowEngine:
                 }
             )
         except Exception:
-            pass
+            log_suppressed(
+                _LOG,
+                "Could not append workflow telemetry",
+                run_id=result.get("run_id"),
+            )
