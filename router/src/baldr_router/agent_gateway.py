@@ -262,6 +262,10 @@ class ProviderAgentConnector:
             agent=role.agent,
             effort=role.effort,
             runner=role.runner,
+            # Declared by the agent that was resolved for this step. Both only
+            # narrow: the role above decides whether it may write at all.
+            tools=str(target.get("tools") or ""),
+            instructions=str(target.get("instructions") or ""),
             session_scope=invocation.session_scope,
             session_key=invocation.session_key,
             resume_session_id=invocation.resume_session_id,

@@ -39,6 +39,17 @@ VALID_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 # Everything that edits a file. Denied by name for a read-only phase, because a
 # phase that plans must not be able to change what it is planning against.
 _WRITING_TOOLS = ("Write", "Edit", "NotebookEdit", "MultiEdit")
+# What a read-only phase may be narrowed to. An allowlist rather than a
+# denylist, so a tool nobody here has heard of is refused instead of admitted.
+#
+# Bash and the other code-running tools are absent because a shell writes
+# whatever the phase intended, and a command pattern does not change that. Task
+# is absent because a subagent is not bound by this invocation's flags, and a
+# boundary that depends on inheritance nobody verified is not a boundary.
+_READ_ONLY_TOOLS = frozenset(
+    {"Read", "Grep", "Glob", "WebSearch", "WebFetch", "TodoWrite"}
+)
+_MAX_TOOLS = 32
 # The CLI takes an alias for the newest model in a family, or a full model
 # name. These are published as suggestions rather than a closed list: a new
 # family reaches the CLI before it reaches this file, and refusing it here
@@ -124,6 +135,34 @@ def _effort(requested: str, fallback: str) -> str:
     return chosen if chosen in VALID_EFFORTS else ""
 
 
+def permitted_tools(requested: str, *, can_write: bool) -> tuple[list[str], list[str]]:
+    """Narrow a declared tool list to what this phase may actually use.
+
+    Returns the tools to allow and the ones refused, because a declaration that
+    quietly did less than it said is worse than one that reports the difference.
+
+    Split on commas alone: Claude accepts a pattern like ``Bash(git *)`` whose
+    own spaces would not survive splitting on whitespace. The safety check
+    reads the base tool before the parenthesis, so a narrowed shell is still a
+    shell and is still refused for a phase that may not write.
+    """
+    names = [part.strip() for part in str(requested or "").split(",")]
+    names = [name for name in names if name][:_MAX_TOOLS]
+    if can_write:
+        # Narrowing down from everything is the author's call to make.
+        return list(dict.fromkeys(names)), []
+    allowed: list[str] = []
+    refused: list[str] = []
+    for name in names:
+        base = name.split("(", 1)[0].strip()
+        if base in _READ_ONLY_TOOLS:
+            if name not in allowed:
+                allowed.append(name)
+        elif name not in refused:
+            refused.append(name)
+    return allowed, refused
+
+
 def build_claude_command(
     *,
     command: str,
@@ -132,11 +171,18 @@ def build_claude_command(
     effort: str,
     max_turns: int,
     report_kind: str,
+    tools: str = "",
+    instructions: str = "",
 ) -> list[str]:
     """Assemble the argument list, with the write permission decided by it.
 
     Kept separate from running it so the permission boundary can be asserted in
     a test without spending a model call on every assertion.
+
+    A declared tool list travels as --allowedTools, which is a permission
+    allowlist. It is never turned into --tools, which replaces the available
+    set outright and would put back what --restricted removed: verified against
+    the CLI, an allowlist naming Bash under --restricted still cannot run one.
     """
     cmd = [
         command,
@@ -166,6 +212,14 @@ def build_claude_command(
     else:
         cmd.append("--restricted")
         cmd.extend(["--disallowed-tools", ",".join(_WRITING_TOOLS)])
+    allowed, _refused = permitted_tools(tools, can_write=can_write)
+    if allowed:
+        cmd.extend(["--allowed-tools", ",".join(allowed)])
+    if instructions.strip():
+        # Appended, never replacing: the phase's own prompt and report contract
+        # come first, and a declaration cannot talk its way out of either. It
+        # also grants nothing — the flags above decide what exists to be used.
+        cmd.extend(["--append-system-prompt", instructions.strip()])
     return cmd
 
 
@@ -198,6 +252,8 @@ def run_claude_role_prompt(
     can_write: bool = False,
     model: str | None = None,
     effort: str | None = None,
+    tools: str = "",
+    instructions: str = "",
     report_kind: str = "review",
     extra_env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
@@ -223,6 +279,7 @@ def run_claude_role_prompt(
 
     selected_model = (model or cfg.claude.model or "").strip()
     selected_effort = _effort(effort or "", cfg.claude.default_effort)
+    allowed_tools, refused_tools = permitted_tools(tools, can_write=can_write)
     cmd = build_claude_command(
         command=cfg.claude.command,
         can_write=can_write,
@@ -230,6 +287,8 @@ def run_claude_role_prompt(
         effort=selected_effort,
         max_turns=int(cfg.claude.max_turns),
         report_kind=report_kind,
+        tools=tools,
+        instructions=instructions,
     )
 
     started = time.time()
@@ -278,7 +337,12 @@ def run_claude_role_prompt(
         "session_id": str(payload.get("session_id") or ""),
         "num_turns": payload.get("num_turns"),
         "structured": isinstance(payload.get("structured_output"), dict),
+        "allowed_tools": allowed_tools,
     }
+    if refused_tools:
+        # Declared, and not granted. Silently running with less than the
+        # manifest said would make a wrong declaration look like a working one.
+        out["refused_tools"] = refused_tools
     denials = payload.get("permission_denials")
     if isinstance(denials, list) and denials:
         # A read-only phase reaching for a tool it does not have is worth

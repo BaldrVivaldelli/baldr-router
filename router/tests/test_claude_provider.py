@@ -384,3 +384,135 @@ def test_a_profile_can_now_name_claude(isolated: None) -> None:
 
     assert result["config"]["provider"] == "claude"
     assert load_config().execution_profiles["reviewer-claude"].model == "sonnet"
+
+
+# --- what a declared agent may narrow itself to -------------------------------
+
+
+@pytest.mark.parametrize(
+    "requested",
+    ["Bash", "Bash(git diff)", "Write", "Edit", "Task", "SomeToolNobodyKnows"],
+)
+def test_a_read_only_phase_refuses_a_tool_that_could_change_things(
+    requested: str,
+) -> None:
+    """An allowlist, so an unknown tool is refused rather than admitted.
+
+    A narrowed shell is still a shell: Bash(git diff) is refused by its base
+    name, because a command pattern does not stop a redirect.
+    """
+    from baldr_router.claude_cli import permitted_tools
+
+    allowed, refused = permitted_tools(requested, can_write=False)
+
+    assert allowed == []
+    assert refused == [requested]
+
+
+def test_a_read_only_phase_keeps_the_tools_that_only_look() -> None:
+    from baldr_router.claude_cli import permitted_tools
+
+    allowed, refused = permitted_tools("Read, Grep ,Glob", can_write=False)
+
+    assert allowed == ["Read", "Grep", "Glob"]
+    assert refused == []
+
+
+def test_a_writing_phase_narrows_itself_however_it_likes() -> None:
+    """Narrowing down from everything is the author's call to make."""
+
+    from baldr_router.claude_cli import permitted_tools
+
+    allowed, refused = permitted_tools("Read,Edit,Bash(npm test)", can_write=True)
+
+    assert allowed == ["Read", "Edit", "Bash(npm test)"]
+    assert refused == []
+
+
+def test_a_declared_tool_list_never_reopens_what_was_closed() -> None:
+    """--allowedTools is a permission list; --tools replaces the tool set.
+
+    Deriving the second from a manifest would put back what --restricted
+    removed. Verified against the CLI: an allowlist naming Bash under
+    --restricted still cannot run one.
+    """
+    cmd = _command(can_write=False, tools="Bash,Write,Read")
+
+    assert "--tools" not in cmd
+    assert cmd[cmd.index("--allowed-tools") + 1] == "Read"
+    # And the closing flags survive the declaration rather than being replaced.
+    assert "--restricted" in cmd
+    assert "Write" in cmd[cmd.index("--disallowed-tools") + 1]
+
+
+def test_no_allowlist_is_passed_when_nothing_was_declared() -> None:
+    assert "--allowed-tools" not in _command(tools="")
+
+
+def test_instructions_are_appended_rather_than_replacing_the_prompt() -> None:
+    """The phase's own prompt and report contract come first."""
+
+    cmd = _command(instructions="Revisá sólo la superficie pública.")
+
+    assert cmd[cmd.index("--append-system-prompt") + 1] == "Revisá sólo la superficie pública."
+    assert "--system-prompt" not in cmd
+
+
+def test_a_refused_tool_is_reported_rather_than_dropped_quietly(
+    enabled: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A wrong declaration must not look like a working one."""
+
+    monkeypatch.setattr(claude_cli, "claude_found", lambda *_: "/usr/bin/claude")
+    monkeypatch.setattr(
+        claude_cli, "run_command", _recorder({}, {"ok": True, "stdout": _envelope()})
+    )
+
+    out = run_claude_role_prompt(
+        cwd=Path.cwd(), prompt="x", role="reviewer", workflow="w",
+        can_write=False, tools="Read,Bash",
+    )
+
+    assert out["allowed_tools"] == ["Read"]
+    assert out["refused_tools"] == ["Bash"]
+
+
+def test_a_manifest_carries_its_tools_to_the_provider() -> None:
+    """The declarative half: target fields reach the request unchanged."""
+
+    from baldr_router.agent_api import AgentInvocation, AgentManifest, AgentRef, ResolvedAgent
+    from baldr_router.agent_gateway import ProviderAgentConnector
+
+    manifest = AgentManifest(
+        reference=AgentRef.parse("local://equipo/revisor@1.0.0"),
+        owner="equipo",
+        transport="provider",
+        target={
+            "provider": "claude",
+            "model": "opus",
+            "tools": "Read,Grep",
+            "instructions": "Mirá sólo la superficie pública.",
+        },
+        capabilities=("workspace.read",),
+        effect_mode="read-only",
+    )
+    captured: dict[str, Any] = {}
+
+    class _Registry:
+        def run(self, *, provider: str, request: Any) -> dict[str, Any]:
+            captured["provider"] = provider
+            captured["request"] = request
+            return {"ok": True}
+
+    ProviderAgentConnector(lambda: _Registry()).invoke(
+        ResolvedAgent(manifest=manifest, source="local"),
+        AgentInvocation(
+            cwd=Path.cwd(), task="revisá", workflow="w", step_name="reviewer",
+            report_kind="review", can_write=False, sandbox="read-only",
+        ),
+    )
+
+    assert captured["provider"] == "claude"
+    assert captured["request"].tools == "Read,Grep"
+    assert captured["request"].instructions == "Mirá sólo la superficie pública."
+    assert captured["request"].model == "opus"

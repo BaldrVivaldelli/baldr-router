@@ -151,6 +151,8 @@ class ClaudeProvider:
             model=request.model,
             # A profile may say either; Claude spends one vocabulary on both.
             effort=request.reasoning_effort or request.effort,
+            tools=request.tools,
+            instructions=request.instructions,
             report_kind=request.report_kind,
             extra_env=request.extra_env,
         )

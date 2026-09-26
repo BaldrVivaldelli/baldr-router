@@ -41,6 +41,11 @@ class ProviderRunRequest:
     agent: str = ""
     effort: str = ""
     runner: str = ""
+    # What this step may use and how it should work, as declared by the agent
+    # that was resolved for it. Both only ever narrow: the role decides whether
+    # the step may write at all, and neither of these can widen that.
+    tools: str = ""
+    instructions: str = ""
     session_scope: str = ""
     session_key: str = ""
     resume_session_id: str | None = None

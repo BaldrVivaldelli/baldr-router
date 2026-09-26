@@ -171,6 +171,45 @@ its SHA-256 before every invocation. A global definition also fails closed if
 write-enabled definition under a new AgentRef instead of changing the file
 behind an existing reference.
 
+## Agents that are configuration rather than code
+
+Not every agent is a program. A manifest with `transport: "provider"` runs
+through an adapter Baldr already has, and its `target` is the whole definition:
+there is nothing to build, package or publish an artifact for.
+
+```json
+{
+  "ref": "local://equipo/revisor-seguridad@1.0.0",
+  "owner": "equipo-plataforma",
+  "transport": "provider",
+  "capabilities": ["workspace.read", "role.reviewer"],
+  "effect_mode": "read-only",
+  "target": {
+    "provider": "claude",
+    "model": "opus",
+    "tools": "Read,Grep",
+    "instructions": "Sos un revisor de seguridad. Mirá la superficie pública."
+  }
+}
+```
+
+`tools` and `instructions` are declarations, and both only ever narrow. The
+role decides whether a phase may write; a manifest cannot change that answer.
+A read-only phase keeps the flags that remove the command-running and editing
+tools, and `tools` is filtered against an allowlist on top of them, so a tool
+nobody recognises is refused rather than admitted and a narrowed shell is still
+a shell. What a phase asked for and did not get is reported as `refused_tools`
+rather than dropped, because a declaration that quietly did less than it said
+is worse than one that says so.
+
+`instructions` is appended to the system prompt, never substituted for it: the
+phase's own prompt and its report contract come first, and an instruction
+grants nothing, because the flags decide what exists to be used.
+
+The manifest is still immutable per exact version. Changing what an agent may
+touch means publishing a new version, which is what keeps a durable run's
+record of who did what true after the fact.
+
 ## Local registry
 
 The default path is:
