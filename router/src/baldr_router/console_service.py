@@ -5,10 +5,16 @@ file inside the trusted workspace and reviews a diff. It is the wrong surface
 for watching a queue, because durable work runs while the editor is closed and
 a sidebar cannot reach the operator who has to decide something.
 
-This server answers only that watching question. It adds no orchestration: it
-calls ``status`` in its cheap workbench form and serves the already redacted
-``baldr-work-item-progress`` projection. Only GET is routed today, so the
-surface cannot write durable state even by accident.
+Reading stays free of side effects: every GET goes through ``status`` in its
+cheap workbench form and serves the already redacted
+``baldr-work-item-progress`` projection, and settles nothing.
+
+One narrow write exists, because the moment worth interrupting an operator for
+is the moment a run is blocked on their decision. ``POST /v1/actions`` answers
+a blocked run or stops a running one, and nothing it receives is trusted: the
+router recomputes which actions the item allows and refuses anything else.
+Creating and continuing work needs a composer and a configuration surface, so
+those still belong to the CLI and the editor.
 
 The authentication model is built for the surface that will write. A localhost
 port is reachable from every page the operator visits, so the defence is to
@@ -32,8 +38,10 @@ from pathlib import Path
 from typing import Any, cast
 from urllib.parse import parse_qs, quote, urlparse
 
-from .diagnostics import get_logger
-from .facade import facade_status_report
+from .diagnostics import get_logger, log_suppressed
+from .facade import facade_run, facade_status_report
+from .redaction import redact_text
+from .work_items import RECONCILIATION_ACTION_ORDER
 
 _LOG = get_logger(__name__)
 
@@ -57,6 +65,13 @@ _PUBLIC_ASSETS: dict[str, tuple[str, str]] = {
     "/icon-512.png": ("icon-512.png", "image/png"),
 }
 _API_ROUTES = frozenset({"/v1/workbench"})
+_ACTION_ROUTE = "/v1/actions"
+_MAX_ACTION_BODY = 4096
+# The console offers the decisions an operator makes while watching: answer a
+# blocked run, or stop one. Creating and continuing work needs the composer and
+# the configuration surface, so those actions stay with the CLI and the editor
+# until that exists.
+CONSOLE_ACTIONS = frozenset({"cancel", *RECONCILIATION_ACTION_ORDER})
 
 
 def console_asset_path(name: str = "index.html") -> Path:
@@ -232,6 +247,112 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         )
         self._json(report)
 
+    def _read_action_request(self) -> dict[str, Any] | None:
+        # A cross-site form can only send a handful of content types, none of
+        # them JSON, so requiring it is one more wall before the token check
+        # even matters.
+        content_type = str(self.headers.get("Content-Type") or "").split(";")[0].strip()
+        if content_type.lower() != "application/json":
+            self._error(415, "json_required", "Send application/json.")
+            return None
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = -1
+        if length < 0 or length > _MAX_ACTION_BODY:
+            self._error(413, "body_too_large", "The action request is too large.")
+            return None
+        try:
+            payload = json.loads(self.rfile.read(length) or b"{}")
+        except (OSError, ValueError):
+            self._error(400, "invalid_json", "The action request is not valid JSON.")
+            return None
+        if not isinstance(payload, dict):
+            self._error(400, "invalid_json", "The action request must be an object.")
+            return None
+        return payload
+
+    def _permitted_actions(self, work_item_id: str) -> set[str] | None:
+        """Ask the router which actions this item allows right now.
+
+        The page is told what to render, but nothing it sends is trusted: the
+        list is recomputed here from durable state, so a crafted request can
+        only ever name an action the item already permits.
+        """
+        report = facade_status_report(
+            self._console.workspace_root,
+            client=CONSOLE_CLIENT,
+            work_item_id=work_item_id,
+            workbench_only=True,
+        )
+        workbench = report.get("workbench") or {}
+        selected = workbench.get("selected")
+        if not isinstance(selected, dict) or workbench.get("selected_error"):
+            return None
+        allowed = selected.get("allowed_actions")
+        return {str(action) for action in allowed} if isinstance(allowed, list) else set()
+
+    def _run_action(self, work_item_id: str, action: str) -> dict[str, Any]:
+        if action == "cancel":
+            return facade_run(
+                self._console.workspace_root or "",
+                "",
+                client=CONSOLE_CLIENT,
+                work_item_action="cancel-item",
+                work_item_id=work_item_id,
+                cancel_reason="Cancelled from the Baldr console.",
+            )
+        return facade_run(
+            self._console.workspace_root or "",
+            "",
+            client=CONSOLE_CLIENT,
+            work_item_action="reconcile-item",
+            work_item_id=work_item_id,
+            reconciliation_action=action,
+        )
+
+    def _actions(self) -> None:
+        payload = self._read_action_request()
+        if payload is None:
+            return
+        work_item_id = str(payload.get("work_item_id") or "").strip()
+        action = str(payload.get("action") or "").strip()
+        if not work_item_id or len(work_item_id) > _MAX_ITEM_ID or not action:
+            self._error(400, "invalid_action", "work_item_id and action are required.")
+            return
+        if action not in CONSOLE_ACTIONS:
+            self._error(
+                400,
+                "action_not_supported",
+                f"{action!r} is not one of the decisions the console offers.",
+            )
+            return
+        permitted = self._permitted_actions(work_item_id)
+        if permitted is None:
+            self._error(404, "work_item_not_found", "No such work item.")
+            return
+        if action not in permitted:
+            # State moved on, or the request was never legitimate. Either way
+            # the durable state decides, not the page.
+            self._error(
+                409,
+                "action_not_allowed",
+                f"{action!r} is not available for this item right now.",
+            )
+            return
+        try:
+            result = self._run_action(work_item_id, action)
+        except Exception as exc:
+            log_suppressed(
+                _LOG,
+                "Console action failed",
+                work_item_id=work_item_id,
+                action=action,
+            )
+            self._error(500, "action_failed", redact_text(f"{type(exc).__name__}: {exc}"))
+            return
+        self._json({"ok": bool(result.get("ok", True)), "action": action, "result": result})
+
     def _asset(self, name: str, content_type: str) -> None:
         try:
             # Read per request on purpose: editing the page and refreshing the
@@ -266,6 +387,16 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
     def do_HEAD(self) -> None:
         self.do_GET()
 
+    def do_POST(self) -> None:
+        parsed = urlparse(self.path)
+        route = parsed.path.rstrip("/") or "/"
+        if not self._authorize_api():
+            return
+        if route == _ACTION_ROUTE:
+            self._actions()
+            return
+        self._error(404, "not_found", "Unknown console route.")
+
     def _reject_write(self) -> None:
         # Authorize first so an unauthenticated caller learns nothing about
         # which verbs exist, and so the gate is already in place the day a
@@ -274,13 +405,12 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             return
         self._error(
             405,
-            "read_only_console",
-            "The console is read-only. Run work from the CLI or the editor.",
+            "verb_not_supported",
+            "The console answers decisions through POST /v1/actions.",
         )
 
-    # Naming every write verb keeps the refusal explicit instead of relying on
-    # the base class to answer 501 for whatever it does not implement.
-    do_POST = _reject_write
+    # Naming every remaining verb keeps the refusal explicit instead of relying
+    # on the base class to answer 501 for whatever it does not implement.
     do_PUT = _reject_write
     do_PATCH = _reject_write
     do_DELETE = _reject_write

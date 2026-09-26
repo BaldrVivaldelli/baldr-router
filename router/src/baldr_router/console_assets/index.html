@@ -120,6 +120,16 @@ button.ghost {
 }
 button.ghost:hover { color: var(--ink); border-color: var(--accent); }
 button.ghost[hidden] { display: none; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.actions button {
+  font: inherit; font-size: 13px; cursor: pointer; border-radius: 8px;
+  padding: 7px 13px; border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+}
+.actions button:hover:not(:disabled) { border-color: var(--accent); }
+.actions button:disabled { opacity: .5; cursor: progress; }
+.actions button.danger { border-color: var(--stopped); color: var(--stopped); }
+.action-error { margin-top: 10px; font-size: 13px; color: var(--stopped); }
+.action-hint { margin-top: 8px; font-size: 12px; color: var(--muted); }
 .locked { max-width: 640px; margin: 48px auto; }
 .locked code {
   display: block; margin-top: 10px; padding: 10px; overflow-x: auto;
@@ -242,7 +252,59 @@ function renderItems(items) {
   }
 }
 
-function renderAttention(attention) {
+// These change or discard work that cannot be recovered by repeating them, so
+// each one asks first.
+const CONFIRM_ACTIONS = new Set([
+  'decline_changes', 'discard_shadow', 'discard_worktree', 'mark_failed', 'cancel',
+]);
+
+async function submitAction(itemId, action, label, button) {
+  if (CONFIRM_ACTIONS.has(action) && !confirm(`¿Confirmás «${label}»?`)) return;
+  const card = button.closest('.attention-card, .panel');
+  const previous = card ? card.querySelector('.action-error') : null;
+  if (previous) previous.remove();
+  const buttons = card ? card.querySelectorAll('.actions button') : [button];
+  buttons.forEach((b) => { b.disabled = true; });
+  try {
+    const response = await fetch(new URL('/v1/actions', location.origin), {
+      method: 'POST',
+      credentials: 'omit',
+      headers: { 'Content-Type': 'application/json', [TOKEN_HEADER]: token },
+      body: JSON.stringify({ work_item_id: itemId, action }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || payload.ok === false) {
+      const detail = (payload.error && payload.error.message) || ('HTTP ' + response.status);
+      if (card) card.append(el('div', { class: 'action-error', text: 'No se pudo aplicar: ' + detail }));
+      buttons.forEach((b) => { b.disabled = false; });
+      return;
+    }
+    await refresh();
+  } catch (error) {
+    if (card) card.append(el('div', { class: 'action-error', text: 'No se pudo aplicar: ' + error.message }));
+    buttons.forEach((b) => { b.disabled = false; });
+  }
+}
+
+function actionButtons(itemId, actions, allowed) {
+  const box = el('div', { class: 'actions' });
+  for (const action of actions) {
+    // The router decides what is legal; the page only renders what it says.
+    if (!allowed.includes(action.id)) continue;
+    const label = action.label || action.id;
+    const button = el('button', {
+      type: 'button',
+      class: CONFIRM_ACTIONS.has(action.id) ? 'danger' : '',
+      title: action.description || '',
+      text: label,
+    });
+    button.addEventListener('click', () => submitAction(itemId, action.id, label, button));
+    box.append(button);
+  }
+  return box.childElementCount ? box : null;
+}
+
+function renderAttention(itemId, attention, allowed) {
   if (!attention || !attention.required) return null;
   const card = el('div', { class: 'attention-card' }, [
     el('h3', { text: 'Baldr necesita una decisión' }),
@@ -252,14 +314,15 @@ function renderAttention(attention) {
   if (blockers.length) {
     card.append(el('ul', {}, blockers.map((text) => el('li', { text }))));
   }
-  const actions = (attention.actions || []).filter((action) => action && action.label);
-  if (actions.length) {
-    card.append(el('div', { class: 'waiting', text: 'Opciones disponibles: ' + actions.map((a) => a.label).join(' · ') }));
+  const buttons = actionButtons(itemId, attention.actions || [], allowed);
+  if (buttons) {
+    card.append(buttons);
+  } else {
+    card.append(el('div', {
+      class: 'waiting',
+      text: 'Respondé desde la consola de VS Code o con baldr-router facade run.',
+    }));
   }
-  card.append(el('div', {
-    class: 'waiting',
-    text: 'Esta vista es de solo lectura. Respondé desde la consola de VS Code o con baldr-router facade run.',
-  }));
   return card;
 }
 
@@ -337,8 +400,16 @@ function renderDetail(selected, selectedError) {
   panel.append(el('h3', { text: selected.title || selected.id }));
   if (selected.task) panel.append(el('p', { class: 'sub', style: 'white-space:normal', text: selected.task }));
 
-  const attention = renderAttention(progress.attention);
+  const allowed = selected.allowed_actions || [];
+  const attention = renderAttention(selected.id, progress.attention, allowed);
   if (attention) panel.append(attention);
+
+  if (allowed.includes('cancel')) {
+    const stop = actionButtons(selected.id, [
+      { id: 'cancel', label: 'Detener', description: 'Cancela esta ejecución y limpia sus procesos.' },
+    ], allowed);
+    if (stop) panel.append(stop);
+  }
 
   const activity = progress.activity || {};
   if (activity.message) {

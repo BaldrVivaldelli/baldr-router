@@ -574,12 +574,16 @@ puede poner, y encima se validan `Origin`, `Sec-Fetch-Site` y `Host` —este
 último contra DNS rebinding—. Una petición cross-site falla por varias vías
 antes de tocar un read model.
 
-Responde solo esa pregunta de observación: muestra el estado de todas las tareas
-de un vistazo, la línea de tiempo narrativa de las tres fases, y las decisiones
-pendientes como tarjetas. No agrega orquestación —llama a la intención `status`
-congelada en su forma `workbench`, la misma que usa la extensión— y solo rutea
-`GET`, así que no puede escribir estado durable ni por accidente. Los métodos de
-escritura responden `405`.
+Muestra el estado de todas las tareas de un vistazo, la línea de tiempo
+narrativa de las tres fases, y las decisiones pendientes como tarjetas. Leer no
+tiene efectos: cada `GET` pasa por la intención `status` congelada en su forma
+`workbench` —la misma que usa la extensión— y no resuelve nada.
+
+Las decisiones sí se pueden responder desde la página: contestar una ejecución
+bloqueada o detener una en curso. **Nada de lo que manda el navegador decide**:
+el router recalcula qué acciones permite ese item y rechaza el resto con `409`.
+Crear y continuar trabajo necesita el composer y la superficie de configuración,
+así que sigue siendo de la CLI y el editor.
 
 El bind es loopback por defecto. Exponerla a la red requiere
 `--allow-non-loopback` de forma explícita: el contenido está redactado, pero

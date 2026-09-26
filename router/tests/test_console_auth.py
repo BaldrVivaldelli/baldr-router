@@ -125,18 +125,25 @@ def test_the_same_origin_of_this_server_is_accepted(console: str) -> None:
 
 
 @pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE"])
-def test_write_verbs_are_authorized_before_they_are_refused(
+def test_write_verbs_are_authorized_before_anything_else(
     console: str, method: str
 ) -> None:
-    unauthenticated, _, _ = _request(f"{console}/v1/workbench", method=method)
-    authenticated, _, body = _request(
+    """An anonymous caller learns nothing about which verbs exist."""
+
+    unauthenticated, _, body = _request(f"{console}/v1/workbench", method=method)
+
+    assert unauthenticated == 401
+    assert json.loads(body)["error"]["code"] == "console_token_required"
+
+
+@pytest.mark.parametrize("method", ["PUT", "PATCH", "DELETE"])
+def test_verbs_without_a_route_are_refused(console: str, method: str) -> None:
+    status, _, body = _request(
         f"{console}/v1/workbench", headers={TOKEN_HEADER: TOKEN}, method=method
     )
 
-    # An anonymous caller learns nothing about which verbs exist.
-    assert unauthenticated == 401
-    assert authenticated == 405
-    assert json.loads(body)["error"]["code"] == "read_only_console"
+    assert status == 405
+    assert json.loads(body)["error"]["code"] == "verb_not_supported"
 
 
 def test_the_console_never_sets_a_cookie(console: str) -> None:

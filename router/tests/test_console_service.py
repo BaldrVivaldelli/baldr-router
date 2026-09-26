@@ -98,8 +98,10 @@ def test_unknown_routes_are_not_found(console: str) -> None:
     assert error.value.code == 404
 
 
-@pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE"])
-def test_write_methods_are_refused(console: str, method: str) -> None:
+@pytest.mark.parametrize("method", ["PUT", "PATCH", "DELETE"])
+def test_verbs_without_a_route_are_refused(console: str, method: str) -> None:
+    """Decisions go through POST /v1/actions; nothing else writes."""
+
     request = urllib.request.Request(
         f"{console}/v1/workbench",
         data=b"{}",
@@ -111,7 +113,21 @@ def test_write_methods_are_refused(console: str, method: str) -> None:
         urllib.request.urlopen(request, timeout=10)
 
     assert error.value.code == 405
-    assert json.loads(error.value.read())["error"]["code"] == "read_only_console"
+    assert json.loads(error.value.read())["error"]["code"] == "verb_not_supported"
+
+
+def test_a_post_to_an_unknown_route_is_not_found(console: str) -> None:
+    request = urllib.request.Request(
+        f"{console}/v1/anything",
+        data=b"{}",
+        method="POST",
+        headers={TOKEN_HEADER: TOKEN, "Content-Type": "application/json"},
+    )
+
+    with pytest.raises(urllib.error.HTTPError) as error:
+        urllib.request.urlopen(request, timeout=10)
+
+    assert error.value.code == 404
 
 
 def test_reading_the_console_never_settles_a_durable_run(
