@@ -2471,6 +2471,21 @@
             "required": false,
             "help": "Pin the session token instead of issuing a new one; BALDR_CONSOLE_TOKEN does the same",
             "metavar": null
+          },
+          {
+            "class": "_StoreTrueAction",
+            "option_strings": [
+              "--open"
+            ],
+            "dest": "open",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Open a browser on the console, token included",
+            "metavar": null
           }
         ],
         "subcommands": {}

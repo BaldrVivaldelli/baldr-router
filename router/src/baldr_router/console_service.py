@@ -32,6 +32,7 @@ import os
 import secrets
 import socket
 import threading
+import webbrowser
 from collections.abc import Mapping
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -636,6 +637,7 @@ def serve_console(
     workspace_root: str | None = None,
     allow_non_loopback: bool = False,
     token: str | None = None,
+    open_browser: bool = False,
 ) -> None:
     server = build_console_server(
         host=host,
@@ -665,6 +667,13 @@ def serve_console(
         # operator never receives the link they need.
         flush=True,
     )
+    if open_browser:
+        # The link only works with its fragment, and asking someone to copy a
+        # token out of a JSON blob is the step worth removing.
+        try:
+            webbrowser.open(console_url(server, with_token=True))
+        except Exception:
+            log_suppressed(_LOG, "Could not open a browser for the console")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

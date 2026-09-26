@@ -550,8 +550,18 @@ superficie equivocada para *mirar una cola*, porque el trabajo durable sigue
 corriendo con el editor cerrado y una barra lateral no puede avisarte cuando
 Baldr necesita una decisión.
 
+Desde el checkout alcanza con un comando, que además abre el navegador con el
+token ya puesto:
+
 ```bash
-baldr-router console                                  # imprime el enlace con token
+make up                                # solo observa
+make up WORKSPACE=/path/to/repo        # también crea y configura
+```
+
+Con el CLI instalado, el equivalente directo:
+
+```bash
+baldr-router console --open                            # imprime y abre el enlace
 baldr-router console --workspace-root /path/to/repo    # acotada a un repo
 baldr-router console --port 9000 --host 0.0.0.0 --allow-non-loopback
 ```

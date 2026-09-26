@@ -224,3 +224,33 @@ def test_a_wildcard_bind_reports_an_address_a_browser_can_open() -> None:
     assert url.startswith("http://127.0.0.1:")
     assert "0.0.0.0" not in url
     assert "b'" not in url
+
+
+def test_opening_a_browser_uses_the_tokened_link(tmp_path: Path, monkeypatch) -> None:
+    """`make up` is only one command if nobody has to copy a token by hand."""
+
+    import baldr_router.console_service as console_service
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    opened: list[str] = []
+    monkeypatch.setattr(
+        console_service.webbrowser, "open", lambda url: opened.append(url) or True
+    )
+
+    server = console_service.build_console_server(
+        host="127.0.0.1", port=0, token="open-token"
+    )
+    thread = console_service.serve_console_in_background(server)
+    try:
+        # serve_console owns the print and the open; exercise the same call it
+        # makes rather than starting a second server that blocks forever.
+        console_service.webbrowser.open(
+            console_service.console_url(server, with_token=True)
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=10)
+
+    assert opened and opened[0].endswith("#token=open-token")

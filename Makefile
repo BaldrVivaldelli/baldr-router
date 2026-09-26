@@ -12,44 +12,46 @@ ADAPTER_DIR := facades/kiro/adapter
 AGENT_SDK_DIR := sdks/python
 AGENT_BUILDER_DIR := tooling/agent-builder
 AGENT_RUNNER_DIR := runtimes/agent-runner
-LAUNCHER_DIR := launcher
 EXTENSION_DIR := facades/vscode-extension
 
-CLI_ARGS ?=
-QUALIFICATION_PROFILE ?= vscode-windows-wsl
-QUALIFICATION_TEMPLATE_DIR ?= qualification/templates/$(QUALIFICATION_PROFILE)
-QUALIFICATION_WORKSPACE_ROOT ?= .
-QUALIFICATION_EVIDENCE_DIRECTORY ?= qualification-input
-QUALIFICATION_OUTPUT_DIRECTORY ?= qualification-output
-QUALIFICATION_REPEAT ?= 3
-QUALIFICATION_CLIENT ?=
+# make up WORKSPACE=/path/to/repo runs the console against that repository.
+# Without it the console can watch, but not start or configure work.
+WORKSPACE ?=
+PORT ?= 8787
 
-.PHONY: \
-	all help deps test lint typecheck coverage audit check build build-no-tests release verify-release \
-	facades facades-check router-test router-lint adapter-test adapter-lint agent-sdk-test agent-sdk-typescript-test agent-builder-test agent-builder-typescript-test agent-runner-test \
-	launcher-test extension-install extension-check extension-test extension-package extension-clean \
-	install-kiro install-agent-runtime install-launcher cli mcp qualification-definitions qualification-template qualification-ci
-
-all: check
+.PHONY: up localhost down help deps test lint check ci build verify-release install install-agent-runtime
 
 help:
 	@printf '%s\n' \
-		'Baldr Router — targets disponibles:' \
-		'  make deps                         Instala dependencias de desarrollo locales' \
-		'    (usa PyPI público; UV_DEFAULT_INDEX=<url> permite reemplazarlo)' \
-		'  make test | lint | check           Ejecuta validación completa' \
-		'  make typecheck | coverage | audit  Análisis estático, cobertura y advisories' \
-		'  make facades | facades-check       Genera o valida fachadas desde el contrato' \
-		'  make build | build-no-tests        Construye la release completa' \
-		'  make verify-release | release      Verifica artefactos o construye la release' \
-		'  make router-test | adapter-test | agent-sdk-test | agent-sdk-typescript-test' \
-		'  make agent-builder-test | agent-builder-typescript-test | agent-runner-test' \
-		'  make launcher-test | extension-test' \
-		'  make extension-install | extension-check | extension-package' \
-		'  make install-kiro | install-agent-runtime | install-launcher' \
-		'  make cli CLI_ARGS="<comando>"      Ejecuta la CLI desde el checkout' \
-		'  make qualification-template QUALIFICATION_PROFILE=... QUALIFICATION_TEMPLATE_DIR=...' \
-		'  make qualification-ci QUALIFICATION_PROFILE=... QUALIFICATION_WORKSPACE_ROOT=... QUALIFICATION_EVIDENCE_DIRECTORY=...'
+		'Baldr Router' \
+		'' \
+		'  make up [WORKSPACE=/path/to/repo] [PORT=8787]' \
+		'      Levanta la consola local y abre el navegador con su token.' \
+		'      Sin WORKSPACE solo observa; con WORKSPACE también crea y configura.' \
+		'' \
+		'  make deps          Instala las dependencias de desarrollo' \
+		'  make test | lint   Corre la suite o el linter de todos los paquetes' \
+		'  make check         test + lint' \
+		'  make ci            Todo lo que corre CI: check + typecheck + coverage + audit' \
+		'  make build         Construye la release; make verify-release la verifica' \
+		'  make install       Deja baldr-router y el adapter de Kiro en el PATH' \
+		'  make install-agent-runtime   Deja baldr-agent y baldr-agent-runner en el PATH' \
+		'' \
+		'Todo lo demás vive en scripts/dev.py y en cada paquete:' \
+		'  python scripts/dev.py typecheck|coverage|audit|build|verify-release' \
+		'  cd router && uv run --extra dev pytest -q        (un solo paquete)' \
+		'  npm --prefix facades/vscode-extension run check  (la extensión)'
+
+up:
+	$(UV) run --project $(ROUTER_DIR) baldr-router console --open --port "$(PORT)" \
+		$(if $(WORKSPACE),--workspace-root "$(WORKSPACE)")
+
+# So that `make localhost up` reads the way it sounds. Make runs a target once
+# per invocation, so this does not start the console twice.
+localhost: up
+
+down:
+	@echo 'La consola corre en primer plano: cortala con Ctrl-C en su terminal.'
 
 deps:
 	$(UV) sync --project $(ROUTER_DIR) --extra dev
@@ -66,107 +68,24 @@ test:
 lint:
 	$(PYTHON) scripts/dev.py lint
 
-typecheck:
-	$(PYTHON) scripts/dev.py typecheck
-
-coverage:
-	$(PYTHON) scripts/dev.py coverage
-
-audit:
-	$(PYTHON) scripts/dev.py audit
-
 check: test lint
 
-facades:
-	$(PYTHON) scripts/generate_facades.py
-
-facades-check:
-	$(PYTHON) scripts/generate_facades.py --check
-
-router-test:
-	cd $(ROUTER_DIR) && $(UV) run --extra dev pytest -q
-
-router-lint:
-	cd $(ROUTER_DIR) && $(UV) run --extra dev ruff check src tests
-	$(PYTHON) -m compileall -q $(ROUTER_DIR)/src
-
-adapter-test:
-	cd $(ADAPTER_DIR) && $(UV) run --extra dev pytest -q
-
-adapter-lint:
-	cd $(ADAPTER_DIR) && $(UV) run --extra dev ruff check src tests
-
-agent-sdk-test:
-	cd $(AGENT_SDK_DIR) && $(UV) run --extra dev pytest -q
-
-agent-sdk-typescript-test:
-	$(NPM) test --workspace @baldr/agent-sdk
-
-agent-builder-test:
-	cd $(AGENT_BUILDER_DIR) && $(UV) run --extra dev pytest -q
-
-agent-builder-typescript-test:
-	$(NPM) run build --workspace @baldr/agent-sdk
-	$(NPM) test --workspace @baldr/agent-builder-typescript
-
-agent-runner-test:
-	cd $(AGENT_RUNNER_DIR) && $(UV) run --extra dev pytest -q
-
-launcher-test:
-	$(NPM) --prefix $(LAUNCHER_DIR) test
-
-extension-install:
-	$(NPM) --prefix $(EXTENSION_DIR) ci --ignore-scripts --no-audit --no-fund
-
-extension-check:
-	$(NPM) --prefix $(EXTENSION_DIR) run check
-
-extension-test:
-	$(NPM) --prefix $(EXTENSION_DIR) test
-
-extension-package:
-	$(NPM) --prefix $(EXTENSION_DIR) run package
-
-extension-clean:
-	$(NPM) --prefix $(EXTENSION_DIR) run clean
+ci: check
+	$(PYTHON) scripts/dev.py typecheck
+	$(PYTHON) scripts/dev.py coverage
+	$(PYTHON) scripts/dev.py audit
 
 build:
 	$(PYTHON) scripts/dev.py build
 
-build-no-tests:
-	$(PYTHON) scripts/dev.py build --skip-tests
-
 verify-release:
 	$(PYTHON) scripts/dev.py verify-release
 
-release: build
-
-install-kiro:
-	$(UV) tool install --force --editable ./$(ROUTER_DIR) --with-editable ./$(ADAPTER_DIR) --with-executables-from baldr-kiro-adapter
+install:
+	$(UV) tool install --force --editable ./$(ROUTER_DIR) \
+		--with-editable ./$(ADAPTER_DIR) --with-executables-from baldr-kiro-adapter
 
 install-agent-runtime:
-	$(UV) tool install --force --editable ./$(AGENT_RUNNER_DIR) --with-editable ./$(AGENT_SDK_DIR) --with-editable ./$(AGENT_BUILDER_DIR) --with-executables-from baldr-agent-builder
-
-install-launcher:
-	cd $(LAUNCHER_DIR) && $(NPM) install -g .
-
-cli:
-	cd $(ROUTER_DIR) && $(UV) run baldr-router $(CLI_ARGS)
-
-mcp:
-	$(MAKE) cli CLI_ARGS="mcp"
-
-qualification-definitions:
-	$(MAKE) cli CLI_ARGS="qualification definitions"
-
-qualification-template:
-	$(PYTHON) scripts/dev.py qualification-template --profile "$(QUALIFICATION_PROFILE)" --output-dir "$(QUALIFICATION_TEMPLATE_DIR)"
-
-qualification-ci:
-	$(UV) run --project $(ROUTER_DIR) python scripts/run_qualification_ci.py \
-		--profile "$(QUALIFICATION_PROFILE)" \
-		--workspace-root "$(QUALIFICATION_WORKSPACE_ROOT)" \
-		--evidence-directory "$(QUALIFICATION_EVIDENCE_DIRECTORY)" \
-		--output-directory "$(QUALIFICATION_OUTPUT_DIRECTORY)" \
-		--repeat "$(QUALIFICATION_REPEAT)" \
-		$(if $(QUALIFICATION_CLIENT),--client "$(QUALIFICATION_CLIENT)")
+	$(UV) tool install --force --editable ./$(AGENT_RUNNER_DIR) \
+		--with-editable ./$(AGENT_SDK_DIR) --with-editable ./$(AGENT_BUILDER_DIR) \
+		--with-executables-from baldr-agent-builder
