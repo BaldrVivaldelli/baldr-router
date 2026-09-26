@@ -489,9 +489,24 @@ def workbench_options() -> dict[str, Any]:
             },
         ],
         "context_modes": [
-            {"id": "auto", "label": "Ayuda automática"},
-            {"id": "on", "label": "Ayuda activa"},
-            {"id": "off", "label": "Ayuda desactivada"},
+            {
+                "id": "auto",
+                "label": "Ayuda automática",
+                "description": "Sigue la configuración del router: consulta documentación sólo si Context7 ya está activo.",
+                "recommended": True,
+                "default": True,
+            },
+            {
+                "id": "on",
+                "label": "Ayuda activa",
+                "description": "Busca documentación actualizada para cada tarea, siempre que haya una API key disponible.",
+                "requires_context7_key": True,
+            },
+            {
+                "id": "off",
+                "label": "Ayuda desactivada",
+                "description": "Nunca consulta documentación externa.",
+            },
         ],
         "team_modes": [
             {

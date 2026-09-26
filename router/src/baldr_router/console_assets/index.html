@@ -285,6 +285,7 @@ let timer = null;
 let lastStates = new Map();
 let notified = false;
 let lastWorkbench = null;
+let context7State = null;
 let canCompose = false;
 let workspaceRoot = new URLSearchParams(location.search).get('workspace_root') || '';
 const drafts = new Map();
@@ -669,6 +670,39 @@ const SETTINGS_GROUPS = [
   ['team_mode', 'team_modes', 'Equipo', 'Cómo elige qué agente cubre cada fase.'],
 ];
 
+// Choosing a documentation mode says what you want; whether anything happens
+// depends on a key and a router mode the page does not own. Without this the
+// choice looks applied and silently does nothing, which is the worst of both.
+function context7Note(preferences) {
+  const state = context7State;
+  if (!state) return null;
+  const mode = preferences.context_mode;
+  const box = el('div', {});
+  let problem = '';
+  if (mode === 'on' && !state.api_key_available) {
+    problem = 'Elegiste «Ayuda activa», pero no hay API key. La tarea corre igual y sin documentación: no falla, simplemente no consulta.';
+  } else if (mode === 'on' && !state.injects_documentation) {
+    problem = `El router está en modo «${state.mode}», que no inyecta documentación en la tarea.`;
+  } else if (mode === 'auto' && !state.enabled) {
+    problem = 'Context7 está apagado en el router, así que «Ayuda automática» no consulta nada.';
+  } else if (mode === 'auto' && !state.api_key_available) {
+    problem = 'Context7 está activo en el router, pero no encuentra la API key, así que no va a consultar nada.';
+  }
+  if (problem) {
+    box.append(el('p', { class: 'notice', text: problem }));
+    box.append(el('p', {
+      class: 'action-hint',
+      text: 'Se configura desde la terminal, nunca pegando la key acá: baldr-router setup-context7 --mode hybrid',
+    }));
+  }
+  box.append(el('p', {
+    class: 'action-hint',
+    text: `Context7 ${state.enabled ? 'activo' : 'apagado'} en el router · modo ${state.mode} · `
+      + `key ${state.api_key_available ? 'disponible' : 'no disponible'} (${state.api_key_source}).`,
+  }));
+  return box;
+}
+
 // Every phase runs its profiles in order until one succeeds, so the primary is
 // simply the first. The router replaces the whole map rather than merging, so a
 // save always names all three phases.
@@ -822,7 +856,9 @@ function renderSettings(workbench, force) {
   const options = (workbench && workbench.options) || {};
   // The view polls, and rebuilding these controls under the pointer would drop
   // a half-made choice every three seconds.
-  const signature = JSON.stringify([preferences, options, workbench && workbench.profiles]);
+  const signature = JSON.stringify([
+    preferences, options, workbench && workbench.profiles, context7State,
+  ]);
   if (!force && host.dataset.signature === signature) return;
   host.dataset.signature = signature;
   host.replaceChildren();
@@ -848,12 +884,18 @@ function renderSettings(workbench, force) {
             document.createTextNode(option.label || option.id),
             option.recommended ? el('span', { class: 'flag', text: 'recomendada' }) : null,
             option.requires_confirmation ? el('span', { class: 'flag warn', text: 'sin protección' }) : null,
+            option.requires_context7_key && context7State && !context7State.api_key_available
+              ? el('span', { class: 'flag warn', text: 'falta la key' }) : null,
           ]),
           option.description ? el('div', { class: 'desc', text: option.description }) : null,
         ]),
       ]);
       input.addEventListener('change', () => savePreference(field, option.id, option, group));
       group.append(label);
+    }
+    if (field === 'context_mode') {
+      const note = context7Note(preferences);
+      if (note) group.append(note);
     }
     host.append(group);
   }
@@ -1108,6 +1150,7 @@ async function refresh() {
     if (!response.ok) throw new Error('HTTP ' + response.status);
     const payload = await response.json();
     const workbench = payload.workbench || {};
+    context7State = payload.context7 || null;
     document.getElementById('scope').textContent = workbench.items && workbench.items.length
       ? 'tareas durables' : '';
     renderCounts(workbench.counts, workbench.total);

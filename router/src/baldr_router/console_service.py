@@ -39,12 +39,13 @@ import socket
 import threading
 import time
 import webbrowser
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import parse_qs, quote, urlparse
 
+from .context7_setup import context7_runtime_status
 from .diagnostics import get_logger, log_suppressed
 from .discovery.inventory import attachment_record, workspace_listing
 from .facade import facade_run, facade_status_report
@@ -101,6 +102,10 @@ _WORKSPACES_TTL = 10.0
 # Enumerating a repository shells out to Git, and the picker is reopened and
 # refiltered far more often than a working tree changes shape.
 _LISTING_TTL = 15.0
+# Whether Context7 has a key, whether the workspace is a trusted Git repository:
+# state the configuration screen needs to tell the truth, and that only changes
+# when somebody runs a command.
+_ENVIRONMENT_TTL = 15.0
 # A task points at context; it does not carry it. Each attachment costs one
 # path in the prompt, and a task that needs more than this wants a narrower
 # request or a directory.
@@ -229,49 +234,69 @@ class ConsoleHTTPServer(ThreadingHTTPServer):
         self.workspace_root = workspace_root
         self.token = token or new_console_token()
         self.starts = threading.BoundedSemaphore(_MAX_CONCURRENT_STARTS)
-        self._workspaces: tuple[float, list[dict[str, Any]]] | None = None
-        self._workspaces_lock = threading.Lock()
-        self._listings: dict[str, tuple[float, dict[str, Any]]] = {}
-        self._listings_lock = threading.Lock()
+        self._memo: dict[str, tuple[float, Any]] = {}
+        self._memo_lock = threading.Lock()
         super().__init__(address, handler_class)
 
-    def workspaces(self) -> list[dict[str, Any]]:
-        """Return the selectable workspaces, recomputed at most every few seconds.
+    def _cached(self, key: str, ttl: float, build: Callable[[], Any]) -> Any:
+        """Memoize a read the page polls for but that a command alone changes.
 
-        The page polls, and this opens a durable store to answer. Doing that per
-        poll put an integrity check on a hot path for a list that only changes
-        when somebody trusts a repository or works in a new one.
+        Everything cached here comes from the durable store, configuration, the
+        secret store or Git, and none of it moves unless somebody runs
+        something. What this avoids is paying for all of it several times a
+        minute per open tab. The build runs outside the lock, so a slow one
+        delays its own caller rather than every other reader.
         """
-        with self._workspaces_lock:
-            cached = self._workspaces
-            if cached is not None and time.monotonic() - cached[0] < _WORKSPACES_TTL:
+        now = time.monotonic()
+        with self._memo_lock:
+            cached = self._memo.get(key)
+            if cached is not None and cached[0] > now:
                 return cached[1]
-        fresh = selectable_workspaces()
-        with self._workspaces_lock:
-            self._workspaces = (time.monotonic(), fresh)
+        fresh = build()
+        with self._memo_lock:
+            # Expiry is stored rather than the birth time, so entries with
+            # different lifetimes can be swept by one rule.
+            self._memo = {
+                name: value for name, value in self._memo.items() if value[0] > now
+            }
+            self._memo[key] = (time.monotonic() + ttl, fresh)
         return fresh
 
+    def workspaces(self) -> list[dict[str, Any]]:
+        """Return the selectable workspaces.
+
+        This opens a durable store to answer. Doing that per poll put an
+        integrity check on a three-second path for a list that only changes when
+        somebody trusts a repository or works in a new one.
+        """
+        return cast(
+            "list[dict[str, Any]]",
+            self._cached("workspaces", _WORKSPACES_TTL, selectable_workspaces),
+        )
+
     def listing(self, workspace_root: str) -> dict[str, Any]:
-        """Return this workspace's attachable paths, recomputed now and then.
+        """Return this workspace's attachable paths.
 
         Only the picker reads this, and it is a view: whether a path may really
         be attached is decided per path when a task is composed, so a listing
         that went a few seconds stale can mislead nobody.
         """
-        now = time.monotonic()
-        with self._listings_lock:
-            cached = self._listings.get(workspace_root)
-            if cached is not None and now - cached[0] < _LISTING_TTL:
-                return cached[1]
-        fresh = workspace_listing(workspace_root)
-        with self._listings_lock:
-            self._listings = {
-                root: value
-                for root, value in self._listings.items()
-                if now - value[0] < _LISTING_TTL
-            }
-            self._listings[workspace_root] = (time.monotonic(), fresh)
-        return fresh
+        return cast(
+            "dict[str, Any]",
+            self._cached(
+                f"listing:{workspace_root}",
+                _LISTING_TTL,
+                lambda: workspace_listing(workspace_root),
+            ),
+        )
+
+    def context7(self) -> dict[str, Any]:
+        """Report whether Context7 would actually contribute to a run."""
+
+        return cast(
+            "dict[str, Any]",
+            self._cached("context7", _ENVIRONMENT_TTL, context7_runtime_status),
+        )
 
 
 class ConsoleRequestHandler(BaseHTTPRequestHandler):
@@ -445,13 +470,16 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             workbench_only=True,
         )
         # The picker and the current scope travel with the view so the page
-        # never has to guess where it is pointed.
+        # never has to guess where it is pointed. Context7's state travels with
+        # it too: a mode can be selected and still change nothing about a run,
+        # and a screen that cannot say so is where that surprise comes from.
         self._json(
             {
                 **report,
                 "workspace_root": workspace_root,
                 "workspace_locked": bool(self._console.workspace_root),
                 "workspaces": self._console.workspaces(),
+                "context7": self._console.context7(),
             }
         )
 

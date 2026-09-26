@@ -18,6 +18,31 @@ def _safe_env_name(value: str) -> str:
     return name
 
 
+def context7_runtime_status() -> dict[str, Any]:
+    """Report whether Context7 can actually contribute anything, without secrets.
+
+    "Enabled" is not the question a client needs answered. A mode can be
+    configured and a per-workspace policy can ask for documentation, and still
+    nothing reaches a provider: the injection step degrades to a reason string
+    when the key is unavailable or the mode cannot prefetch. So this reports the
+    conditions together, and names the key's source without reading it out.
+    """
+    cfg = load_config()
+    mode = str(cfg.context7.mode or "off")
+    return {
+        "enabled": bool(cfg.context7.enabled),
+        "mode": mode,
+        "api_key_source": cfg.context7.api_key_source,
+        "api_key_available": bool(read_context7_api_key(cfg.context7.api_key_source)),
+        "install_codex_mcp": cfg.context7.install_codex_mcp,
+        "inject_docs": cfg.context7.inject_docs,
+        # Only these two modes prefetch documentation into a task's context.
+        "injects_documentation": bool(
+            cfg.context7.inject_docs and mode in {"router-cache", "hybrid"}
+        ),
+    }
+
+
 def context7_onboarding_plan() -> dict[str, Any]:
     """Return a non-secret Context7 onboarding plan for any MCP client.
 
@@ -25,17 +50,7 @@ def context7_onboarding_plan() -> dict[str, Any]:
     the client a structured decision tree so it asks the user whether they
     want Context7 before showing setup commands.
     """
-    cfg = load_config()
-    key_available = bool(read_context7_api_key(cfg.context7.api_key_source))
-    current = {
-        "enabled": cfg.context7.enabled,
-        "mode": cfg.context7.mode,
-        "api_key_source": cfg.context7.api_key_source,
-        "api_key_available": key_available,
-        "install_codex_mcp": cfg.context7.install_codex_mcp,
-        "inject_docs": cfg.context7.inject_docs,
-        "cache": cache_status(),
-    }
+    current = {**context7_runtime_status(), "cache": cache_status()}
 
     return {
         "ok": True,

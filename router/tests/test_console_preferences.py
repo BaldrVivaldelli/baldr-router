@@ -334,6 +334,50 @@ def test_the_phase_team_saves_without_any_other_preference(
     assert payload["preferences"]["role_profiles"]["architect"] == ["default"]
 
 
+# --- whether the documentation setting can do anything -----------------------
+
+
+def _workbench(console: str) -> dict:
+    request = urllib.request.Request(
+        f"{console}/v1/workbench", headers={TOKEN_HEADER: TOKEN}
+    )
+    with urllib.request.urlopen(request, timeout=15) as response:
+        return dict(json.loads(response.read()))
+
+
+def test_the_view_reports_whether_context7_can_contribute(console: str) -> None:
+    """A mode can be selected and still change nothing, so the state travels."""
+
+    state = _workbench(console)["context7"]
+
+    assert state["api_key_available"] is False
+    assert state["api_key_source"] == "env:CONTEXT7_API_KEY"
+    assert isinstance(state["enabled"], bool)
+
+
+def test_the_context7_state_never_carries_the_key(
+    console: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CONTEXT7_API_KEY", "ctx7-super-secret-value")
+
+    payload = _workbench(console)
+
+    assert payload["context7"]["api_key_available"] is True
+    # The source is the name of where the key lives, never the key.
+    assert "ctx7-super-secret-value" not in json.dumps(payload)
+
+
+def test_the_page_warns_that_an_active_helper_without_a_key_does_nothing() -> None:
+    from baldr_router.console_service import console_asset_path
+
+    page = console_asset_path().read_text(encoding="utf-8")
+
+    assert "falta la key" in page
+    assert "api_key_available" in page
+    # Keys are never collected by the page, only reported as present or not.
+    assert "setup-context7" in page
+
+
 def test_the_page_says_when_the_preset_overrides_the_phase_team() -> None:
     """Only the custom preset respects per-profile effort, so the page says so."""
 
